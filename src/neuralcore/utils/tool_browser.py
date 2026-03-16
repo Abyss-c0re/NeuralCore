@@ -1,6 +1,6 @@
-from src.actions.actions import Action
-from src.actions.registry import ActionRegistry
-from src.actions.manager import DynamicActionManager
+from src.neuralcore.actions.actions import Action
+from src.neuralcore.actions.registry import ActionRegistry
+from src.neuralcore.actions.manager import DynamicActionManager
 
 class ToolBrowser(Action):
     def __init__(self, registry: ActionRegistry, manager: DynamicActionManager):

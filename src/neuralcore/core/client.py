@@ -4,14 +4,14 @@ import json
 import tiktoken
 from openai import AsyncOpenAI, OpenAI
 from openai.types.chat import ChatCompletionMessageToolCall
-from src.actions.actions import Action, ActionSet
-from src.actions.manager import DynamicActionManager
-from src.utils.exceptions_handler import ConfirmationRequired
+from src.neuralcore.actions.actions import Action, ActionSet
+from src.neuralcore.actions.manager import DynamicActionManager
+from src.neuralcore.utils.exceptions_handler import ConfirmationRequired
 from typing import AsyncIterator, Callable, Tuple
 
 import numpy as np
 
-from src.utils.logger import Logger
+from src.neuralcore.utils.logger import Logger
 
 ToolProvider = Union[ActionSet, DynamicActionManager, List[Dict[str, Any]]]
 ToolExecutorGetter = Optional[Callable[[str], Optional["Action"]]]

@@ -1,7 +1,7 @@
 import platform
 import re
 from datetime import datetime
-from src.utils.logger import Logger
+from src.neuralcore.utils.logger import Logger
 
 logger = Logger.get_logger()
 

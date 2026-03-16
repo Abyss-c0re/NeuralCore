@@ -1,5 +1,5 @@
 import aiofiles
-from src.actions.actions import Action, ActionSet
+from src.neuralcore.actions.actions import Action, ActionSet
 
 
 def exec_write_file(file_path: str, content: str, append: bool = False) -> str:
