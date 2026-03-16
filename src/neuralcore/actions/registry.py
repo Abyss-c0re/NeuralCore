@@ -1,8 +1,8 @@
 import math
 from typing import Dict
-from src.neuralcore.actions.actions import Action, ActionSet
+from neuralcore.actions.actions import Action, ActionSet
 
-from src.neuralcore.utils.search import keyword_score, fuzzy_score
+from neuralcore.utils.search import keyword_score, fuzzy_score
 
 
 class ActionRegistry:

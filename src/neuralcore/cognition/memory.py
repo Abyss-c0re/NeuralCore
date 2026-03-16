@@ -3,12 +3,12 @@ import re
 import asyncio
 import numpy as np
 from datetime import datetime
-from src.neuralcore.utils.logger import Logger
+from neuralcore.utils.logger import Logger
 from typing import Tuple, Optional
-from src.neuralcore.core.prompt_builder import PromptBuilder as PromptHelper
-from src.neuralcore.utils.file_utils import open_file_async
-from src.neuralcore.utils.terminal_utils import exec_tree
-from src.neuralcore.core.client import LLMClient
+from neuralcore.core.prompt_builder import PromptBuilder as PromptHelper
+from neuralcore.utils.file_utils import open_file_async
+from neuralcore.utils.terminal_utils import exec_tree
+from neuralcore.core.client import LLMClient
 
 
 MSG_THR = 0.5  # Simularity threshold for history

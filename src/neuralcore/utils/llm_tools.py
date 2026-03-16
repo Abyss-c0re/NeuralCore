@@ -1,7 +1,7 @@
 from typing import List, Callable, Any, Optional
 import inspect
 
-from src.neuralcore.actions.actions import Action, ActionSet
+from neuralcore.actions.actions import Action, ActionSet
 
 
 class InternalTools:

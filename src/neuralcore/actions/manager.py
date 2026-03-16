@@ -1,6 +1,6 @@
 from typing import Any, Dict, Optional, List
-from src.neuralcore.actions.actions import Action, ActionSet
-from src.neuralcore.actions.registry import ActionRegistry
+from neuralcore.actions.actions import Action, ActionSet
+from neuralcore.actions.registry import ActionRegistry
 
 
 class DynamicActionManager:
