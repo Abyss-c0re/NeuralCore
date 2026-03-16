@@ -1,23 +1,31 @@
 [project]
 name = "neuralcore"
 version = "0.1.0"
-description = "Add your description here"
+description = "NeuralCore framework for AI applications"
 readme = "README.md"
 authors = [
     { name = "Abyss-c0re", email = "dev@abyss-core.com" }
 ]
 requires-python = ">=3.14"
+
+# Runtime dependencies
 dependencies = [
     "aiofiles>=25.1.0",
-    "asyncio>=4.0.0",
     "numpy>=2.4.3",
     "openai>=2.28.0",
     "rapidfuzz>=3.14.3",
-    "tokenizers>=0.22.2",
+    "tokenizers>=0.22.2"
+]
+
+# Optional dev dependencies
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2.0",
+    "black>=24.3.0"
 ]
 
 [build-system]
-requires = ["uv_build>=0.10.10,<0.11.0", "toml"]
+requires = ["uv_build>=0.10.10,<0.11.0"]
 build-backend = "uv_build"
 
 [tool.pyright]
