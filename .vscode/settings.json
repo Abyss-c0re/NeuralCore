@@ -1,0 +1,9 @@
+{
+  "python.pythonPath": "/home/voldemar/Dev/AI/ProjectNexus/NeuralCore/.venv/bin/python",
+  "python.autoComplete.extraPaths": [
+    "/home/voldemar/Dev/AI/ProjectNexus/NeuralCore/.venv/lib/python3.x/site-packages"
+  ],
+  "python.analysis.extraPaths": [
+    "/home/voldemar/Dev/AI/ProjectNexus/NeuralCore/.venv/lib/python3.x/site-packages"
+  ]
+}

@@ -7,6 +7,7 @@ from src.neuralcore.utils.logger import Logger
 from typing import Tuple, Optional
 from src.neuralcore.core.prompt_builder import PromptBuilder as PromptHelper
 from src.neuralcore.utils.file_utils import open_file_async
+from src.neuralcore.utils.terminal_utils import exec_tree
 from src.neuralcore.core.client import LLMClient
 
 
@@ -49,7 +50,7 @@ class Project:
     def __init__(self, name: str = "") -> None:
         self.name: str = name
         self.file_embeddings: dict[str, dict] = {}
-        self.folder_structure: dict = {}
+        self.folder_structure: str = ""
 
     def _index_content(
         self,
@@ -124,7 +125,7 @@ class ContextManager:
     def __init__(
         self,
         client: LLMClient,
-        file_utils,  # Instance with .generate_structure method (from test.file_utils or manager)
+        # Instance with .generate_structure method (from test.file_utils or manager)
     ) -> None:
         """
         ContextManager.
@@ -134,7 +135,6 @@ class ContextManager:
         file_utils is passed explicitly for folder structure generation and _read_file.
         """
         self.client = client
-        self.file_utils = file_utils
 
         self.similarity_threshold = MSG_THR
         self.topics: list[Topic] = []
@@ -180,9 +180,7 @@ class ContextManager:
                 new_project = Project(new_project_name)
                 try:
                     folder_path = os.path.dirname(file_path)
-                    structure = self.file_utils.generate_structure(
-                        folder_path, folder_path
-                    )
+                    structure = exec_tree(folder_path)
                     new_project.folder_structure = structure
                     logger.info(
                         f"Generated new folder structure for project '{new_project_name}'."
@@ -215,25 +213,7 @@ class ContextManager:
 
         logger.info(f"Stored terminal output for command: {command}")
 
-    def add_folder_structure(self, structure: dict) -> None:
-        if self.current_project.folder_structure:
-            if self.current_project not in self.projects:
-                self.projects.append(self.current_project)
-                logger.info(
-                    f"Archived project '{self.current_project.name}' to projects list."
-                )
-
-        if (
-            not self.current_project.name
-            or self.current_project.name.lower() == "unsorted"
-        ):
-            if isinstance(structure, dict) and len(structure) == 1:
-                new_name = list(structure.keys())[0]
-                self.current_project.name = new_name
-                logger.info(
-                    f"Assigned new project name '{new_name}' from folder structure."
-                )
-
+    def add_folder_structure(self, structure: str) -> None:
         self.current_project.folder_structure = structure
         logger.info(
             f"Folder structure updated for project '{self.current_project.name}'."
@@ -438,7 +418,9 @@ class ContextManager:
 
         if relevant_content:
             if self.current_project.folder_structure:
-                content_references += f"Folder structure:\n{self.format_structure(self.current_project.folder_structure)}\n"
+                content_references += (
+                    f"Folder structure:\n{self.current_project.folder_structure}\n"
+                )
             for identifier, content in relevant_content:
                 content_type = self.current_project.file_embeddings.get(
                     identifier, {}
