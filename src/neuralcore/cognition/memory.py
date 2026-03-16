@@ -4,11 +4,12 @@ import asyncio
 import numpy as np
 from datetime import datetime
 from neuralcore.utils.logger import Logger
-from typing import Tuple, Optional
-from neuralcore.core.prompt_builder import PromptBuilder as PromptHelper
+from typing import Tuple, Optional, List, Dict, Any
+from neuralcore.utils.prompt_builder import PromptBuilder as PromptHelper
 from neuralcore.utils.file_utils import open_file_async
 from neuralcore.utils.terminal_utils import exec_tree
 from neuralcore.core.client import LLMClient
+from neuralcore.utils.text_tokenizer import TextTokenizer
 
 
 MSG_THR = 0.5  # Simularity threshold for history
@@ -125,6 +126,7 @@ class ContextManager:
     def __init__(
         self,
         client: LLMClient,
+        tokenizer: TextTokenizer
         # Instance with .generate_structure method (from test.file_utils or manager)
     ) -> None:
         """
@@ -135,6 +137,7 @@ class ContextManager:
         file_utils is passed explicitly for folder structure generation and _read_file.
         """
         self.client = client
+        self.tokenizer = tokenizer
 
         self.similarity_threshold = MSG_THR
         self.topics: list[Topic] = []
@@ -402,46 +405,132 @@ class ContextManager:
             logger.info("No suitable topic found.")
         return best_topic
 
-    async def generate_prompt(self, query: str, num_messages: int = NUM_MSG) -> list:
+    async def generate_prompt(
+        self,
+        query: str,
+        num_messages: int = NUM_MSG,
+        max_input_tokens: int = 22000,
+        reserved_for_output: int = 2048,
+        system_prompt: str = "",
+    ) -> List[Dict[str, Any]]:
+        """
+        Builds a message list that should fit within max_input_tokens.
+        Order of priority:
+        1. System prompt (if any)
+        2. Folder structure
+        3. Relevant files / terminal outputs
+        4. Recent conversation history
+        5. Current user query (always last)
+
+        Uses real Qwen tokenizer for counting.
+        """
+        # ── 0. Preparation ───────────────────────────────────────────────
         embedding = await self.fetch_embedding(query)
 
-        current_topic = await self._match_topic(embedding)
-        if current_topic:
-            await self.switch_topic(current_topic)
+        # Topic switching (your existing logic)
+        current_topic_match = await self._match_topic(embedding)
+        if current_topic_match:
+            await self.switch_topic(current_topic_match)
 
+        # Project switching based on query
         project = self.find_project_structure(query)
         if project:
             self.current_project = project
 
-        relevant_content = await self.get_relevant_content(query)
-        content_references = ""
+        # Get relevant files/terminal outputs
+        relevant_content = await self.get_relevant_content(
+            query,
+            top_k=6,                     # increased a bit — you can tune
+            similarity_threshold=CONT_THR
+        ) or []  # ensure it's always a list
 
-        if relevant_content:
-            if self.current_project.folder_structure:
-                content_references += (
-                    f"Folder structure:\n{self.current_project.folder_structure}\n"
-                )
-            for identifier, content in relevant_content:
-                content_type = self.current_project.file_embeddings.get(
-                    identifier, {}
-                ).get("type", "content")
-                label = (
-                    "Referenced File"
-                    if content_type == "file"
-                    else "Referenced Terminal Output"
-                    if content_type == "terminal"
-                    else "Referenced Content"
-                )
-                content_references += f"\n[{label}: {identifier}]\n{content}\n"
+        # ── 1. Initialize result ─────────────────────────────────────────
+        messages: List[Dict[str, Any]] = []
+        total_tokens = 0
 
-        prompt = (
-            f"{content_references}\nUser query: {query}"
-            if content_references
-            else query
+        # Safety buffer: leave room for formatting overhead + output
+        max_usable = max_input_tokens - reserved_for_output - 800
+
+        def add_message(role: str, content: str) -> int:
+            """Helper: add message and return tokens used (incl. rough overhead)"""
+            if not content.strip():
+                return 0
+            messages.append({"role": role, "content": content})
+            # Qwen3.5 chat format overhead: ~6–12 tokens per message (im_start, role, im_end, etc.)
+            return self.tokenizer.count_tokens(content) + 10
+
+        # ── 2. System prompt (highest priority) ──────────────────────────
+        if system_prompt:
+            tk = add_message("system", system_prompt)
+            total_tokens += tk
+            if total_tokens > max_usable:
+                logger.warning("System prompt alone exceeds usable limit → emergency fallback")
+                return [{"role": "user", "content": query}]
+
+        # ── 3. Folder structure ──────────────────────────────────────────
+        if self.current_project.folder_structure:
+            folder_block = (
+                "Current project folder structure:\n"
+                f"{self.current_project.folder_structure}\n"
+            )
+            tk = add_message("system", folder_block)
+            total_tokens += tk
+
+        # ── 4. Relevant files / terminal outputs ─────────────────────────
+        for identifier, content in relevant_content[:6]:  # cap at 6 to avoid explosion
+            if total_tokens >= max_usable:
+                break
+            is_file = "file" in identifier.lower()
+            label = "Referenced File" if is_file else "Referenced Terminal Output"
+            block = f"[{label}: {identifier}]\n{content.strip()}\n"
+            tk = add_message("system", block)  # system role = cleaner separation
+            total_tokens += tk
+
+        # ── 5. Conversation history (greedy from newest) ─────────────────
+        # Take more than num_messages so we have room to drop old ones
+        history_candidates = self.current_topic.history[-num_messages * 3:]
+        history_candidates.reverse()  # newest messages first
+
+        selected_history = []
+        for msg in history_candidates:
+            if total_tokens >= max_usable:
+                break
+
+            content = (msg.get("content") or "").strip()
+            if not content:
+                continue
+
+            tk_estimate = self.tokenizer.count_tokens(content) + 10
+            if total_tokens + tk_estimate <= max_usable:
+                selected_history.append(msg)
+                total_tokens += tk_estimate
+            else:
+                # Last chance: truncate very long old message
+                if tk_estimate > 400 and total_tokens + 400 < max_usable:
+                    truncated = content[:1500] + "… [truncated due to context limit]"
+                    selected_history.append({"role": msg["role"], "content": truncated})
+                    total_tokens += self.tokenizer.count_tokens(truncated) + 10
+                break
+
+        # Add them in chronological order (old → new)
+        messages.extend(reversed(selected_history))
+
+        # ── 6. Current user query — always included last ─────────────────
+        user_content = query.strip()
+        total_tokens += add_message("user", user_content)
+
+        # ── Logging & safety check ───────────────────────────────────────
+        logger.info(
+            f"generate_prompt → estimated tokens: {total_tokens:,} / {max_input_tokens:,} "
+            f"(usable: {max_usable:,}, history msgs: {len(selected_history)})"
         )
 
-        await self.add_message("user", prompt, embedding)
-        return self.current_topic.history[-num_messages:]
+        if total_tokens > max_input_tokens:
+            logger.warning(
+                f"Final prompt exceeds requested limit by {total_tokens - max_input_tokens:,} tokens"
+            )
+
+        return messages
 
     async def generate_topic_info_from_history(
         self, history: list, max_retries: int = 3

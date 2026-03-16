@@ -1,12 +1,13 @@
 import asyncio
 from typing import List, Dict, Any, Optional, Union
 import json
-import tiktoken
+
 from openai import AsyncOpenAI, OpenAI
 from openai.types.chat import ChatCompletionMessageToolCall
 from neuralcore.actions.actions import Action, ActionSet
 from neuralcore.actions.manager import DynamicActionManager
 from neuralcore.utils.exceptions_handler import ConfirmationRequired
+from neuralcore.utils.text_tokenizer import TextTokenizer
 from typing import AsyncIterator, Callable, Tuple
 
 import numpy as np
@@ -18,36 +19,6 @@ ToolExecutorGetter = Optional[Callable[[str], Optional["Action"]]]
 
 
 logger = Logger.get_logger()
-
-MAX_CHUNK_TOKENS = 900  # safety margin below 1024
-OVERLAP_TOKENS = 100
-
-# Rough tokenizer - cl100k_base is usually close enough for modern models
-_tokenizer = tiktoken.get_encoding("cl100k_base")
-
-
-def split_text_into_chunks(
-    text: str, max_tokens: int = MAX_CHUNK_TOKENS, overlap: int = OVERLAP_TOKENS
-) -> List[str]:
-    """Split text into overlapping chunks that fit within max_tokens."""
-    if not text.strip():
-        return []
-
-    tokens = _tokenizer.encode(text, allowed_special="all")
-    if len(tokens) <= max_tokens:
-        return [text]
-
-    chunks = []
-    start_idx = 0
-
-    while start_idx < len(tokens):
-        end_idx = min(start_idx + max_tokens, len(tokens))
-        chunk_tokens = tokens[start_idx:end_idx]
-        chunk_text = _tokenizer.decode(chunk_tokens)
-        chunks.append(chunk_text)
-        start_idx += max_tokens - overlap
-
-    return chunks
 
 
 async def embed_single_chunk(
@@ -64,20 +35,6 @@ async def embed_single_chunk(
     except Exception as e:
         logger.error(f"Embedding chunk failed: {str(e)[:180]}...")
         return None
-
-
-def count_message_tokens(messages: List[dict]) -> int:
-    """Approximate token count for a list of messages."""
-    total = 0
-    for msg in messages:
-        content = msg.get("content", "")
-        if isinstance(content, str):
-            total += len(_tokenizer.encode(content))
-        elif isinstance(content, list):
-            for item in content:
-                if item.get("type") == "text":
-                    total += len(_tokenizer.encode(item.get("text", "")))
-    return total  # Approximate, ignores role tokens etc.
 
 
 @staticmethod
@@ -108,6 +65,7 @@ class LLMClient:
         self,
         base_url: str,
         model: str,
+        tokenizer: Optional[Union[str, "TextTokenizer"]] = None, 
         api_key: str = "not-needed",
         extra_body: Optional[Dict[str, Any]] = None,
         default_temperature: float = 0.7,
@@ -118,6 +76,11 @@ class LLMClient:
         self.default_temperature = default_temperature
         self.default_max_tokens = default_max_tokens
         self.extra_body_default = extra_body or {}
+        # Accept either a string (to wrap) or an existing tokenizer instance
+        if isinstance(tokenizer, str):
+            self.tokenizer = TextTokenizer(tokenizer)
+        else:
+            self.tokenizer = tokenizer
 
         self.client = AsyncOpenAI(
             base_url=self.base_url,
@@ -221,7 +184,7 @@ class LLMClient:
         """
         Asynchronously fetches and caches an embedding for the given text.
         Automatically chunks long inputs and averages the results.
-        Returns plain list[float] to stay compatible with original behavior.
+        Returns np.ndarray or None if embedding fails.
         """
         try:
             logger.info(f"Fetching embedding | input chars: {len(text)}")
@@ -230,8 +193,15 @@ class LLMClient:
                 logger.info("Empty input → returning None")
                 return None
 
-            # Split into chunks if necessary
-            chunks = split_text_into_chunks(text)
+            # Use tokenizer if available, else treat whole text as single chunk
+            if self.tokenizer:
+                chunks = self.tokenizer.split_text_into_chunks(text)
+            else:
+                logger.warning(
+                    "Tokenizer not available, treating entire text as a single chunk"
+                )
+                chunks = [text]
+
             logger.debug(f"Processing {len(chunks)} chunk(s)")
 
             if not chunks:
@@ -256,10 +226,8 @@ class LLMClient:
             if norm > 1e-9:
                 mean_vec /= norm
 
-            embedding_list = mean_vec.tolist()
-
             logger.debug(
-                f"Final embedding dimension: {len(embedding_list)} "
+                f"Final embedding dimension: {len(mean_vec)} "
                 f"(averaged from {len(chunk_embeddings)} chunk(s))"
             )
 
@@ -269,7 +237,7 @@ class LLMClient:
             logger.error(
                 f"Error fetching embedding for text (length {len(text)}): {str(e)}"
             )
-        return None
+            return None
 
     # -------------------------------------------------------------------------
     # Non-streaming chat (async + sync)
@@ -381,7 +349,7 @@ class LLMClient:
             }
         ]
 
-        logger.debug(f"Describing image | tokens ≈ {count_message_tokens(messages)}")
+        # logger.debug(f"Describing image | tokens ≈ {count_message_tokens(messages)}")
 
         merged_extra = {**self.extra_body_default, **(extra_body or {})}
 
@@ -781,13 +749,13 @@ class LLMClient:
         messages_so_far: List[Dict[str, Any]],  # ← caller provides this
         system_prompt: str = "",
         get_executor: ToolExecutorGetter = None,
-        history_manager=None,  # ← optional, passed in
+        context_manager=None,  # ← optional, passed in
         max_iterations: int = 25,
         temperature: float = 0.3,
         max_tokens: int = 12048,
     ) -> AsyncIterator[Tuple[str, Any]]:
         """
-        Does **not** read self.conversation, self.history_manager, self.system_prompt
+        Does **not** read self.conversation, self.context_manager, self.system_prompt
         """
 
         # Tool accessors (unchanged)
@@ -805,10 +773,10 @@ class LLMClient:
         if system_prompt and not any(m["role"] == "system" for m in messages):
             messages.insert(0, {"role": "system", "content": system_prompt})
 
-        # Context enrichment — only if caller provides history_manager
-        if history_manager is not None:
+        # Context enrichment — only if caller provides context_manager
+        if context_manager is not None:
             try:
-                context_history = await history_manager.generate_prompt(
+                context_history = await context_manager.generate_prompt(
                     user_prompt, num_messages=0
                 )
                 if (
