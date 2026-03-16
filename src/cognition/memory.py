@@ -8,7 +8,7 @@ from typing import Tuple, Optional
 from src.core.prompt_builder import PromptBuilder as PromptHelper
 from src.utils.file_utils import _read_file
 from src.core.client import LLMClient
-from sklearn.metrics.pairwise import cosine_similarity
+
 
 MSG_THR = 0.5  # Simularity threshold for history
 CONT_THR = 0.6  # Simularity threshold for content such as files and terminal output
@@ -19,6 +19,30 @@ SLICE_SIZE = 4  # Last N messages to analyze for off-topic
 
 
 logger = Logger.get_logger()
+
+
+def cosine_similarity(vec1, vec2):
+    """
+    Custom function to compute the cosine similarity between two vectors.
+    Optimized for speed.
+    """
+    # Convert the vectors to numpy arrays if they are not already
+    vec1 = np.asarray(vec1)
+    vec2 = np.asarray(vec2)
+
+    # Calculate dot product
+    dot_product = np.dot(vec1, vec2)
+
+    # Calculate squared norms of the vectors (avoids the use of np.linalg.norm)
+    norm_vec1_sq = np.sum(vec1**2)
+    norm_vec2_sq = np.sum(vec2**2)
+
+    # If either vector is a zero vector, return 0.0
+    if norm_vec1_sq == 0 or norm_vec2_sq == 0:
+        return 0.0
+
+    # Calculate and return the cosine similarity
+    return dot_product / (np.sqrt(norm_vec1_sq) * np.sqrt(norm_vec2_sq))
 
 
 class Project:
@@ -80,7 +104,15 @@ class Topic:
             logger.info("No history embeddings found. Returning empty context.")
             return 0.0, -1
 
-        similarities = cosine_similarity([embedding], self.history_embeddings)[0]
+        # Ensure embedding is a numpy array
+        embedding = np.array(embedding)
+
+        # Check if each embedding in history_embeddings is also a numpy array
+        similarities = [
+            cosine_similarity(np.array(embedding), np.array(history_emb))
+            for history_emb in self.history_embeddings
+        ]
+
         best_index = int(np.argmax(similarities))
         best_similarity = float(similarities[best_index])
         logger.debug(f"Best similarity score: {best_similarity} at index {best_index}")
@@ -95,9 +127,7 @@ class ContextManager:
         file_utils,  # Instance with .generate_structure method (from test.file_utils or manager)
     ) -> None:
         """
-        Adapted ContextManager for the new TUI project.
-
-        No longer depends on the old 'manager' object.
+        ContextManager.
         Uses two LLMClient instances:
             - client: for all embeddings (fetch_embedding)
             - client: for internal topic extraction queries (can be the same instance if desired)
@@ -252,6 +282,7 @@ class ContextManager:
         similarity_threshold: float = CONT_THR,
     ) -> list | None:
         query_embedding = await self.fetch_embedding(query)
+        query_embedding = np.array(query_embedding)  # Ensure it is a numpy array
         scores = []
 
         file_name = (
@@ -270,7 +301,10 @@ class ContextManager:
                     logger.info(f"Added file '{identifier}' to context (Exact match).")
                     continue
 
-            similarity = cosine_similarity([query_embedding], [info["embedding"]])[0][0]
+            # Ensure that both embeddings are numpy arrays
+            similarity = cosine_similarity(
+                np.array(query_embedding), np.array(info["embedding"])
+            )
             if similarity >= similarity_threshold:
                 scores.append((identifier, similarity))
                 logger.info(
@@ -286,8 +320,8 @@ class ContextManager:
                     if content_type and info.get("type") != content_type:
                         continue
                     similarity = cosine_similarity(
-                        [query_embedding], [info["embedding"]]
-                    )[0][0]
+                        np.array(query_embedding), np.array(info["embedding"])
+                    )
                     if similarity >= similarity_threshold:
                         scores.append((identifier, similarity))
                         logger.info(
@@ -346,23 +380,35 @@ class ContextManager:
             return None
 
         async def compute_similarity(topic: Topic) -> tuple[float, Topic]:
+            # Ensure embedded_description is a numpy array
+            if not isinstance(topic.embedded_description, np.ndarray):
+                topic.embedded_description = np.array(topic.embedded_description)
+
+            # Return 0 similarity if either embedding or embedded_description is empty
             if len(topic.embedded_description) == 0 or len(embedding) == 0:
                 return 0.0, topic
-            similarity = cosine_similarity([embedding], [topic.embedded_description])[
-                0
-            ][0]
+
+            # Compute cosine similarity using your custom function
+            similarity_result = cosine_similarity(embedding, topic.embedded_description)
+
+            # Directly assign the similarity_result (which is a float) to similarity
+            similarity = similarity_result
+
             logger.debug(
                 f"Computed similarity {similarity:.4f} for topic '{topic.name}'"
             )
             return similarity, topic
 
+        # Run compute_similarity in parallel for all topics excluding the given one
         tasks = [
             compute_similarity(topic) for topic in self.topics if topic != exclude_topic
         ]
         results = await asyncio.gather(*tasks)
 
-        best_topic = None
         best_similarity = 0.0
+        best_topic = None
+
+        # Find the best matching topic based on similarity
         for similarity, topic in results:
             if similarity > best_similarity and similarity >= self.similarity_threshold:
                 best_similarity = similarity
@@ -372,10 +418,9 @@ class ContextManager:
             logger.info(
                 f"Best matching topic: '{best_topic.name}' with similarity {best_similarity:.4f}"
             )
-            return best_topic
         else:
             logger.info("No suitable topic found.")
-            return None
+        return best_topic
 
     async def generate_prompt(self, query: str, num_messages: int = NUM_MSG) -> list:
         embedding = await self.fetch_embedding(query)
@@ -497,9 +542,7 @@ class ContextManager:
             )
 
             similarities = [
-                cosine_similarity([msg_emb], [self.current_topic.embedded_description])[
-                    0
-                ][0]
+                cosine_similarity(msg_emb, self.current_topic.embedded_description)
                 for msg_emb in candidate_embeddings
             ]
             logger.info(f"Per-message similarities: {similarities}")
