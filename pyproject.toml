@@ -16,9 +16,6 @@ dependencies = [
     "tokenizers>=0.22.2",
 ]
 
-[project.scripts]
-neuralcore = "neuralcore:main"
-
 [build-system]
 requires = ["uv_build>=0.10.10,<0.11.0", "toml"]
 build-backend = "uv_build"
