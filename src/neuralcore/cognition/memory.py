@@ -6,7 +6,7 @@ from datetime import datetime
 from src.utils.logger import Logger
 from typing import Tuple, Optional
 from src.core.prompt_builder import PromptBuilder as PromptHelper
-from src.utils.file_utils import _read_file
+from src.utils.file_utils import open_file_async
 from src.core.client import LLMClient
 
 
@@ -341,7 +341,7 @@ class ContextManager:
                         (id, self.current_project.file_embeddings[id]["content"])
                     )
                 else:
-                    content = await _read_file(id)
+                    content = await open_file_async(id)
                     results.append((id, content))
             return results
 
