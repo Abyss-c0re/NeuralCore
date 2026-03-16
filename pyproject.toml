@@ -1,0 +1,17 @@
+[project]
+name = "neuralcore"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Abyss-c0re", email = "dev@abyss-core.com" }
+]
+requires-python = ">=3.14"
+dependencies = []
+
+[project.scripts]
+neuralcore = "neuralcore:main"
+
+[build-system]
+requires = ["uv_build>=0.10.10,<0.11.0"]
+build-backend = "uv_build"
