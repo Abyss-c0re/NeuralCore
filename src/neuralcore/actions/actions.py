@@ -148,133 +148,203 @@ class ActionSet:
 
 
 class SequenceAction(Action):
+    """
+    A composite Action that executes an ordered list of other Actions (or functions),
+    optionally propagating context between steps.
+
+    Supports pausing for human confirmation / input and later resuming.
+    """
+
     def __init__(
         self,
         name: str,
         description: str,
         steps: List[Action],
         propagate_context: bool = True,
-        output_from: Union[int, str, None] = -1,
-        # New: optional confirmation predicate or use special return value
+        output_from: Union[
+            int, str, None
+        ] = -1,  # -1 = last step, None = all results list
         confirm_predicate: Optional[Callable[[Any], bool]] = None,
+        # Optional: allow naming steps for better debugging / output_from reference
+        step_names: Optional[List[str]] = None,
     ):
         super().__init__(
             name=name,
             description=description,
-            parameters={"input": {"type": "any"}},
-            executor=self._execute,  # placeholder — real logic in _execute / resume
-            action_type="function",
+            parameters={
+                "input": {
+                    "type": "any",
+                    "description": "Initial context / input for the sequence",
+                },
+                "resume_token": {
+                    "type": "string",
+                    "description": "(internal) Used by orchestrator to resume a paused sequence",
+                    "default": None,
+                },
+                "user_response": {
+                    "type": "any",
+                    "description": "Human reply when sequence is waiting",
+                    "default": None,
+                },
+            },
+            executor=self.execute,  # ← public name, more conventional
+            action_type="tool",
+            tags=["composite", "workflow", "multi-step", "agent"],
         )
         self.steps = steps
         self.propagate_context = propagate_context
         self.output_from = output_from
-        self.confirm_predicate = (
-            confirm_predicate  # optional: auto-ask if returns True-ish
-        )
+        self.confirm_predicate = confirm_predicate
+        self.step_names = step_names or [f"step_{i}" for i in range(len(steps))]
 
-        # Runtime state (for resume)
-        self._last_state: Optional[Dict] = None
+        # Persistent state for resumable execution
+        self._state: Optional[Dict[str, Any]] = None
 
-    async def _execute(self, **kwargs) -> Any:
-        return await self.run(**kwargs)
+    async def execute(self, **kwargs) -> Dict[str, Any]:
+        """
+        Main entry point — called by the agent / orchestrator.
+        Handles both fresh start and resume.
+        """
+        input_data = kwargs.get("input")
+        user_response = kwargs.get("user_response")
+        resume_token = kwargs.get(
+            "resume_token"
+        )  # usually just self.name when resuming
 
-    async def run(self, **kwargs) -> Dict[str, Any]:
-        """Run or continue the sequence. Returns either final result or wait state."""
-        if self._last_state is None:
-            # Fresh start
-            context = kwargs.get("input")
-            step_index = 0
-            results = []
+        if self._state is None or resume_token is None:
+            # Fresh execution
+            self._state = {
+                "step_index": 0,
+                "context": input_data,
+                "results": [],
+                "step_outputs": {},  # name → result (for named output_from)
+            }
         else:
-            # Resume
-            context = self._last_state.get("context")
-            step_index = self._last_state["step_index"]
-            results = self._last_state.get("results", [])
-            user_response = kwargs.get("user_response")
-            if user_response is None:
-                raise ValueError("Resume requires 'user_response'")
-
-            # Apply user decision (simple yes/no logic — extend as needed)
-            last_result = results[-1] if results else None
-            if isinstance(user_response, str) and user_response.lower() in (
-                "no",
-                "cancel",
-                "reject",
-            ):
+            # Resume — we expect user_response if we were waiting
+            if user_response is None and self.is_waiting():
                 return {
-                    "status": "cancelled_by_user",
-                    "last_result": last_result,
-                    "step_index": step_index - 1,
+                    "status": "error",
+                    "message": "Resume requested but no user_response provided",
+                    "waiting": True,
                 }
-            # else: continue with same context (or update if revise:...)
-            if isinstance(user_response, str) and user_response.lower().startswith(
-                "revise:"
-            ):
-                context = user_response[7:].strip()  # crude — improve parsing
+
+        state = self._state
+        step_index = state["step_index"]
+        context = state["context"]
+        results = state["results"]
 
         while step_index < len(self.steps):
-            action = self.steps[step_index]
+            current_action = self.steps[step_index]
+            step_name = self.step_names[step_index]
 
+            # Prepare arguments for this step
             step_kwargs = (
                 {"input": context} if self.propagate_context else kwargs.copy()
             )
-            result = await action(**step_kwargs)
 
-            # Check for explicit "ask human" signal from the step
+            try:
+                result = await current_action(**step_kwargs)
+            except Exception as exc:
+                return {
+                    "status": "failed",
+                    "step": step_name,
+                    "step_index": step_index,
+                    "error": str(exc),
+                    "context": context,
+                }
+
+            # Check if this step wants to pause for human input
             if isinstance(result, dict) and "_ask" in result:
-                question = result["_ask"]
-                self._last_state = {
-                    "context": context,
-                    "step_index": step_index + 1,  # resume AFTER this step
-                    "results": results + [result],
-                }
+                # Save state before pausing
+                state.update(
+                    {
+                        "step_index": step_index + 1,  # resume AFTER this step
+                        "context": context,
+                        "results": results + [result],
+                    }
+                )
+                self._state = state  # persist
+
                 return {
                     "status": "waiting_for_human",
-                    "question": question,
-                    "current_context": context,
+                    "question": result["_ask"],
+                    "step": step_name,
                     "step_index": step_index,
+                    "context_preview": str(context)[:400] + "…"
+                    if len(str(context)) > 400
+                    else str(context),
+                    "sequence_name": self.name,
+                    # Optional: include suggested_files / other metadata from decision step
+                    **{k: v for k, v in result.items() if k != "_ask"},
                 }
 
-            # Optional: auto-ask if confirm_predicate says so
+            # Optional auto-confirmation
             if self.confirm_predicate and self.confirm_predicate(result):
-                self._last_state = {
-                    "context": context,
-                    "step_index": step_index + 1,
-                    "results": results + [result],
-                }
+                state.update(
+                    {
+                        "step_index": step_index + 1,
+                        "context": context,
+                        "results": results + [result],
+                    }
+                )
+                self._state = state
                 return {
                     "status": "waiting_for_human",
-                    "question": f"Approve this result?\n{repr(result)}",
-                    "current_context": context,
+                    "question": f"Approve continuing after step '{step_name}'?\nResult preview: {repr(result)[:300]}…",
+                    "step": step_name,
                     "step_index": step_index,
                 }
 
+            # Normal progress
             results.append(result)
+            state["step_outputs"][step_name] = result
+
             if self.propagate_context:
                 context = result
 
+            state["step_index"] += 1
             step_index += 1
 
-        # Finished
-        self._last_state = None  # clear
-        if self.output_from is None:
-            final = results[-1] if results else None
-        elif isinstance(self.output_from, int):
-            final = results[self.output_from]  # type checker now happy
-        elif isinstance(self.output_from, str):
-            # Future: named result lookup
-            # e.g. final = next(r for name, r in named_results if name == self.output_from)
-            raise NotImplementedError("Named output_from not yet implemented")
-        else:
-            raise TypeError(f"Unsupported output_from: {self.output_from!r}")
-        return {"status": "completed", "result": final, "all_results": results}
+        # Sequence completed
+        final_result = self._select_output(results, state["step_outputs"])
 
-    async def resume(self, **kwargs) -> Dict[str, Any]:
-        """Alias for run() when resuming — mainly for clearer API"""
-        return await self.run(**kwargs)
+        completed_response = {
+            "status": "completed",
+            "sequence": self.name,
+            "result": final_result,
+            "all_results": results,
+            "named_results": state["step_outputs"],
+            "steps_executed": len(self.steps),
+        }
+
+        # Clean up after success
+        self._state = None
+        return completed_response
+
+    def _select_output(self, results: list, named: dict) -> Any:
+        if self.output_from is None:
+            return results
+        if self.output_from == -1:
+            return results[-1] if results else None
+        if isinstance(self.output_from, int):
+            return (
+                results[self.output_from]
+                if 0 <= self.output_from < len(results)
+                else None
+            )
+        if isinstance(self.output_from, str):
+            return named.get(self.output_from)
+        return None
 
     def is_waiting(self) -> bool:
-        return self._last_state is not None
+        """Quick check if sequence is paused and awaiting human input"""
+        if self._state is None:
+            return False
+        return self._state["step_index"] <= len(self.steps)
+
+    def reset(self):
+        """Force clear state (useful in error recovery or testing)"""
+        self._state = None
 
 
 def sequence(
@@ -329,3 +399,115 @@ def async_sequence(
         output_from=output_from,
         confirm_predicate=confirm_predicate,
     )
+
+
+class ActionFromSequence:
+    """
+    Helper class to convert any SequenceAction into a normal Action
+    that can be registered in ActionSet / used by the agent exactly like
+    every other tool.
+
+    Usage:
+        seq = sequence("my_chain", "description", steps=[a, b, c])
+        my_action = ActionFromSequence.create(seq)          # or .from_sequence(...)
+
+        terminal_tools.add(my_action)
+    """
+
+    @staticmethod
+    def create(
+        sequence: SequenceAction,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        extra_parameters: Optional[Dict[str, Any]] = None,
+        action_type: str = "function",
+    ) -> Action:
+
+        final_name = name or sequence.name
+        final_desc = description or sequence.description
+        final_tags = tags or getattr(sequence, "tags", ["composite", "workflow"])
+
+        parameters = {
+            "input": {
+                "type": "string",
+                "description": "Optional starting input (path, JSON string, or empty)",
+                "default": "",
+            },
+            "user_response": {
+                "type": "string",
+                "description": "Reply when waiting (yes / no / cancel / only <file1> <file2> / add <file> / more)",
+                "default": None,
+            },
+        }
+        if extra_parameters:
+            parameters.update(extra_parameters)
+
+        async def wrapper_executor(**kwargs) -> Any:
+            d = await sequence.execute(**kwargs)
+            s = d.get("status")
+
+            if s == "waiting_for_human":
+                return (
+                    d["question"]
+                    + "\n\n(please reply with yes/no/cancel/more/only/add...)"
+                )
+
+            if s == "completed":
+                res = d.get("result")
+                if isinstance(res, dict) and "contents" in res:
+                    return res["contents"]
+                return res or "Sequence finished successfully"
+
+            return f"Status: {s} — {d}"
+
+        return Action(
+            name=final_name,
+            description=final_desc,
+            parameters=parameters,
+            executor=wrapper_executor,
+            required=[],
+            action_type=action_type,
+            tags=final_tags,
+        )
+
+    @staticmethod
+    def from_sequence(
+        name: str,
+        description: str,
+        steps: List[Action],
+        *,
+        propagate: bool = True,
+        output_from: Union[int, str, None] = -1,
+        confirm_predicate: Optional[Callable[[Any], bool]] = None,
+        # extra params for the final Action
+        tags: Optional[List[str]] = None,
+        extra_parameters: Optional[Dict[str, Any]] = None,
+    ) -> Action:
+        """
+        One-liner convenience: build sequence + wrap in one call.
+
+        Example:
+            explore_action = ActionFromSequence.from_sequence(
+                name="explore_codebase",
+                description="Safe codebase explorer with approval step",
+                steps=[tree_action, pwd_action, ls_action, decide_step, read_step],
+                tags=["codebase", "explore"],
+                extra_parameters={"quick": {"type": "boolean", "default": False}}
+            )
+        """
+        seq = sequence(
+            name=name + "_internal",
+            description=description,
+            steps=steps,
+            propagate=propagate,
+            output_from=output_from,
+            confirm_predicate=confirm_predicate,
+        )
+        return ActionFromSequence.create(
+            seq,
+            name=name,
+            description=description,
+            tags=tags,
+            extra_parameters=extra_parameters,
+        )
