@@ -138,6 +138,18 @@ class ActionSet:
             # "categories": [...],
             # "domain": "web" | "math" | "files" | ...
         }
+    def remove(self, action: Action) -> None:
+        """Remove a specific Action instance from the set."""
+        if action not in self.actions:
+            return
+        self.actions.remove(action)
+        self.by_name.pop(action.name, None)
+
+    def remove_by_name(self, name: str) -> None:
+        """Remove an action by its name (most convenient for unloading)."""
+        action = self.by_name.pop(name, None)
+        if action is not None:
+            self.actions.remove(action)
 
     def __len__(self) -> int:
         return len(self.actions)
