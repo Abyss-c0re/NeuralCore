@@ -791,16 +791,19 @@ class LLMClient:
                         logger.info("Added relevant context to messages")
             except Exception as e:
                 logger.warning(f"History enrichment failed: {e}")
-                yield ("log", f"History enrichment failed: {e}")
 
         executed_signatures: set[tuple] = set()
         iteration = 0
 
-        logger.info(f"Starting agent — max_iterations={max_iterations}, temp={temperature}, initial messages={len(messages)}")
+        logger.info(
+            f"Starting agent — max_iterations={max_iterations}, temp={temperature}, initial messages={len(messages)}"
+        )
 
         while iteration < max_iterations:
             iteration += 1
-            logger.info(f"──── Starting iteration {iteration}/{max_iterations}  (messages={len(messages)}) ────")
+            logger.info(
+                f"──── Starting iteration {iteration}/{max_iterations}  (messages={len(messages)}) ────"
+            )
             yield ("step_start", {"iteration": iteration})
 
             queue = await self.stream_with_tools(
@@ -824,13 +827,17 @@ class LLMClient:
 
                 elif kind == "finish":
                     tool_calls = payload.get("tool_calls")
-                    logger.info(f"LLM finish reason received — tool_calls present: {bool(tool_calls)}")
+                    logger.info(
+                        f"LLM finish reason received — tool_calls present: {bool(tool_calls)}"
+                    )
                     if tool_calls:
                         names = [c["function"]["name"] for c in tool_calls]
                         logger.info(f"Requested tools: {', '.join(names)}")
                     else:
                         preview = text_buffer.strip()[:220].replace("\n", " ")
-                        logger.info(f"No tool calls → final answer path. Text preview: {preview}…")
+                        logger.info(
+                            f"No tool calls → final answer path. Text preview: {preview}…"
+                        )
                     yield ("llm_finish", payload)
                     break
 
@@ -842,7 +849,9 @@ class LLMClient:
             full_reply = text_buffer.strip()
 
             if not tool_calls:
-                logger.info("Model decided no more tools needed → entering final answer path")
+                logger.info(
+                    "Model decided no more tools needed → entering final answer path"
+                )
                 if messages and messages[-1]["role"] == "assistant":
                     messages[-1]["content"] = full_reply
                     logger.info("Updated last assistant message content")
@@ -870,12 +879,10 @@ class LLMClient:
                 except Exception:
                     args = {}
                     logger.warning(f"Failed to parse tool arguments for {name}")
-                    yield ("log", f"Failed to parse args for {name}")
 
                 sig = (name, json.dumps(args, sort_keys=True))
                 if sig in executed_signatures:
                     logger.info(f"Skipping duplicate tool execution: {name} {args}")
-                    yield ("log", f"Skipping duplicate tool call: {name}")
                     continue
 
                 executed_signatures.add(sig)
@@ -887,7 +894,10 @@ class LLMClient:
                 if not action:
                     result = f"Unknown tool: {name}"
                     logger.error(f"Tool not found: {name}")
-                    yield ("tool_result", {"name": name, "result": result, "error": True})
+                    yield (
+                        "tool_result",
+                        {"name": name, "result": result, "error": True},
+                    )
                 else:
                     try:
                         maybe_result = action(**args)
@@ -941,8 +951,12 @@ class LLMClient:
 
         # ── Only reached on max iterations ──
         logger.warning(f"Agent reached max iterations ({max_iterations})")
-        yield ("warning", f"Max iterations ({max_iterations}) reached — giving up for now.")
+        yield (
+            "warning",
+            f"Max iterations ({max_iterations}) reached — giving up for now.",
+        )
         yield ("finish", {"reason": "max_iterations_reached"})
+
     # Tiny helper — makes the loop cleaner
     async def _drain_queue(
         self, queue: asyncio.Queue
