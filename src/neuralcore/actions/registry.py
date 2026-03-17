@@ -39,6 +39,7 @@ class ActionRegistry:
             )
 
     def search(self, query: str, limit: int = 8):
+
         query = query.lower().strip()
         query_words = query.split()
 
@@ -49,6 +50,7 @@ class ActionRegistry:
             text = entry["text"]
             set_name = entry["set"]
 
+            # scoring
             k_score = keyword_score(query_words, text)
             f_score = fuzzy_score(query, text)
 
@@ -65,7 +67,4 @@ class ActionRegistry:
 
         results.sort(key=lambda x: x[0], reverse=True)
 
-        # ──────────────────────────────────────────────
-        #   Fix is here: return all three values
-        # ──────────────────────────────────────────────
-        return results[:limit]  # List[tuple[float, Action, str]]
+        return [(a, s) for _, a, s in results[:limit]]
