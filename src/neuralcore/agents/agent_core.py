@@ -94,7 +94,7 @@ class AgentRunner:
             f"msgs={len(messages)}"
         )
 
-        while iteration < self.max_iterations:
+        while self.max_iterations is None or self.max_iterations < 0 or iteration < self.max_iterations:
             iteration += 1
             yield ("step_start", {"iteration": iteration})
 
