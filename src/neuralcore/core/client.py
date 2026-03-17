@@ -746,17 +746,14 @@ class LLMClient:
         self,
         user_prompt: str,
         tools: ToolProvider,
-        messages_so_far: List[Dict[str, Any]],  # ← caller provides this
+        messages_so_far: List[Dict[str, Any]],
         system_prompt: str = "",
         get_executor: ToolExecutorGetter = None,
-        context_manager=None,  # ← optional, passed in
+        context_manager=None,
         max_iterations: int = 25,
         temperature: float = 0.3,
         max_tokens: int = 12048,
     ) -> AsyncIterator[Tuple[str, Any]]:
-        """
-        Does **not** read self.conversation, self.context_manager, self.system_prompt
-        """
 
         # Tool accessors (unchanged)
         if isinstance(tools, (ActionSet, DynamicActionManager)):
@@ -799,9 +796,11 @@ class LLMClient:
         executed_signatures: set[tuple] = set()
         iteration = 0
 
+        logger.info(f"Starting agent — max_iterations={max_iterations}, temp={temperature}, initial messages={len(messages)}")
+
         while iteration < max_iterations:
             iteration += 1
-            logger.info(f"Starting agent iteration {iteration}/{max_iterations}")
+            logger.info(f"──── Starting iteration {iteration}/{max_iterations}  (messages={len(messages)}) ────")
             yield ("step_start", {"iteration": iteration})
 
             queue = await self.stream_with_tools(
@@ -825,6 +824,13 @@ class LLMClient:
 
                 elif kind == "finish":
                     tool_calls = payload.get("tool_calls")
+                    logger.info(f"LLM finish reason received — tool_calls present: {bool(tool_calls)}")
+                    if tool_calls:
+                        names = [c["function"]["name"] for c in tool_calls]
+                        logger.info(f"Requested tools: {', '.join(names)}")
+                    else:
+                        preview = text_buffer.strip()[:220].replace("\n", " ")
+                        logger.info(f"No tool calls → final answer path. Text preview: {preview}…")
                     yield ("llm_finish", payload)
                     break
 
@@ -836,16 +842,18 @@ class LLMClient:
             full_reply = text_buffer.strip()
 
             if not tool_calls:
-                logger.info("LLM decided to give final answer (no tool calls)")
-
+                logger.info("Model decided no more tools needed → entering final answer path")
                 if messages and messages[-1]["role"] == "assistant":
                     messages[-1]["content"] = full_reply
+                    logger.info("Updated last assistant message content")
                 else:
                     yield (
                         "assistant_message",
                         {"role": "assistant", "content": full_reply},
                     )
+                    logger.info("Added new assistant message to stream")
                 yield ("final_answer", full_reply)
+                logger.info(f"Agent exiting normally after {iteration} iterations")
                 return
 
             logger.info(
@@ -931,26 +939,10 @@ class LLMClient:
                 yield ("warning", "No tool results produced")
                 break
 
-        # ── Max iterations reached ──
+        # ── Only reached on max iterations ──
         logger.warning(f"Agent reached max iterations ({max_iterations})")
         yield ("warning", f"Max iterations ({max_iterations}) reached — giving up for now.")
-
-        msg = (
-            "I hit the maximum number of allowed steps and couldn't complete the task.\n\n"
-            "Common reasons:\n"
-            "• Very complex / multi-step problem\n"
-            "• Missing information or ambiguous question\n"
-            "• Tool / reasoning loop\n\n"
-            "Try:\n"
-            "• Asking a more focused version of the question\n"
-            "• Giving me more context upfront\n"
-            "• Saying “continue” or “keep going” if you want me to resume"
-        )
-
-        yield ("assistant_message", {"role": "assistant", "content": msg})
-        yield ("final_answer", msg)
         yield ("finish", {"reason": "max_iterations_reached"})
-
     # Tiny helper — makes the loop cleaner
     async def _drain_queue(
         self, queue: asyncio.Queue
