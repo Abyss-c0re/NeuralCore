@@ -1,6 +1,7 @@
 from neuralcore.core.client import LLMClient
 from neuralcore.utils.llm_tools import InternalTools
 from neuralcore.utils.config import ConfigLoader
+from neuralcore.utils.text_tokenizer import TextTokenizer
 
 
 class ClientFactory:
@@ -38,7 +39,9 @@ class ClientFactory:
         # Thinking / chat_template_kwargs
         if cfg.get("enable_thinking") is not None:
             extra_body.setdefault("chat_template_kwargs", {})
-            extra_body["chat_template_kwargs"]["enable_thinking"] = cfg["enable_thinking"]
+            extra_body["chat_template_kwargs"]["enable_thinking"] = cfg[
+                "enable_thinking"
+            ]
 
         # Merge user-provided extra_body
         if user_extra := cfg.get("extra_body"):
@@ -46,10 +49,19 @@ class ClientFactory:
                 raise ValueError(f"extra_body must be a dict for client {client_name}")
             extra_body.update(user_extra)
 
+        # --- FIX: ensure tokenizer object ---
+        tokenizer_cfg = cfg.get("tokenizer")
+        tokenizer_obj = None
+        if tokenizer_cfg:
+            if isinstance(tokenizer_cfg, str):
+                tokenizer_obj = TextTokenizer(tokenizer_cfg)
+            else:
+                tokenizer_obj = tokenizer_cfg  # already a tokenizer object
+
         return LLMClient(
             base_url=cfg.get("base_url", "http://localhost:1212/v1"),
             model=model,
-            tokenizer=cfg.get("tokenizer"),
+            tokenizer=tokenizer_obj,
             api_key=api_key,
             extra_body=extra_body or None,
         )

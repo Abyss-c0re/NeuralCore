@@ -40,7 +40,10 @@ class ConfigLoader:
         if path is None or not path.exists():
             return {}
         with open(path, "r") as f:
-            return yaml.safe_load(f) or {}
+            data = yaml.safe_load(f) or {}
+            if not isinstance(data, dict):
+                raise ValueError(f"YAML config must be a dict at top level, got {type(data)}")
+            return data
 
     def get_client_config(self, client_name: str) -> dict:
         """Return config dict for a specific client."""
