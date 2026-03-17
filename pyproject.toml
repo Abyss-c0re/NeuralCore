@@ -13,8 +13,9 @@ dependencies = [
     "aiofiles>=25.1.0",
     "numpy>=2.4.3",
     "openai>=2.28.0",
+    "pyyaml>=6.0.3",
     "rapidfuzz>=3.14.3",
-    "tokenizers>=0.22.2"
+    "tokenizers>=0.22.2",
 ]
 
 # Optional dev dependencies

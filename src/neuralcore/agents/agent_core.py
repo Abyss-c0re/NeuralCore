@@ -28,13 +28,13 @@ class AgentRunner:
         self,
         client: "LLMClient",
         max_iterations: int = 25,
-        default_temperature: float = 0.3,
-        default_max_tokens: int = 12048,
+        temperature: float = 0.3,
+        max_tokens : int = 12048,
     ):
         self.client = client
         self.max_iterations = max_iterations
-        self.default_temperature = default_temperature
-        self.default_max_tokens = default_max_tokens
+        self.temperature = temperature
+        self.max_tokens  = max_tokens 
 
     async def run(
         self,
@@ -90,7 +90,7 @@ class AgentRunner:
 
         logger.info(
             f"AgentRunner starting — max_it={self.max_iterations}, "
-            f"temp={temperature or self.default_temperature}, "
+            f"temp={temperature or self.temperature}, "
             f"msgs={len(messages)}"
         )
 
@@ -107,8 +107,8 @@ class AgentRunner:
             queue = await self.client.stream_with_tools(
                 messages=messages,
                 tools=get_tools_func(),
-                temperature=temperature if temperature is not None else self.default_temperature,
-                max_tokens=max_tokens if max_tokens is not None else self.default_max_tokens,
+                temperature=temperature if temperature is not None else self.temperature,
+                max_tokens=max_tokens if max_tokens is not None else self.max_tokens ,
                 tool_choice="auto",
             )
 

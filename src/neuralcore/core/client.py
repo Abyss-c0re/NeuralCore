@@ -69,13 +69,13 @@ class LLMClient:
         tokenizer: Optional[Union[str, "TextTokenizer"]] = None,
         api_key: str = "not-needed",
         extra_body: Optional[Dict[str, Any]] = None,
-        default_temperature: float = 0.7,
-        default_max_tokens: int = 4096,
+        temperature: float = 0.7,
+        max_tokens : int = 4096,
     ):
         self.base_url = base_url.rstrip("/")
         self.model = model
-        self.default_temperature = default_temperature
-        self.default_max_tokens = default_max_tokens
+        self.temperature = temperature
+        self.max_tokens  = max_tokens 
         self.extra_body_default = extra_body or {}
         # Accept either a string (to wrap) or an existing tokenizer instance
         if isinstance(tokenizer, str):
@@ -144,10 +144,10 @@ class LLMClient:
             "messages": messages,
             "temperature": temperature
             if temperature is not None
-            else self.default_temperature,
+            else self.temperature,
             "max_tokens": max_tokens
             if max_tokens is not None
-            else self.default_max_tokens,
+            else self.max_tokens ,
             "stream": True,
             **kwargs,
         }
@@ -263,10 +263,10 @@ class LLMClient:
             "messages": messages,
             "temperature": temperature
             if temperature is not None
-            else self.default_temperature,
+            else self.temperature,
             "max_tokens": max_tokens
             if max_tokens is not None
-            else self.default_max_tokens,
+            else self.max_tokens ,
             "stream": False,
             **kwargs,
         }
@@ -298,10 +298,10 @@ class LLMClient:
             "messages": messages,
             "temperature": temperature
             if temperature is not None
-            else self.default_temperature,
+            else self.temperature,
             "max_tokens": max_tokens
             if max_tokens is not None
-            else self.default_max_tokens,
+            else self.max_tokens ,
             "stream": False,
             **kwargs,
         }
@@ -363,7 +363,7 @@ class LLMClient:
             "messages": messages,
             "temperature": temperature
             if temperature is not None
-            else self.default_temperature,
+            else self.temperature,
             "max_tokens": max_tokens,
             "stream": False,
             **kwargs,
@@ -413,7 +413,7 @@ class LLMClient:
             "messages": messages,
             "temperature": temperature
             if temperature is not None
-            else self.default_temperature,
+            else self.temperature,
             "max_tokens": max_tokens,
             "stream": False,
             **kwargs,

@@ -16,14 +16,14 @@ class InternalTools:
         client: Any,
         description: str,
         methods: List[Callable],
-        default_temperature: float = 0.35,
-        default_max_tokens: int = 4096,
+        temperature: float = 0.35,
+        max_tokens : int = 4096,
     ):
         self.client = client
         self.description = description.strip()
         self.methods = methods
-        self.default_temperature = default_temperature
-        self.default_max_tokens = default_max_tokens
+        self.temperature = temperature
+        self.max_tokens  = max_tokens 
 
         self._action_set: Optional[ActionSet] = None
 
