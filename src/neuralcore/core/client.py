@@ -65,7 +65,7 @@ class LLMClient:
         self,
         base_url: str,
         model: str,
-        tokenizer: Optional[Union[str, "TextTokenizer"]] = None, 
+        tokenizer: Optional[Union[str, "TextTokenizer"]] = None,
         api_key: str = "not-needed",
         extra_body: Optional[Dict[str, Any]] = None,
         default_temperature: float = 0.7,
@@ -791,7 +791,9 @@ class LLMClient:
                             1,
                             {"role": "system", "content": f"Relevant context:\n{ctx}"},
                         )
+                        logger.info("Added relevant context to messages")
             except Exception as e:
+                logger.warning(f"History enrichment failed: {e}")
                 yield ("log", f"History enrichment failed: {e}")
 
         executed_signatures: set[tuple] = set()
@@ -799,6 +801,7 @@ class LLMClient:
 
         while iteration < max_iterations:
             iteration += 1
+            logger.info(f"Starting agent iteration {iteration}/{max_iterations}")
             yield ("step_start", {"iteration": iteration})
 
             queue = await self.stream_with_tools(
@@ -826,18 +829,18 @@ class LLMClient:
                     break
 
                 elif kind == "error":
+                    logger.error(f"Streaming error: {payload}")
                     yield ("error", payload)
                     return
 
             full_reply = text_buffer.strip()
 
             if not tool_calls:
-                # Check if the last message is already an assistant message
+                logger.info("LLM decided to give final answer (no tool calls)")
+
                 if messages and messages[-1]["role"] == "assistant":
-                    # If it's the same assistant message, update its content
                     messages[-1]["content"] = full_reply
                 else:
-                    # Otherwise, add a new assistant message
                     yield (
                         "assistant_message",
                         {"role": "assistant", "content": full_reply},
@@ -845,11 +848,12 @@ class LLMClient:
                 yield ("final_answer", full_reply)
                 return
 
-            # Handle tool calls and messages correctly
+            logger.info(
+                f"Tool calls decided by model: {[tc['function']['name'] for tc in tool_calls]}"
+            )
             messages.append({"role": "assistant", "tool_calls": tool_calls})
             yield ("tool_calls", tool_calls)
 
-            # ── tool execution loop (unchanged from your version) ──
             tool_results = []
             for call in tool_calls:
                 name = call["function"]["name"]
@@ -857,26 +861,25 @@ class LLMClient:
                     args = json.loads(call["function"]["arguments"])
                 except Exception:
                     args = {}
+                    logger.warning(f"Failed to parse tool arguments for {name}")
                     yield ("log", f"Failed to parse args for {name}")
 
                 sig = (name, json.dumps(args, sort_keys=True))
                 if sig in executed_signatures:
+                    logger.info(f"Skipping duplicate tool execution: {name} {args}")
                     yield ("log", f"Skipping duplicate tool call: {name}")
                     continue
 
                 executed_signatures.add(sig)
 
+                logger.info(f"Executing tool: {name}")
                 yield ("tool_start", {"name": name, "args": args})
 
-                action = get_executor(
-                    name
-                )  # ← DynamicActionManager / ActionSet decides
+                action = get_executor(name)
                 if not action:
                     result = f"Unknown tool: {name}"
-                    yield (
-                        "tool_result",
-                        {"name": name, "result": result, "error": True},
-                    )
+                    logger.error(f"Tool not found: {name}")
+                    yield ("tool_result", {"name": name, "result": result, "error": True})
                 else:
                     try:
                         maybe_result = action(**args)
@@ -885,9 +888,10 @@ class LLMClient:
                             if asyncio.iscoroutine(maybe_result)
                             else maybe_result
                         )
+                        logger.info(f"Tool {name} completed successfully")
                         yield ("tool_result", {"name": name, "result": result})
                     except ConfirmationRequired as exc:
-                        # Keep the same confirmation flow — yield special event
+                        logger.info(f"Tool {name} requires confirmation")
                         yield (
                             "needs_confirmation",
                             {
@@ -896,12 +900,13 @@ class LLMClient:
                                 "args": args,
                                 "preview": exc.preview or "",
                                 "action": action,
-                                "tool_calls": tool_calls,  # so UI can resume later
+                                "tool_calls": tool_calls,
                             },
                         )
-                        return  # ← important: pause here, let UI/resumer continue
+                        return
                     except Exception as exc:
                         result = f"Tool execution failed: {exc}"
+                        logger.error(f"Tool {name} failed: {exc}", exc_info=True)
                         yield (
                             "tool_result",
                             {"name": name, "result": result, "error": True},
@@ -919,13 +924,32 @@ class LLMClient:
                 )
 
             if tool_results:
+                logger.info(f"Adding {len(tool_results)} tool result(s) to messages")
                 messages.extend(tool_results)
             else:
+                logger.warning("No tool results were produced in this iteration")
                 yield ("warning", "No tool results produced")
                 break
 
-        if iteration >= max_iterations:
-            yield ("finish", {"reason": "max_iterations_reached"})
+        # ── Max iterations reached ──
+        logger.warning(f"Agent reached max iterations ({max_iterations})")
+        yield ("warning", f"Max iterations ({max_iterations}) reached — giving up for now.")
+
+        msg = (
+            "I hit the maximum number of allowed steps and couldn't complete the task.\n\n"
+            "Common reasons:\n"
+            "• Very complex / multi-step problem\n"
+            "• Missing information or ambiguous question\n"
+            "• Tool / reasoning loop\n\n"
+            "Try:\n"
+            "• Asking a more focused version of the question\n"
+            "• Giving me more context upfront\n"
+            "• Saying “continue” or “keep going” if you want me to resume"
+        )
+
+        yield ("assistant_message", {"role": "assistant", "content": msg})
+        yield ("final_answer", msg)
+        yield ("finish", {"reason": "max_iterations_reached"})
 
     # Tiny helper — makes the loop cleaner
     async def _drain_queue(
