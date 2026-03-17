@@ -81,6 +81,10 @@ class AgentRunner:
             except Exception as e:
                 logger.warning(f"Context enrichment failed: {e}")
 
+        if not any(m.get("role") == "user" for m in messages):
+            messages.append({"role": "user", "content": user_prompt})
+        
+
         executed_signatures: set[tuple] = set()
         iteration = 0
 
