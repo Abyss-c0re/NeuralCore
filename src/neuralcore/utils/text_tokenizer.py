@@ -10,10 +10,17 @@ class TextTokenizer:
         Args:
             tokenizer_source (str): Hugging Face repo ID or local path to tokenizer.json
         """
-        self.tokenizer = Tokenizer.from_file(tokenizer_source) if tokenizer_source.endswith(".json") else Tokenizer.from_pretrained(tokenizer_source)
+        if not tokenizer_source or tokenizer_source.strip() == "":
+            raise ValueError("tokenizer_source cannot be empty")
+
+        self.tokenizer = (
+            Tokenizer.from_file(tokenizer_source)
+            if tokenizer_source.endswith(".json")
+            else Tokenizer.from_pretrained(tokenizer_source)
+        )
 
     def split_text_into_chunks(
-        self, text: str, max_tokens: int = 900, overlap: int = 100
+        self, text: str, max_tokens: int = 500, overlap: int = 100
     ) -> List[str]:
         """Split text into chunks of roughly max_tokens with overlap."""
         if not text.strip():

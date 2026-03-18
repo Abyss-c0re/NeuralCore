@@ -2,6 +2,7 @@ from neuralcore.core.client import LLMClient
 from neuralcore.utils.llm_tools import InternalTools
 from neuralcore.utils.config import ConfigLoader
 from neuralcore.utils.text_tokenizer import TextTokenizer
+from neuralcore.utils.config import get_loader
 
 
 class ClientFactory:
@@ -51,12 +52,7 @@ class ClientFactory:
 
         # --- tokenizer handling ---
         tokenizer_cfg = cfg.get("tokenizer")
-        tokenizer_obj = None
-        if tokenizer_cfg:
-            if isinstance(tokenizer_cfg, str):
-                tokenizer_obj = TextTokenizer(tokenizer_cfg)
-            else:
-                tokenizer_obj = tokenizer_cfg
+        
 
         # ✅ NEW: pass missing params
         temperature = cfg.get("temperature", 0.7)
@@ -65,7 +61,7 @@ class ClientFactory:
         return LLMClient(
             base_url=cfg.get("base_url", "http://localhost:1212/v1"),
             model=model,
-            tokenizer=tokenizer_obj,
+            tokenizer=tokenizer_cfg,
             api_key=api_key,
             extra_body=extra_body or None,
             temperature=temperature,
@@ -91,3 +87,23 @@ class ClientFactory:
 
             tool_name = cfg.get("tool_name", name)
             registry.register_set(tool_name, tools.as_action_set(tool_name))
+
+
+# --------------------------
+# Singleton instance
+# --------------------------
+_factory: ClientFactory | None = None
+
+
+def get_client_factory() -> ClientFactory:
+    global _factory
+    if _factory is None:
+        loader = get_loader()  # reuse ConfigLoader singleton
+        _factory = ClientFactory(loader)
+        _factory.build()  # build clients immediately
+    return _factory
+
+
+def get_clients() -> dict[str, "LLMClient"]:
+    """Shortcut to access built clients directly"""
+    return get_client_factory().clients

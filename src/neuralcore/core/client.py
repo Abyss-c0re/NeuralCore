@@ -20,15 +20,52 @@ ToolExecutorGetter = Optional[Callable[[str], Optional["Action"]]]
 logger = Logger.get_logger()
 
 
+def prepare_messages_for_stream(messages, enable_thinking=False):
+    # Copy to avoid mutating original
+    msgs = [m.copy() for m in messages]
+
+    # 1. Enforce system-first (prevents Jinja parser failure)
+    seen_non_system = False
+    sys_parts = []
+    cleaned = []
+    for m in msgs:
+        role = m.get("role")
+        if role == "system":
+            if seen_non_system:
+                # Instead of raise, merge into first system (common workaround)
+                sys_parts.append(m.get("content", "").strip())
+            else:
+                sys_parts.append(m.get("content", "").strip())
+        else:
+            seen_non_system = True
+            cleaned.append(m)
+
+    if sys_parts:
+        cleaned.insert(
+            0, {"role": "system", "content": "\n\n".join(filter(None, sys_parts))}
+        )
+
+    # 2. Handle assistant prefill + thinking conflict
+    if enable_thinking and cleaned and cleaned[-1].get("role") == "assistant":
+        last = cleaned[-1]
+        has_visible_content = bool(last.get("content") and last["content"].strip())
+        if has_visible_content and not last.get("tool_calls"):  # preserve tool calls
+            # Option A: drop (simplest, most compatible)
+            cleaned.pop()
+
+            # Option B: empty content only (keeps structure if backend allows)
+            # last["content"] = ""
+
+    return cleaned
+
+
 async def embed_single_chunk(
-    client: OpenAI,  # sync client
+    client: AsyncOpenAI,
     chunk: str,
     model: str,
 ) -> Optional[np.ndarray]:
     try:
-        response = await asyncio.to_thread(
-            client.embeddings.create, model=model, input=chunk.strip()
-        )
+        response = await client.embeddings.create(model=model, input=chunk.strip())
         vec = response.data[0].embedding
         return np.array(vec, dtype=np.float32)
     except Exception as e:
@@ -66,7 +103,7 @@ class LLMClient:
         self,
         base_url: str,
         model: str,
-        tokenizer: Optional[Union[str, "TextTokenizer"]] = None,
+        tokenizer: Optional[str] = None,
         api_key: str = "not-needed",
         extra_body: Optional[Dict[str, Any]] = None,
         temperature: float = 0.7,
@@ -78,10 +115,8 @@ class LLMClient:
         self.max_tokens = max_tokens
         self.extra_body_default = extra_body or {}
         # Accept either a string (to wrap) or an existing tokenizer instance
-        if isinstance(tokenizer, str):
-            self.tokenizer = TextTokenizer(tokenizer)
-        else:
-            self.tokenizer = tokenizer
+
+        self.tokenizer = TextTokenizer(tokenizer or "")
 
         self.client = AsyncOpenAI(
             base_url=self.base_url,
@@ -139,6 +174,9 @@ class LLMClient:
 
         merged_extra = {**self.extra_body_default, **(extra_body or {})}
 
+        if messages:
+            messages = prepare_messages_for_stream(messages)
+
         params = {
             "model": self.model,
             "messages": messages,
@@ -181,7 +219,7 @@ class LLMClient:
 
         return queue
 
-    async def fetch_embedding(self, text: str) -> np.ndarray | None:
+    async def fetch_embedding(self, text: str, size: int = 500) -> np.ndarray | None:
         """
         Asynchronously fetches and caches an embedding for the given text.
         Automatically chunks long inputs and averages the results.
@@ -196,7 +234,7 @@ class LLMClient:
 
             # Use tokenizer if available, else treat whole text as single chunk
             if self.tokenizer:
-                chunks = self.tokenizer.split_text_into_chunks(text)
+                chunks = self.tokenizer.split_text_into_chunks(text, size)
             else:
                 logger.warning(
                     "Tokenizer not available, treating entire text as a single chunk"
@@ -211,7 +249,7 @@ class LLMClient:
             # Embed all chunks
             chunk_embeddings: List[np.ndarray] = []
             for chunk in chunks:
-                emb = await embed_single_chunk(self.sync_client, chunk, self.model)
+                emb = await embed_single_chunk(self.client, chunk, self.model)
                 if emb is not None:
                     chunk_embeddings.append(emb)
 
@@ -254,12 +292,16 @@ class LLMClient:
     ) -> str:
         merged_extra = {**self.extra_body_default, **(extra_body or {})}
 
+        # Make sure messages content is always str
+        if messages:
+            messages = prepare_messages_for_stream(messages)
+
         params = {
             "model": self.model,
             "messages": messages,
             "temperature": temperature if temperature is not None else self.temperature,
             "max_tokens": max_tokens if max_tokens is not None else self.max_tokens,
-            "stream": False,
+            "stream": False,  # always non-streaming
             **kwargs,
         }
         if merged_extra:
@@ -267,9 +309,9 @@ class LLMClient:
 
         try:
             resp = await self.client.chat.completions.create(**params)
-            return (resp.choices[0].message.content or "").strip()
+            # Type safe cast to str
+            return str((resp.choices[0].message.content or "")).strip()
         except Exception as e:
-            # Minimal logging
             logger.warning(
                 f"chat failed | model={self.model}, msgs={len(messages)} | {str(e)[:180]}"
             )
@@ -284,6 +326,9 @@ class LLMClient:
         **kwargs,
     ) -> str:
         merged_extra = {**self.extra_body_default, **(extra_body or {})}
+
+        if messages:
+            messages = prepare_messages_for_stream(messages)
 
         params = {
             "model": self.model,
@@ -342,6 +387,9 @@ class LLMClient:
             }
         ]
 
+        if messages:
+            messages = prepare_messages_for_stream(messages)
+
         # logger.debug(f"Describing image | tokens ≈ {count_message_tokens(messages)}")
 
         merged_extra = {**self.extra_body_default, **(extra_body or {})}
@@ -391,6 +439,9 @@ class LLMClient:
                 ],
             }
         ]
+
+        if messages:
+            messages = prepare_messages_for_stream(messages)
 
         merged_extra = {**self.extra_body_default, **kwargs.pop("extra_body", {})}
 
@@ -447,6 +498,9 @@ class LLMClient:
                 raise TypeError("tools must be List[dict] or ActionSet")
 
         merged_extra = {**self.extra_body_default, **(extra_body or {})}
+
+        if messages:
+            messages = prepare_messages_for_stream(messages)
 
         params = {
             "model": self.model,
@@ -535,6 +589,9 @@ class LLMClient:
         self._current_output_queue = queue
 
         merged_extra = {**self.extra_body_default, **(extra_body or {})}
+
+        if messages:
+            messages = prepare_messages_for_stream(messages)
 
         params = {
             "model": self.model,
@@ -703,6 +760,9 @@ class LLMClient:
 
         merged_extra = {**self.extra_body_default, **(extra_body or {})}
 
+        if messages:
+            messages = prepare_messages_for_stream(messages)
+
         params = {
             "model": self.model,
             "messages": messages,
@@ -745,24 +805,23 @@ class LLMClient:
     # -------------------------------------------------------------------------
     # Quick single-turn convenience
     # -------------------------------------------------------------------------
-
+    
     async def ask(
-        self,
-        prompt: str,
-        system: Optional[str] = None,
-        stream: bool = False,
-        **kwargs,
-    ) -> Union[str, asyncio.Queue]:
-        messages = build_messages(user_content=prompt, system_prompt=system)
-        if stream:
-            return await self.stream_chat(messages, **kwargs)
-        return await self.chat(messages, **kwargs)
-
-    def ask_sync(
         self,
         prompt: str,
         system: Optional[str] = None,
         **kwargs,
     ) -> str:
         messages = build_messages(user_content=prompt, system_prompt=system)
-        return self.chat_sync(messages, **kwargs)
+        message = await self.chat(messages, **kwargs)
+        return message
+
+
+    async def ask_stream(
+        self,
+        prompt: str,
+        system: Optional[str] = None,
+        **kwargs,
+    ) -> asyncio.Queue:          # or AsyncIterator[str]
+        messages = build_messages(user_content=prompt, system_prompt=system)
+        return await self.stream_chat(messages, **kwargs)
