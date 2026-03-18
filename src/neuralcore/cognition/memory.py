@@ -9,7 +9,6 @@ from neuralcore.core.client_factory import get_clients
 from neuralcore.utils.text_tokenizer import TextTokenizer
 
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -84,26 +83,25 @@ class Topic:
 # CONTEXT MANAGER – strict token limit + permanent archive
 # ─────────────────────────────────────────────────────────────────────────────
 class ContextManager:
-    def __init__(self, max_tokens:int = 28000) -> None:
+    def __init__(self, max_tokens: int = 28000) -> None:
         clients = get_clients()
         self.client = clients.get("main")
         self.tokenizer = None
         if self.client:
-        # Ensure tokenizer
+            # Ensure tokenizer
             if not self.client.tokenizer:
                 from neuralcore.utils.text_tokenizer import TextTokenizer
+
                 loader = get_loader()
 
                 main_cfg = loader.get_client_config("main")
                 tokenizer_name = main_cfg.get("tokenizer", "Qwen/Qwen3.5-9B")
                 self.tokenizer = TextTokenizer(tokenizer_name)
                 self.client.tokenizer = self.tokenizer
-            
+
         self.embeddings = clients.get("embeddings")
         if self.embeddings and self.tokenizer:
             self.embeddings.tokenizer = self.tokenizer
-
-        
 
         self.similarity_threshold = MSG_THR
         self.topics: List[Topic] = []
@@ -123,7 +121,7 @@ class ContextManager:
         async with asyncio.Lock():
             if text in self.embedding_cache:
                 return self.embedding_cache[text]
-        emb = await self.embeddings.fetch_embedding(text,size)
+        emb = await self.embeddings.fetch_embedding(text, size)
         if emb is not None and emb.size > 0:
             self.embedding_cache[text] = emb
             return emb
@@ -164,6 +162,8 @@ class ContextManager:
     async def _retrieve_relevant_knowledge(self, query: str, max_kb_tokens: int) -> str:
         if not self.knowledge_base or not query.strip():
             return ""
+        if not self.tokenizer:
+            raise RuntimeError("Tokenizer is not loaded...")
         query_emb = await self.fetch_embedding(query)
         if len(query_emb) == 0:
             return ""
@@ -356,10 +356,10 @@ class ContextManager:
         system_prompt: str = "You are a helpful Terminal AI agent with full coding and filesystem support.",
     ) -> List[Dict[str, Any]]:
         messages: List[Dict[str, Any]] = []
-        
+
         # 1. Build the messages list first (System + History + Query)
         # --------------------------------------------------------
-        
+
         # System Prompt
         base_system = system_prompt.strip()
         messages.append({"role": "system", "content": base_system})
@@ -372,7 +372,12 @@ class ContextManager:
             if kb_text:
                 # Append KB content as a system/tool message or user context?
                 # Usually added as System/Tool context for clarity
-                messages.append({"role": "system", "content": f"=== RELEVANT EXTERNAL CONTEXT ===\n{kb_text}=== END EXTERNAL CONTEXT ===\n"})
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": f"=== RELEVANT EXTERNAL CONTEXT ===\n{kb_text}=== END EXTERNAL CONTEXT ===\n",
+                    }
+                )
 
         # Conversation History
         # Limit to last 120 messages to prevent exponential growth
@@ -387,11 +392,11 @@ class ContextManager:
         # 2. Calculate Actual Token Count
         # ------------------------------
         total_tokens = self.count_tokens(messages)
-        
+
         # 3. Check if Pruning is Needed
         # -----------------------------
         target_context_tokens = max_input_tokens - reserved_for_output
-        
+
         if total_tokens > target_context_tokens:
             removed_count, pruned_turns = self.prune_to_fit_context(
                 messages,
@@ -416,11 +421,13 @@ class ContextManager:
             f"(strictly ≤ {max_input_tokens:,}) | KB: {len(self.knowledge_base)} | "
             f"Archived: {len(self.current_topic.archived_history)} | Reserved: {reserved_for_output:,}"
         )
-        
+
         # Final Safety Check: Ensure (Input + Output Reserve) <= Max Input
         final_total = total_tokens + reserved_for_output
         if final_total > max_input_tokens:
-            logger.warning(f"Final check: Input({total_tokens:,}) + Output({reserved_for_output:,}) > Max({max_input_tokens:,})")
+            logger.warning(
+                f"Final check: Input({total_tokens:,}) + Output({reserved_for_output:,}) > Max({max_input_tokens:,})"
+            )
             # Emergency prune 1 more chunk if possible
             if total_tokens > target_context_tokens:
                 _, emergency_turns = self.prune_to_fit_context(
@@ -430,7 +437,9 @@ class ContextManager:
                 )
                 total_tokens = self.count_tokens(messages)
                 if total_tokens + reserved_for_output > max_input_tokens:
-                    logger.warning(f"Emergency prune still exceeded. Final: {total_tokens + reserved_for_output}")
+                    logger.warning(
+                        f"Emergency prune still exceeded. Final: {total_tokens + reserved_for_output}"
+                    )
 
         return messages
 
@@ -477,7 +486,7 @@ class ContextManager:
         removed = 0
 
         # Safety Buffer: Add 256 tokens to target to handle BPE/Special tokens
-        effective_max = max_tokens - 256 
+        effective_max = max_tokens - 256
 
         while current > effective_max and i < len(messages) - min_keep_messages:
             turn_start = i
@@ -537,6 +546,10 @@ class ContextManager:
         """Pull relevant old turns from archive if model says 'I don't remember'."""
         if not self.current_topic.archived_history or not query.strip():
             return ""
+
+        if not self.tokenizer:
+            raise RuntimeError("Tokenizer is not loaded...")
+
         query_emb = await self.fetch_embedding(query)
         query_words = re.findall(r"\b\w+\b", query.lower())
 
