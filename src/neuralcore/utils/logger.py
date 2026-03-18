@@ -1,16 +1,13 @@
 import asyncio
 import logging
-
-# Logging configuration
-LOG = True
-LOG_LEVEL = "info"
-LOG_TO_FILE = True
-LOG_TO_UI = False
+from pathlib import Path
+from neuralcore.utils.config import ConfigLoader
 
 
 class Logger:
     _logger = None
-    _renderer = None  # <-- store renderer globally
+    _renderer = None  # optional TUI renderer
+    _config = None  # caching the logging config
 
     LEVELS = {
         "debug": logging.DEBUG,
@@ -20,60 +17,62 @@ class Logger:
         "critical": logging.CRITICAL,
     }
 
-    _logging_enabled = LOG
-    _use_fancy_print = LOG_TO_UI
-    _use_file_handler = LOG_TO_FILE
+    @classmethod
+    def _load_config(cls) -> dict:
+        """Lazy-load logging config from ConfigLoader."""
+        if cls._config is None:
+            cls._config = ConfigLoader().get_logging_config()
+        return cls._config
 
     @classmethod
-    def get_logger(
-        cls,
-        name: str = "neuralcore",
-        level: str = LOG_LEVEL,
-        log_file: str = "neuralcore.log",
-        renderer=None,
-    ) -> logging.Logger:
+    def get_logger(cls, name: str = "neuralcore", renderer=None) -> logging.Logger:
         """
         Returns a singleton logger instance.
-        If a renderer is passed once, it will be stored and reused.
+
+        Args:
+            name: logger name
+            renderer: optional TUI renderer
         """
 
-        # Store renderer if provided
+        # store renderer if provided
         if renderer is not None:
             cls._renderer = renderer
 
+        # fetch logging config automatically
+        config = cls._load_config()
+
+        LOG = config.get("logging_enabled", True)
+        LOG_LEVEL = config.get("log_level", "info")
+        LOG_TO_FILE = config.get("log_to_file", True)
+        LOG_TO_UI = config.get("log_to_ui", False)
+        LOG_FILE = Path(
+            config.get("log_file", Path.home() / ".neuralcore" / "neuralcore.log")
+        )
+
+        # create singleton logger
         if cls._logger is None:
             cls._logger = logging.getLogger(name)
-
-            log_level = cls.LEVELS.get(level.lower(), logging.INFO)
-            cls._logger.setLevel(log_level)
-
-            # Prevent propagation to root logger
+            cls._logger.setLevel(cls.LEVELS.get(LOG_LEVEL.lower(), logging.INFO))
             cls._logger.propagate = False
 
-            # Avoid duplicate handlers
-            if not cls._logger.handlers:
-
-                if cls._use_file_handler and cls._logging_enabled:
-                    file_handler = logging.FileHandler(log_file)
+            if not cls._logger.handlers and LOG:
+                if LOG_TO_FILE:
+                    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+                    file_handler = logging.FileHandler(LOG_FILE)
                     file_formatter = logging.Formatter(
                         "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
                     )
                     file_handler.setFormatter(file_formatter)
                     cls._logger.addHandler(file_handler)
 
-                if cls._use_fancy_print and cls._logging_enabled:
-                    cls._logger.addHandler(
-                        FancyPrintHandler(renderer=cls._renderer)
-                    )
+                if LOG_TO_UI:
+                    cls._logger.addHandler(FancyPrintHandler(renderer=cls._renderer))
 
         return cls._logger
 
 
 class FancyPrintHandler(logging.Handler):
-    """
-    Logging handler that prints to the TUI via the renderer.
-    Falls back to normal print if renderer is unavailable.
-    """
+    """Logging handler that prints to a TUI renderer or fallback to print."""
 
     def __init__(self, renderer=None):
         super().__init__()
@@ -86,7 +85,6 @@ class FancyPrintHandler(logging.Handler):
             colored_msg = self._apply_color(formatted_msg, record.levelno)
 
             if self.renderer:
-
                 try:
                     loop = asyncio.get_running_loop()
                 except RuntimeError:

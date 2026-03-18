@@ -28,7 +28,8 @@ class ConfigLoader:
         if local_path.exists():
             return local_path
 
-        global_path = Path.home() / ".neuralvoid" / self.DEFAULT_CONFIG_FILE
+        # Corrected default global path
+        global_path = Path.home() / ".neuralcore" / self.DEFAULT_CONFIG_FILE
         if global_path.exists():
             return global_path
 
@@ -84,3 +85,33 @@ class ConfigLoader:
     def get_app_config(self) -> dict:
         """Return runtime config for the single interactive app"""
         return self.config.get("app", {})
+
+    def get_logging_config(self) -> dict:
+        """
+        Return logging-related configuration with defaults.
+        Includes:
+          - logging_enabled
+          - log_level
+          - log_to_file
+          - log_to_ui
+          - log_file
+        """
+        app_cfg = self.get_app_config()
+        log_dir_default = Path.home() / ".neuralcore"
+
+        # Ensure the default directory exists
+        log_dir_default.mkdir(parents=True, exist_ok=True)
+
+        log_file = app_cfg.get("log_file", log_dir_default / "neuralcore.log")
+
+        # Expand ~ if user provided path like '~/logs/app.log'
+        if isinstance(log_file, str):
+            log_file = Path(os.path.expanduser(log_file))
+
+        return {
+            "logging_enabled": app_cfg.get("logging_enabled", True),
+            "log_level": app_cfg.get("log_level", "info"),
+            "log_to_file": app_cfg.get("log_to_file", True),
+            "log_to_ui": app_cfg.get("log_to_ui", False),
+            "log_file": log_file,
+        }
