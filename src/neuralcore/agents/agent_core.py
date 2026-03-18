@@ -113,6 +113,7 @@ class AgentRunner:
             executor = get_exec(name)
             if not executor:
                 result = f"Unknown tool: {name}"
+                logger.warning(result)
                 yield (
                     "tool_result",
                     {"name": name, "result": result, "error": True},
@@ -125,8 +126,10 @@ class AgentRunner:
                         if asyncio.iscoroutine(maybe_result)
                         else maybe_result
                     )
+                    logger.info("tool_result", {"name": name, "result": result})
                     yield ("tool_result", {"name": name, "result": result})
                 except ConfirmationRequired as exc:
+                    logger.info("User confirmation needed")
                     yield (
                         "needs_confirmation",
                         {**exc.__dict__, "tool_calls": tool_calls},
@@ -134,6 +137,7 @@ class AgentRunner:
                     return
                 except Exception as exc:
                     result = f"Tool failed: {exc}"
+                    logger.warning(result)
                     yield (
                         "tool_result",
                         {"name": name, "result": result, "error": True},
@@ -159,10 +163,12 @@ class AgentRunner:
                 # Cancellation check
                 stop_event = getattr(self.client, "_current_stop_event", None)
                 if stop_event and getattr(stop_event, "is_set", lambda: False)():
+                    logger.info("Stop requested")
                     yield ("cancelled", f"Stop after tool {name}")
                     return
 
         if not tool_results:
+            logger.warning("Previous tool calls were duplicates.")
             yield (
                 "system",
                 "Previous tool calls were duplicates. Try a different approach.",
@@ -172,7 +178,6 @@ class AgentRunner:
     async def run(
         self,
         user_prompt: str,
-        messages_so_far: List[Dict[str, Any]],
         tools: ToolProvider,
         system_prompt: str = "",
         get_executor: Optional[ToolExecutorGetter] = None,
@@ -273,7 +278,7 @@ class AgentRunner:
                     metadata={"iteration": iteration},
                 )
 
-                if iteration == 1:
+                if iteration > 1:
                     logger.debug(
                         f"Turn {iteration} completed with no tool calls. Analyzing..."
                     )
@@ -298,6 +303,7 @@ class AgentRunner:
 
                     if isinstance(payload, dict):
                         if payload.get("reason") == "reflection_stuck":
+                            logger.warning("Reflection stuck")
                             break  # Break loop to trigger final summary
                         # If it's a normal finish, continue with the summary
                         elif (
@@ -311,6 +317,7 @@ class AgentRunner:
 
                     # If payload was a string (reflection_triggered), continue loop
                     elif isinstance(payload, str):
+                        logger.info("Reflection triggered")
                         yield (
                             "review_phase",
                             {"summary": payload, "type": "reflection_triggered"},
@@ -319,6 +326,7 @@ class AgentRunner:
 
                     # If we get here, payload is something else unexpected
                     else:
+                        logger.info("Reflection complete")
                         yield (
                             "review_phase",
                             {"summary": "Reflection complete", "type": "unknown"},
@@ -355,10 +363,12 @@ class AgentRunner:
                         self.executed_signatures.add(sig)
 
                         yield ("tool_start", {"name": name, "args": args})
+                        logger.info("tool_start", {"name": name, "args": args})
 
                         executor = get_exec(name)
                         if not executor:
                             result = f"Unknown tool: {name}"
+                            logger.warning(result)
                             yield (
                                 "tool_result",
                                 {"name": name, "result": result, "error": True},
@@ -373,6 +383,7 @@ class AgentRunner:
                                 )
                                 yield ("tool_result", {"name": name, "result": result})
                             except ConfirmationRequired as exc:
+                                logger.info("Confirmation requested")
                                 yield (
                                     "needs_confirmation",
                                     {**exc.__dict__, "tool_calls": tool_calls},
@@ -380,6 +391,7 @@ class AgentRunner:
                                 return  # Clean return for confirmation
                             except Exception as exc:
                                 result = f"Tool failed: {exc}"
+                                logger.warning(result)
                                 yield (
                                     "tool_result",
                                     {"name": name, "result": result, "error": True},
@@ -418,6 +430,7 @@ class AgentRunner:
                             "cancelled",
                             f"Stop after tool {tool_calls[0]['function']['name'] if tool_calls else 'unknown'}",
                         )
+                        logger.info(f"Stop after tool {tool_calls[0]['function']['name'] if tool_calls else 'unknown'}")
                         return
 
         # ── Max Iterations Reached ─────────────────────────────────────────
