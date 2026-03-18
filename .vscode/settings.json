@@ -5,5 +5,15 @@
   ],
   "python.analysis.extraPaths": [
     "/home/voldemar/Dev/AI/ProjectNexus/NeuralCore/.venv/lib/python3.14/site-packages"
-  ]
+  ],
+  "terminal.integrated.defaultProfile.linux": "fish",
+  "terminal.integrated.profiles.linux": {
+    "fish": {
+      "path": "/app/bin/host-spawn",
+      "args": ["fish"],
+      "overrideName": true,
+      "icon": "terminal"
+    }
+  },
+  "python.terminal.activateEnvironment": true
 }
