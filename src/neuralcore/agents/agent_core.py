@@ -245,25 +245,33 @@ class AgentRunner:
             text_buffer = ""
             tool_calls = None
 
-            async for kind, payload in self.client._drain_queue(queue):
-                if kind == "content":
-                    text_buffer += payload
-                    yield ("content_delta", payload)
-                elif kind == "tool_delta":
-                    yield ("tool_call_delta", payload)
-                elif kind == "finish":
-                    tool_calls = payload.get("tool_calls")
-                    yield ("llm_finish", payload)
-                    break
-                elif kind == "error":
-                    yield ("error", payload)
-                    return
+            try:
+                async for kind, payload in self.client._drain_queue(queue):
+                    if kind == "content":
+                        text_buffer += payload
+                        yield ("content_delta", payload)
+                    elif kind == "tool_delta":
+                        yield ("tool_call_delta", payload)
+                    elif kind == "finish":
+                        tool_calls = payload.get("tool_calls")
+                        yield ("llm_finish", payload)
+                        break
+                    elif kind == "error":
+                        yield ("error", payload)
+                        return
+            except asyncio.CancelledError:
+                yield ("cancelled", "Task cancelled by user")
+                return
 
             full_reply = text_buffer.strip()
 
             # ── No Tool Calls = Review & Reflection Path ────────────
             if not tool_calls:
-                await context_manager.add_message("assistant", full_reply)
+                await context_manager.add_external_content(
+                    source_type="assistant_output",
+                    content=full_reply,
+                    metadata={"iteration": iteration},
+                )
 
                 if iteration == 1:
                     logger.debug(
@@ -322,7 +330,11 @@ class AgentRunner:
             assistant_text = full_reply or ""
             if tool_calls:
                 assistant_text = f"Executed {len(tool_calls)} tool call(s)"
-                await context_manager.add_message("assistant", assistant_text)
+                await context_manager.add_external_content(
+                    source_type="assistant_output",
+                    content=assistant_text,
+                    metadata={"iteration": iteration},
+                )
 
                 yield ("tool_calls", tool_calls)
 
@@ -413,7 +425,6 @@ class AgentRunner:
         yield ("warning", f"Max iterations ({self.max_iterations}) reached")
 
         if iteration > 1:
-
             # Generate final summary before exiting
             async for event, payload in self._generate_final_summary(
                 user_prompt, self.messages, tools, "max_iterations_reached"

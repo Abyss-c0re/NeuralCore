@@ -21,43 +21,64 @@ logger = Logger.get_logger()
 
 
 def prepare_messages_for_stream(messages, enable_thinking=False):
-    # Copy to avoid mutating original
+    # Copy
     msgs = [m.copy() for m in messages]
 
-    # 1. Enforce system-first (prevents Jinja parser failure)
-    seen_non_system = False
+    # 1. Merge system messages
     sys_parts = []
     cleaned = []
+
     for m in msgs:
-        role = m.get("role")
-        if role == "system":
-            if seen_non_system:
-                # Instead of raise, merge into first system (common workaround)
-                sys_parts.append(m.get("content", "").strip())
-            else:
-                sys_parts.append(m.get("content", "").strip())
+        if m.get("role") == "system":
+            content = (m.get("content") or "").strip()
+            if content:
+                sys_parts.append(content)
         else:
-            seen_non_system = True
             cleaned.append(m)
 
     if sys_parts:
-        cleaned.insert(
-            0, {"role": "system", "content": "\n\n".join(filter(None, sys_parts))}
-        )
+        cleaned.insert(0, {
+            "role": "system",
+            "content": "\n\n".join(sys_parts)
+        })
 
-    # 2. Handle assistant prefill + thinking conflict
-    if enable_thinking and cleaned and cleaned[-1].get("role") == "assistant":
+    # 2. REMOVE assistant→assistant loops
+    deduped = []
+    prev_role = None
+
+    for m in cleaned:
+        role = m.get("role")
+
+        # drop consecutive assistant messages
+        if role == "assistant" and prev_role == "assistant":
+            continue
+
+        deduped.append(m)
+        prev_role = role
+
+    cleaned = deduped
+
+    # 3. Ensure last message is not assistant when thinking
+    if enable_thinking and cleaned:
         last = cleaned[-1]
-        has_visible_content = bool(last.get("content") and last["content"].strip())
-        if has_visible_content and not last.get("tool_calls"):  # preserve tool calls
-            # Option A: drop (simplest, most compatible)
-            cleaned.pop()
 
-            # Option B: empty content only (keeps structure if backend allows)
-            # last["content"] = ""
+        if last.get("role") == "assistant":
+            has_content = bool(last.get("content") and last["content"].strip())
+            has_tool_calls = bool(last.get("tool_calls"))
+
+            if has_content:
+                if has_tool_calls:
+                    # keep tool calls but remove visible text
+                    last["content"] = ""
+                else:
+                    # remove it entirely (prevents self-loop + API error)
+                    cleaned.pop()
+
+    # 4. FINAL GUARD: never end on assistant in thinking mode
+    if enable_thinking and cleaned and cleaned[-1].get("role") == "assistant":
+        cleaned.pop()
 
     return cleaned
-
 
 async def embed_single_chunk(
     client: AsyncOpenAI,
@@ -795,12 +816,30 @@ class LLMClient:
     async def _drain_queue(
         self, queue: asyncio.Queue
     ) -> AsyncIterator[Tuple[str, Any]]:
+        stop_event = getattr(self, "_current_stop_event", None)
+
         while True:
-            item = await queue.get()
+            # 🔴 Check cancellation BEFORE blocking
+            if stop_event and stop_event.is_set():
+                yield ("cancelled", "Stream cancelled")
+                return
+
+            try:
+                # ✅ Non-blocking wait
+                item = await asyncio.wait_for(queue.get(), timeout=0.1)
+            except asyncio.TimeoutError:
+                continue
+
             if item is None:
                 break
+
             kind, payload = item
             yield kind, payload
+
+            # 🔴 Optional: check again after yield
+            if stop_event and stop_event.is_set():
+                yield ("cancelled", "Stream cancelled")
+                return
 
     # -------------------------------------------------------------------------
     # Quick single-turn convenience
