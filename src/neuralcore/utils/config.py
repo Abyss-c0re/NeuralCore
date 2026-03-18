@@ -21,7 +21,7 @@ class ConfigLoader:
         if cli_path:
             return Path(cli_path)
 
-        if env_path := os.getenv("APP_CONFIG"):
+        if env_path := os.getenv("NEURALCORE_CONFIG"):
             return Path(env_path)
 
         local_path = Path(self.DEFAULT_CONFIG_FILE)
@@ -82,7 +82,7 @@ class ConfigLoader:
         agents = self.config.get("agents", {})
         return agents.get(agent_name, {})
 
-    def get_app_config(self) -> dict:
+    def get_NEURALCORE_CONFIG(self) -> dict:
         """Return runtime config for the single interactive app"""
         return self.config.get("app", {})
 
@@ -96,7 +96,7 @@ class ConfigLoader:
           - log_to_ui
           - log_file
         """
-        app_cfg = self.get_app_config()
+        app_cfg = self.get_NEURALCORE_CONFIG()
         log_dir_default = Path.home() / ".neuralcore"
 
         # Ensure the default directory exists
