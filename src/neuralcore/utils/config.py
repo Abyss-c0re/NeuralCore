@@ -82,7 +82,7 @@ class ConfigLoader:
         agents = self.config.get("agents", {})
         return agents.get(agent_name, {})
 
-    def get_NEURALCORE_CONFIG(self) -> dict:
+    def get_app_config(self) -> dict:
         """Return runtime config for the single interactive app"""
         return self.config.get("app", {})
 
@@ -96,7 +96,7 @@ class ConfigLoader:
           - log_to_ui
           - log_file
         """
-        app_cfg = self.get_NEURALCORE_CONFIG()
+        app_cfg = self.get_app_config()
         log_dir_default = Path.home() / ".neuralcore"
 
         # Ensure the default directory exists
@@ -115,3 +115,13 @@ class ConfigLoader:
             "log_to_ui": app_cfg.get("log_to_ui", False),
             "log_file": log_file,
         }
+# --------------------------
+# Singleton instance
+# --------------------------
+loader: ConfigLoader | None = None
+
+def get_loader(cli_path: str | None = None) -> ConfigLoader:
+    global loader
+    if loader is None:
+        loader = ConfigLoader(cli_path)
+    return loader
