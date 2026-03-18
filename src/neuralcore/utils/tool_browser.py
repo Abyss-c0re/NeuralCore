@@ -2,19 +2,22 @@ from neuralcore.actions.actions import Action
 from neuralcore.actions.registry import ActionRegistry
 from neuralcore.actions.manager import DynamicActionManager
 
+
 class ToolBrowser(Action):
     def __init__(self, registry: ActionRegistry, manager: DynamicActionManager):
 
         super().__init__(
             name="browse_tools",
             description=(
-                "Search for tools not currently loaded. "
-                "Use when you need capabilities like web search, email, APIs, files, or terminal."
+                "Find and load tools not currently available. "
+                "Use when a required action cannot be done with loaded tools. "
+                "Provide a short action query (e.g. 'open file', 'send email', 'search web'). "
+                "Focus on one action at a time."
             ),
             parameters={
                 "query": {
                     "type": "string",
-                    "description": "Describe the tool you need",
+                    "description": "Write one action. Use 1 short phrase. Do not explain. Examples: 'open file', 'edit file', 'search web'.",
                 },
                 "limit": {"type": "integer", "default": 8},
             },

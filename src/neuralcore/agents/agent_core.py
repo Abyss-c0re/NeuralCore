@@ -16,6 +16,7 @@ ToolExecutorGetter = Optional[Callable[[str], Optional["Action"]]]
 
 logger = Logger.get_logger()
 
+
 class AgentRunner:
     """
     Reusable agent loop orchestrator that uses an existing LLMClient
@@ -67,12 +68,24 @@ class AgentRunner:
 
         if context_manager:
             try:
-                ctx_history = await context_manager.generate_prompt(user_prompt, num_messages=0)
-                logger.debug("Context history length=%d", len(ctx_history) if ctx_history else 0)
+                ctx_history = await context_manager.generate_prompt(
+                    user_prompt, num_messages=0
+                )
+                logger.debug(
+                    "Context history length=%d", len(ctx_history) if ctx_history else 0
+                )
                 if ctx_history and "\nUser query:" in ctx_history[-1]["content"]:
-                    ctx_part = ctx_history[-1]["content"].split("\nUser query:")[0].strip()
+                    ctx_part = (
+                        ctx_history[-1]["content"].split("\nUser query:")[0].strip()
+                    )
                     if ctx_part:
-                        messages.insert(1, {"role": "system", "content": f"Relevant context:\n{ctx_part}"})
+                        messages.insert(
+                            1,
+                            {
+                                "role": "system",
+                                "content": f"Relevant context:\n{ctx_part}",
+                            },
+                        )
                         logger.info("Relevant context added to messages")
             except Exception as e:
                 logger.warning("Context enrichment failed: %s", e)
@@ -90,14 +103,22 @@ class AgentRunner:
             len(messages),
         )
 
-        while self.max_iterations is None or self.max_iterations < 0 or iteration < self.max_iterations:
+        while (
+            self.max_iterations is None
+            or self.max_iterations < 0
+            or iteration < self.max_iterations
+        ):
             iteration += 1
             logger.debug("Iteration %d start", iteration)
             yield ("step_start", {"iteration": iteration})
 
             # Safe cancellation check
             stop_event = getattr(self.client, "_current_stop_event", None)
-            if stop_event and callable(getattr(stop_event, "is_set", None)) and stop_event.is_set():
+            if (
+                stop_event
+                and callable(getattr(stop_event, "is_set", None))
+                and stop_event.is_set()
+            ):
                 logger.warning("Cancelled before LLM call")
                 yield ("cancelled", "Stop requested before LLM call")
                 return
@@ -107,8 +128,10 @@ class AgentRunner:
             queue = await self.client.stream_with_tools(
                 messages=messages,
                 tools=get_tools_func(),
-                temperature = temperature if temperature is not None else self.temperature,
-                max_tokens = max_tokens if max_tokens is not None else self.max_tokens,
+                temperature=temperature
+                if temperature is not None
+                else self.temperature,
+                max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
                 tool_choice="auto",
             )
             logger.debug("Queue received | type=%s", type(queue))
@@ -118,7 +141,9 @@ class AgentRunner:
 
             logger.debug("Draining LLM queue...")
             async for kind, payload in self.client._drain_queue(queue):
-                logger.debug("Drained kind=%s | payload_preview=%s", kind, str(payload)[:200])
+                logger.debug(
+                    "Drained kind=%s | payload_preview=%s", kind, str(payload)[:200]
+                )
 
                 if kind == "content":
                     text_buffer += payload
@@ -137,7 +162,11 @@ class AgentRunner:
 
             # Safe cancellation after LLM
             stop_event = getattr(self.client, "_current_stop_event", None)
-            if stop_event and callable(getattr(stop_event, "is_set", None)) and stop_event.is_set():
+            if (
+                stop_event
+                and callable(getattr(stop_event, "is_set", None))
+                and stop_event.is_set()
+            ):
                 logger.warning("Cancelled after LLM response")
                 yield ("cancelled", "Stop requested after LLM response")
                 return
@@ -151,10 +180,15 @@ class AgentRunner:
                     messages[-1]["content"] = full_reply
                     logger.debug("Updated last assistant message")
                 else:
-                    yield ("assistant_message", {"role": "assistant", "content": full_reply})
+                    yield (
+                        "assistant_message",
+                        {"role": "assistant", "content": full_reply},
+                    )
 
                 yield ("final_answer", full_reply)
-                logger.info("AgentRunner finished normally after %d iterations", iteration)
+                logger.info(
+                    "AgentRunner finished normally after %d iterations", iteration
+                )
                 return
 
             # Tool path
@@ -184,12 +218,19 @@ class AgentRunner:
                 executor = get_exec(name)
                 if not executor:
                     result = f"Unknown tool: {name}"
-                    yield ("tool_result", {"name": name, "result": result, "error": True})
+                    yield (
+                        "tool_result",
+                        {"name": name, "result": result, "error": True},
+                    )
                     logger.warning("Unknown tool executed: %s", name)
                 else:
                     try:
                         maybe_result = executor(**args)
-                        result = await maybe_result if asyncio.iscoroutine(maybe_result) else maybe_result
+                        result = (
+                            await maybe_result
+                            if asyncio.iscoroutine(maybe_result)
+                            else maybe_result
+                        )
                         yield ("tool_result", {"name": name, "result": result})
                         logger.debug("Tool result yielded: %s", name)
                     except ConfirmationRequired as exc:
@@ -209,36 +250,53 @@ class AgentRunner:
                     except Exception as exc:
                         result = f"Tool execution failed: {exc}"
                         logger.error("Tool %s failed", name, exc_info=True)
-                        yield ("tool_result", {"name": name, "result": result, "error": True})
+                        yield (
+                            "tool_result",
+                            {"name": name, "result": result, "error": True},
+                        )
 
                 # Safe cancellation after tool
                 stop_event = getattr(self.client, "_current_stop_event", None)
-                if stop_event and callable(getattr(stop_event, "is_set", None)) and stop_event.is_set():
+                if (
+                    stop_event
+                    and callable(getattr(stop_event, "is_set", None))
+                    and stop_event.is_set()
+                ):
                     logger.warning("Cancelled after tool %s", name)
                     yield ("cancelled", f"Stop requested after tool {name}")
                     return
 
-                tool_results.append({
-                    "role": "tool",
-                    "tool_call_id": call["id"],
-                    "name": name,
-                    "content": str(result) if not isinstance(result, str) else result,
-                })
+                tool_results.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call["id"],
+                        "name": name,
+                        "content": str(result)
+                        if not isinstance(result, str)
+                        else result,
+                    }
+                )
 
             if tool_results:
                 messages.extend(tool_results)
             else:
-                yield ("warning", "No tool results produced in this iteration")
                 logger.warning("No tool results produced in iteration %d", iteration)
-                break
+
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": "The previous tool calls were skipped because they were duplicates. Please provide a different approach or final answer.",
+                    }
+                )
+                continue
 
         yield ("warning", f"Max iterations ({self.max_iterations}) reached")
         yield ("finish", {"reason": "max_iterations_reached"})
         logger.info("AgentRunner run finished | max_iterations reached")
 
 
-# ── Optional convenience wrapper (for simple usage) 
-# 
+# ── Optional convenience wrapper (for simple usage)
+#
 # # Usage Headless / script / test
 # result = await run_agent_once(
 #     client=llm_client,
@@ -247,6 +305,7 @@ class AgentRunner:
 #     tools=my_tools,
 # )
 # print(result)─────────────────────────────
+
 
 async def run_agent_once(
     client: "LLMClient",

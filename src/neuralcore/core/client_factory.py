@@ -49,14 +49,18 @@ class ClientFactory:
                 raise ValueError(f"extra_body must be a dict for client {client_name}")
             extra_body.update(user_extra)
 
-        # --- FIX: ensure tokenizer object ---
+        # --- tokenizer handling ---
         tokenizer_cfg = cfg.get("tokenizer")
         tokenizer_obj = None
         if tokenizer_cfg:
             if isinstance(tokenizer_cfg, str):
                 tokenizer_obj = TextTokenizer(tokenizer_cfg)
             else:
-                tokenizer_obj = tokenizer_cfg  # already a tokenizer object
+                tokenizer_obj = tokenizer_cfg
+
+        # ✅ NEW: pass missing params
+        temperature = cfg.get("temperature", 0.7)
+        max_tokens = cfg.get("max_tokens", 4096)
 
         return LLMClient(
             base_url=cfg.get("base_url", "http://localhost:1212/v1"),
@@ -64,6 +68,8 @@ class ClientFactory:
             tokenizer=tokenizer_obj,
             api_key=api_key,
             extra_body=extra_body or None,
+            temperature=temperature,
+            max_tokens=max_tokens,
         )
 
     def register_tool_clients(self, registry, main_client: LLMClient):

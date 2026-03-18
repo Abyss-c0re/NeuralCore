@@ -70,12 +70,12 @@ class LLMClient:
         api_key: str = "not-needed",
         extra_body: Optional[Dict[str, Any]] = None,
         temperature: float = 0.7,
-        max_tokens : int = 4096,
+        max_tokens: int = 4096,
     ):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.temperature = temperature
-        self.max_tokens  = max_tokens 
+        self.max_tokens = max_tokens
         self.extra_body_default = extra_body or {}
         # Accept either a string (to wrap) or an existing tokenizer instance
         if isinstance(tokenizer, str):
@@ -142,12 +142,8 @@ class LLMClient:
         params = {
             "model": self.model,
             "messages": messages,
-            "temperature": temperature
-            if temperature is not None
-            else self.temperature,
-            "max_tokens": max_tokens
-            if max_tokens is not None
-            else self.max_tokens ,
+            "temperature": temperature if temperature is not None else self.temperature,
+            "max_tokens": max_tokens if max_tokens is not None else self.max_tokens,
             "stream": True,
             **kwargs,
         }
@@ -261,12 +257,8 @@ class LLMClient:
         params = {
             "model": self.model,
             "messages": messages,
-            "temperature": temperature
-            if temperature is not None
-            else self.temperature,
-            "max_tokens": max_tokens
-            if max_tokens is not None
-            else self.max_tokens ,
+            "temperature": temperature if temperature is not None else self.temperature,
+            "max_tokens": max_tokens if max_tokens is not None else self.max_tokens,
             "stream": False,
             **kwargs,
         }
@@ -296,12 +288,8 @@ class LLMClient:
         params = {
             "model": self.model,
             "messages": messages,
-            "temperature": temperature
-            if temperature is not None
-            else self.temperature,
-            "max_tokens": max_tokens
-            if max_tokens is not None
-            else self.max_tokens ,
+            "temperature": temperature if temperature is not None else self.temperature,
+            "max_tokens": max_tokens if max_tokens is not None else self.max_tokens,
             "stream": False,
             **kwargs,
         }
@@ -361,9 +349,7 @@ class LLMClient:
         params = {
             "model": model_to_use,
             "messages": messages,
-            "temperature": temperature
-            if temperature is not None
-            else self.temperature,
+            "temperature": temperature if temperature is not None else self.temperature,
             "max_tokens": max_tokens,
             "stream": False,
             **kwargs,
@@ -411,9 +397,7 @@ class LLMClient:
         params = {
             "model": model_to_use,
             "messages": messages,
-            "temperature": temperature
-            if temperature is not None
-            else self.temperature,
+            "temperature": temperature if temperature is not None else self.temperature,
             "max_tokens": max_tokens,
             "stream": False,
             **kwargs,
@@ -496,8 +480,8 @@ class LLMClient:
         self,
         messages: List[Dict[str, Any]],
         tools: Optional[Union[List[Dict[str, Any]], "ActionSet"]] = None,
-        temperature: float = 0.3,
-        max_tokens: int = 2048,
+        temperature: float = 0.7,
+        max_tokens: int = 22048,
         tool_choice: Union[str, Dict] = "auto",
         auto_stop_on_complete_tool: bool = False,  # default off — safer
         extra_body: Optional[Dict] = None,
