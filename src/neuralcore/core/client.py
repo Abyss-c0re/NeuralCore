@@ -880,4 +880,34 @@ class LLMClient:
         stream: bool = False,
         **kwargs,
     ) -> Union[str, asyncio.Queue]:
-        return asyncio.run(self.ask(prompt, system=system, stream=stream, **kwargs))
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop → safe
+            return asyncio.run(self.ask(prompt, system=system, stream=stream, **kwargs))
+
+        # Already running loop → thread fallback
+        import threading
+
+        result_container: dict[str, Any] = {
+            "result": None,
+            "error": None,
+        }
+
+        def runner():
+            try:
+                result_container["result"] = asyncio.run(
+                    self.ask(prompt, system=system, stream=stream, **kwargs)
+                )
+            except Exception as e:
+                result_container["error"] = e
+
+        thread = threading.Thread(target=runner)
+        thread.start()
+        thread.join()
+
+        if result_container["error"]:
+            raise result_container["error"]
+
+        return result_container["result"]
