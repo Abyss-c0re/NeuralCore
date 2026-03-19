@@ -1,5 +1,6 @@
 import re
 import asyncio
+import time
 import numpy as np
 from typing import Tuple, List, Dict, Any
 from neuralcore.utils.logger import Logger
@@ -40,30 +41,6 @@ def keyword_score(query_words: List[str], text: str) -> float:
     coverage = overlap / max(len(query_words), 1)
     prefix_bonus = sum(1 for qw in query_words for w in words if w.startswith(qw))
     return coverage * 3.0 + prefix_bonus * 0.5
-
-
-import re
-import asyncio
-import time
-import numpy as np
-from typing import Tuple, List, Dict, Any
-from neuralcore.utils.logger import Logger
-from neuralcore.utils.prompt_builder import PromptBuilder as PromptHelper
-from neuralcore.utils.config import get_loader
-from neuralcore.core.client_factory import get_clients
-from neuralcore.utils.text_tokenizer import TextTokenizer
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CONSTANTS
-# ─────────────────────────────────────────────────────────────────────────────
-MSG_THR = 0.5
-NUM_MSG = 5
-OFF_THR = 0.7
-OFF_FREQ = 4
-SLICE_SIZE = 4
-
-logger = Logger.get_logger()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
