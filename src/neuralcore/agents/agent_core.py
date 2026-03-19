@@ -60,7 +60,7 @@ class AgentRunner:
         )[:7000]
 
         # 2. Ask LLM for reflection
-        summary = await self.client.ask(
+        summary = self.client.ask(
             f"Agent has run {iteration} iterations on task: {original_prompt}\n\n"
             f"Recent context:\n{context_text}\n\n"
             "You just finished a turn without calling any tools (or tools failed).\n"
