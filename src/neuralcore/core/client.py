@@ -13,6 +13,13 @@ import numpy as np
 
 from neuralcore.utils.logger import Logger
 
+import json
+import time
+
+EMIT_INTERVAL = 0.05  # seconds (throttle)
+MIN_CHARS_DELTA = 3  # don't spam tiny updates
+
+
 ToolProvider = Union[ActionSet, DynamicActionManager, List[Dict[str, Any]]]
 ToolExecutorGetter = Optional[Callable[[str], Optional["Action"]]]
 
@@ -28,6 +35,14 @@ async def drain_queue_to_string(queue: asyncio.Queue) -> str:
             break
         chunks.append(item)
     return "".join(chunks)
+
+
+def is_valid_json(s: str) -> bool:
+    try:
+        json.loads(s)
+        return True
+    except json.JSONDecodeError:
+        return False
 
 
 def prepare_messages_for_stream(messages, enable_thinking=False):
@@ -569,7 +584,7 @@ class LLMClient:
         temperature: float = 0.7,
         max_tokens: int = 22048,
         tool_choice: Union[str, Dict] = "auto",
-        auto_stop_on_complete_tool: bool = False,  # default off — safer
+        auto_stop_on_complete_tool: bool = False,
         extra_body: Optional[Dict] = None,
         **kwargs,
     ) -> asyncio.Queue:
@@ -580,30 +595,14 @@ class LLMClient:
 
         Possible kinds:
         - "content"         → str (text delta)
-        - "tool_delta"      → dict (partial update of one tool call)
-        - "tool_complete"   → dict (finished tool call - only if auto_stop=True)
+        - "tool_delta"      → dict (partial or initial update of one tool call)
+        - "tool_complete"   → dict (finished tool call)
         - "finish"          → dict { "finish_reason": str, "tool_calls": list|None }
         - "error"           → str (error message)
         - None              → end of stream marker
-
-        Recommended usage pattern:
-            text_buffer = ""
-            tool_buffer = {}   # index → current tool call dict
-            while True:
-                item = await queue.get()
-                if item is None: break
-                kind, payload = item
-                if kind == "content":
-                    text_buffer += payload
-                    # update UI
-                elif kind == "tool_delta":
-                    idx = payload["index"]
-                    tool_buffer[idx] = payload
-                    # optional: show partial tool call in UI
-                elif kind == "finish":
-                    # decide what to do — execute tools, append messages, etc.
         """
-        # Normalize tools
+
+        # ── Normalize tools ─────────────────────────────
         tool_schemas: Optional[List[Dict]] = None
         if tools is not None:
             if isinstance(tools, list):
@@ -613,7 +612,7 @@ class LLMClient:
             else:
                 raise TypeError("tools must be List[dict] or ActionSet")
 
-        self.stop_stream()  # assuming you have this method
+        self.stop_stream()  # stop any ongoing stream
 
         queue = asyncio.Queue()
         stop_event = asyncio.Event()
@@ -637,88 +636,148 @@ class LLMClient:
 
         if tool_schemas:
             params["tools"] = tool_schemas
-
         if merged_extra:
             params["extra_body"] = merged_extra
 
-        tool_call_buffer: Dict[int, Dict] = {}  # index → current tool call state
+        # ── State ───────────────────────────────────────
+        tool_call_buffer: Dict[int, Dict] = {}  # index → current tool state
+        tool_meta: Dict[int, Dict] = {}         # index → phase, last_len, completed
         last_chunk = None
+
+        def is_valid_json(s: str) -> bool:
+            try:
+                json.loads(s)
+                return True
+            except json.JSONDecodeError:
+                return False
 
         async def _run_stream():
             nonlocal last_chunk
             try:
                 stream = await self.client.chat.completions.create(**params)
+
                 async for chunk in stream:
                     if stop_event.is_set():
                         break
 
                     last_chunk = chunk
-
                     delta = chunk.choices[0].delta if chunk.choices else None
                     if not delta:
                         continue
 
-                    # ── Content ───────────────────────────────────────
-                    if delta.content is not None:
+                    # ── CONTENT ──────────────────────────────
+                    if delta.content is not None and not tool_call_buffer:
                         await queue.put(("content", delta.content))
 
-                    # ── Tool calls ────────────────────────────────────
+                    # ── TOOL CALLS ──────────────────────────
                     if delta.tool_calls:
                         for tc_delta in delta.tool_calls:
                             idx = tc_delta.index
 
+                            # INIT buffers
                             if idx not in tool_call_buffer:
                                 tool_call_buffer[idx] = {
                                     "id": "",
                                     "type": "function",
                                     "function": {"name": "", "arguments": ""},
                                 }
+                            if idx not in tool_meta:
+                                tool_meta[idx] = {
+                                    "phase": "buffering",  # buffering → streaming → done
+                                    "last_len": 0,
+                                    "completed": False,
+                                }
 
                             tc = tool_call_buffer[idx]
+                            meta = tool_meta[idx]
 
-                            changed = False
-
+                            # assign id/name safely
                             if tc_delta.id:
-                                tc["id"] += tc_delta.id
-                                changed = True
+                                tc["id"] = tc_delta.id
                             if tc_delta.function.name:
-                                tc["function"]["name"] += tc_delta.function.name
-                                changed = True
+                                tc["function"]["name"] = tc_delta.function.name
                             if tc_delta.function.arguments:
-                                tc["function"]["arguments"] += (
-                                    tc_delta.function.arguments
-                                )
-                                changed = True
+                                tc["function"]["arguments"] += tc_delta.function.arguments
 
-                            if changed:
-                                await queue.put(
-                                    (
-                                        "tool_delta",
-                                        {
-                                            "index": idx,
-                                            **tc,  # current state of this tool call
-                                        },
+                            name = tc["function"]["name"]
+                            args = tc["function"]["arguments"]
+
+                            # ignore until name exists
+                            if not name or meta["completed"]:
+                                continue
+
+                            # ── PHASE 1: BUFFER until JSON complete ──
+                            if meta["phase"] == "buffering":
+                                if args.strip() and is_valid_json(args):
+                                    # switch to streaming phase
+                                    meta["phase"] = "streaming"
+                                    meta["last_len"] = len(args)
+
+                                    # emit initial delta
+                                    await queue.put(
+                                        (
+                                            "tool_delta",
+                                            {
+                                                "index": idx,
+                                                "id": tc["id"],
+                                                "name": name,
+                                                "arguments_delta": args,
+                                            },
+                                        )
                                     )
-                                )
 
-                            # Optional early complete detection (use with caution)
-                            if auto_stop_on_complete_tool:
-                                args_str = tc["function"]["arguments"].strip()
-                                if args_str and args_str[-1] in {"}", "]"}:
-                                    try:
-                                        json.loads(args_str)
-                                        await queue.put(
-                                            ("tool_complete", {"index": idx, **tc})
+                                    # emit complete immediately
+                                    meta["completed"] = True
+                                    await queue.put(
+                                        (
+                                            "tool_complete",
+                                            {
+                                                "index": idx,
+                                                **tc,
+                                            },
                                         )
-                                        logger.debug(
-                                            f"Tool call {tc['function']['name']} appears complete → stopping"
-                                        )
+                                    )
+
+                                    if auto_stop_on_complete_tool:
                                         stop_event.set()
                                         break
-                                    except json.JSONDecodeError:
-                                        pass
+                                continue  # do not fall through
 
-                # ── Stream ended normally ─────────────────────────────
+                            # ── PHASE 2: STREAM incremental updates ──
+                            if meta["phase"] == "streaming" and not meta["completed"]:
+                                new_len = len(args)
+                                if new_len > meta["last_len"]:
+                                    chunk_delta = args[meta["last_len"]:new_len]
+                                    meta["last_len"] = new_len
+
+                                    await queue.put(
+                                        (
+                                            "tool_delta",
+                                            {
+                                                "index": idx,
+                                                "id": tc["id"],
+                                                "name": name,
+                                                "arguments_delta": chunk_delta,
+                                            },
+                                        )
+                                    )
+
+                                if is_valid_json(args):
+                                    meta["completed"] = True
+                                    await queue.put(
+                                        (
+                                            "tool_complete",
+                                            {
+                                                "index": idx,
+                                                **tc,
+                                            },
+                                        )
+                                    )
+                                    if auto_stop_on_complete_tool:
+                                        stop_event.set()
+                                        break
+
+                # ── STREAM ENDED ─────────────────────────────
                 final_tool_calls = None
                 if tool_call_buffer:
                     final_tool_calls = [
@@ -729,8 +788,6 @@ class LLMClient:
                 finish_reason = None
                 if last_chunk and last_chunk.choices:
                     finish_reason = last_chunk.choices[0].finish_reason
-
-                # heuristic fallback
                 if finish_reason is None:
                     finish_reason = "tool_calls" if final_tool_calls else "stop"
 
@@ -747,7 +804,6 @@ class LLMClient:
             except asyncio.CancelledError:
                 await queue.put(("finish", {"finish_reason": "cancelled"}))
             except Exception as e:
-                logger.error(f"stream_with_tools failed: {e}", exc_info=True)
                 await queue.put(("error", str(e)))
             finally:
                 await queue.put(None)

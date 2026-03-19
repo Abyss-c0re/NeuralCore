@@ -96,10 +96,14 @@ class AgentRunner:
     async def _execute_tools(
         self, tool_calls, get_exec, context_manager, iteration
     ) -> AsyncIterator[Tuple[str, Any]]:
-        """Execute tool calls, track results, and update context.
-        (Improved: now stores 'args', always adds system message for duplicates,
-        no stray 'system' event to preserve exact original yields)"""
+        """
+        Execute tool calls with proper executor filtering.
+        - Streams per-tool events: tool_start, tool_result, tool_skipped, needs_confirmation, cancelled.
+        - Avoids duplicate executions.
+        - Tracks results for final summary.
+        """
         tool_results = []
+
         for call in tool_calls:
             name = call["function"]["name"]
             try:
@@ -109,53 +113,46 @@ class AgentRunner:
 
             sig = (name, json.dumps(args, sort_keys=True))
             if sig in self.executed_signatures:
+                logger.debug(f"Skipping duplicate tool call: {name}")
                 continue
             self.executed_signatures.add(sig)
 
+            executor = get_exec(name)
+
+            if not executor:
+                # Skip tools without an executor, but notify UI
+                logger.warning(f"Ignoring tool '{name}' — no executor registered")
+                yield ("tool_skipped", {"name": name, "args": args, "reason": "no executor"})
+                continue
+
+            # Start tool execution
             yield ("tool_start", {"name": name, "args": args})
 
-            executor = get_exec(name)
-            if not executor:
-                result = f"Unknown tool: {name}"
+            try:
+                maybe_result = executor(**args)
+                result = await maybe_result if asyncio.iscoroutine(maybe_result) else maybe_result
+                yield ("tool_result", {"name": name, "result": result})
+            except ConfirmationRequired as exc:
+                logger.info(f"User confirmation needed for tool '{name}'")
+                yield ("needs_confirmation", {**exc.__dict__, "tool_calls": tool_calls})
+                return
+            except Exception as exc:
+                result = f"Tool '{name}' failed: {exc}"
                 logger.warning(result)
-                yield (
-                    "tool_result",
-                    {"name": name, "result": result, "error": True},
-                )
-            else:
-                try:
-                    maybe_result = executor(**args)
-                    result = (
-                        await maybe_result
-                        if asyncio.iscoroutine(maybe_result)
-                        else maybe_result
-                    )
-                    yield ("tool_result", {"name": name, "result": result})
-                except ConfirmationRequired as exc:
-                    logger.info("User confirmation needed")
-                    yield (
-                        "needs_confirmation",
-                        {**exc.__dict__, "tool_calls": tool_calls},
-                    )
-                    return
-                except Exception as exc:
-                    result = f"Tool failed: {exc}"
-                    logger.warning(result)
-                    yield (
-                        "tool_result",
-                        {"name": name, "result": result, "error": True},
-                    )
+                yield ("tool_result", {"name": name, "result": result, "error": True})
 
+            # Record result for final summary
             tool_results.append(
                 {
                     "role": "tool",
                     "tool_call_id": call["id"],
                     "name": name,
                     "content": str(result),
-                    "args": args,  # ← NEW: stored for final summary
+                    "args": args,
                 }
             )
 
+            # Add result to context manager
             await context_manager.add_external_content(
                 source_type="tool",
                 content=str(result),
@@ -163,18 +160,18 @@ class AgentRunner:
             )
             await context_manager.add_message("tool", str(result))
 
-            # Cancellation check (per-tool, same as before)
+            # Check for cancellation
             stop_event = getattr(self.client, "_current_stop_event", None)
             if stop_event and getattr(stop_event, "is_set", lambda: False)():
-                logger.info("Stop requested")
-                yield ("cancelled", f"Stop after tool {name}")
+                logger.info(f"Stop requested during tool '{name}' execution")
+                yield ("cancelled", f"Stop after tool '{name}'")
                 return
 
         if not tool_results:
-            logger.warning("Previous tool calls were duplicates.")
-            dup_msg = "Previous tool calls were duplicates. Try a different approach."
+            # No new tool results, possibly all duplicates or skipped
+            logger.debug("No executable tool calls produced results this iteration")
+            dup_msg = "All tool calls were duplicates or skipped. Try a different approach."
             await context_manager.add_message("system", dup_msg)
-            # NO yield here → exact same external behaviour as original inline code
 
         self.tool_results.extend(tool_results)
 
