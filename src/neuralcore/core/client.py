@@ -19,6 +19,15 @@ ToolExecutorGetter = Optional[Callable[[str], Optional["Action"]]]
 
 logger = Logger.get_logger()
 
+async def drain_queue_to_string(queue: asyncio.Queue) -> str:
+    chunks = []
+    while True:
+        item = await queue.get()
+        if item is None:
+            break
+        chunks.append(item)
+    return "".join(chunks)
+
 
 def prepare_messages_for_stream(messages, enable_thinking=False):
     # Copy
@@ -846,20 +855,19 @@ class LLMClient:
     # Quick single-turn convenience
     # -------------------------------------------------------------------------
 
-    def ask(
+    async def ask(
         self,
         prompt: str,
         system: Optional[str] = None,
+        stream: bool = False,
         **kwargs,
-    ) -> str:
+    ) -> Union[str, asyncio.Queue]:
         messages = build_messages(user_content=prompt, system_prompt=system)
-        return self.chat_sync(messages, **kwargs)
 
-    async def ask_stream(
-        self,
-        prompt: str,
-        system: Optional[str] = None,
-        **kwargs,
-    ) -> asyncio.Queue:  # or AsyncIterator[str]
-        messages = build_messages(user_content=prompt, system_prompt=system)
-        return await self.stream_chat(messages, **kwargs)
+        if stream:
+            # Return the raw streaming queue
+            return await self.stream_chat(messages, **kwargs)
+
+        # Non-streaming: drain queue into a string
+        queue = await self.stream_chat(messages, **kwargs)
+        return await drain_queue_to_string(queue)

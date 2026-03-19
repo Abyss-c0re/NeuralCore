@@ -221,7 +221,7 @@ class ContextManager:
         content: str,
         metadata: Dict[str, Any] | None = None,
     ) -> str | None:
-        if not content:
+        if not content or not content.strip():
             return None
         metadata = metadata or {}
         key = (
