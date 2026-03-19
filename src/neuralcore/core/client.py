@@ -111,33 +111,36 @@ def build_messages(
 
 
 class LLMClient:
-    """
-    Universal OpenAI-compatible client with:
-    - cancellable streaming via stop_stream()
-    - both async & sync support
-    - image description (vision) support using the same base_url
-    """
-
     _global_cancel_requested = False
 
     def __init__(
         self,
         base_url: str,
         model: str,
+        name: Optional[str] = "main",
         tokenizer: Optional[str] = None,
         api_key: str = "not-needed",
         extra_body: Optional[Dict[str, Any]] = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
+        system_prompt: Optional[str] = None
     ):
         self.base_url = base_url.rstrip("/")
         self.model = model
+        self.name = name
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.extra_body_default = extra_body or {}
-        # Accept either a string (to wrap) or an existing tokenizer instance
+        self.api_key = api_key
+        self.system_prompt = system_prompt or "You are a helpful assistant."
 
-        self.tokenizer = TextTokenizer(tokenizer or "")
+        # --- tokenizer resolution ---
+        if isinstance(tokenizer, str):
+            # Explicit tokenizer source passed
+            self.tokenizer = TextTokenizer(tokenizer_source=tokenizer)
+        else:
+            # Fall back to singleton initialized via config (client name)
+            self.tokenizer = TextTokenizer(client_name=name).get_instance()
 
         self.client = AsyncOpenAI(
             base_url=self.base_url,

@@ -84,24 +84,35 @@ class Topic:
 # ─────────────────────────────────────────────────────────────────────────────
 class ContextManager:
     def __init__(self, max_tokens: int = 28000) -> None:
+        self.max_tokens = max_tokens
+
         clients = get_clients()
         self.client = clients.get("main")
-        self.tokenizer = None
-        if self.client:
-            # Ensure tokenizer
-            if not self.client.tokenizer:
-                from neuralcore.utils.text_tokenizer import TextTokenizer
-
-                loader = get_loader()
-
-                main_cfg = loader.get_client_config("main")
-                tokenizer_name = main_cfg.get("tokenizer", "Qwen/Qwen3.5-9B")
-                self.tokenizer = TextTokenizer(tokenizer_name)
-                self.client.tokenizer = self.tokenizer
-
         self.embeddings = clients.get("embeddings")
-        if self.embeddings and self.tokenizer:
-            self.embeddings.tokenizer = self.tokenizer
+
+        self.tokenizer = None
+
+        try:
+            self.tokenizer = TextTokenizer.get_instance()
+        except ValueError:
+            if self.client:
+                loader = get_loader()
+                cfg = loader.get_client_config("main")
+                tokenizer_source = cfg.get("tokenizer")
+
+                if not tokenizer_source:
+                    raise ValueError("Tokenizer not found in main client config")
+
+                self.tokenizer = TextTokenizer(tokenizer_source)
+
+        # Attach tokenizer to main client if missing
+        if self.client and not getattr(self.client, "tokenizer", None):
+            self.client.tokenizer = self.tokenizer
+
+        if self.embeddings:
+            # If embeddings already has a tokenizer, respect it
+            if not getattr(self.embeddings, "tokenizer", None):
+                self.embeddings.tokenizer = self.tokenizer
 
         self.similarity_threshold = MSG_THR
         self.topics: List[Topic] = []

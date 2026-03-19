@@ -1,32 +1,77 @@
-from typing import List
+from typing import List, Optional
 from tokenizers import Tokenizer
+from neuralcore.utils.config import get_loader
 
 
 class TextTokenizer:
-    def __init__(self, tokenizer_source: str):
-        """
-        Initialize the tokenizer.
+    _instance: Optional["TextTokenizer"] = None
+    _initialized: bool = False
 
-        Args:
-            tokenizer_source (str): Hugging Face repo ID or local path to tokenizer.json
-        """
-        if not tokenizer_source or tokenizer_source.strip() == "":
-            raise ValueError("tokenizer_source cannot be empty")
+    _tokenizer_source: Optional[str]
+    _client_name: Optional[str]
 
-        self.tokenizer = (
-            Tokenizer.from_file(tokenizer_source)
-            if tokenizer_source.endswith(".json")
-            else Tokenizer.from_pretrained(tokenizer_source)
-        )
+    def __new__(
+        cls, tokenizer_source: Optional[str] = None, client_name: Optional[str] = None
+    ):
+        if cls._instance is None:
+            loader = get_loader()
+
+            client_name = client_name or "main"
+            cfg = loader.get_client_config(client_name)
+
+            resolved_source = tokenizer_source or cfg.get("tokenizer")
+
+            if not resolved_source:
+                raise ValueError(
+                    f"Tokenizer source not provided and not found in config for client '{client_name}'"
+                )
+
+            instance = super().__new__(cls)
+
+            # now type checker is happy
+            instance._tokenizer_source = resolved_source
+            instance._client_name = client_name
+
+            cls._instance = instance
+
+        return cls._instance
+
+    def __init__(
+        self, tokenizer_source: Optional[str] = None, client_name: Optional[str] = None
+    ):
+        if TextTokenizer._initialized:
+            return
+
+        tokenizer_source = getattr(self, "_tokenizer_source", None)
+
+        if not tokenizer_source:
+            raise ValueError("Tokenizer source missing during initialization")
+
+        if tokenizer_source.endswith(".json"):
+            self.tokenizer = Tokenizer.from_file(tokenizer_source)
+        else:
+            self.tokenizer = Tokenizer.from_pretrained(tokenizer_source)
+
+        TextTokenizer._initialized = True
+
+    @classmethod
+    def get_instance(cls) -> "TextTokenizer":
+        if cls._instance is None:
+            raise ValueError("Tokenizer has not been initialized yet")
+        return cls._instance
+
+    # ----------------------
+    # Methods
+    # ----------------------
 
     def split_text_into_chunks(
         self, text: str, max_tokens: int = 500, overlap: int = 100
     ) -> List[str]:
-        """Split text into chunks of roughly max_tokens with overlap."""
-        if not text.strip():
+        if not text or not text.strip():
             return []
 
         tokens = self.tokenizer.encode(text).ids
+
         if len(tokens) <= max_tokens:
             return [text]
 
@@ -43,23 +88,22 @@ class TextTokenizer:
         return chunks
 
     def count_tokens(self, text: str) -> int:
-        """Return the number of tokens in a string."""
-        if not text.strip():
+        if not text or not text.strip():
             return 0
         return len(self.tokenizer.encode(text).ids)
 
     def count_message_tokens(self, messages: List[dict]) -> int:
-        """
-        Count tokens in a list of messages (for chat models).
-        Handles both string and multimodal content.
-        """
         total = 0
+
         for msg in messages:
             content = msg.get("content", "")
+
             if isinstance(content, str):
                 total += self.count_tokens(content)
+
             elif isinstance(content, list):
                 for item in content:
                     if item.get("type") == "text":
                         total += self.count_tokens(item.get("text", ""))
+
         return total
