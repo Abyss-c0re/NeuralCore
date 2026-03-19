@@ -122,7 +122,10 @@ class AgentRunner:
             if not executor:
                 # Skip tools without an executor, but notify UI
                 logger.warning(f"Ignoring tool '{name}' — no executor registered")
-                yield ("tool_skipped", {"name": name, "args": args, "reason": "no executor"})
+                yield (
+                    "tool_skipped",
+                    {"name": name, "args": args, "reason": "no executor"},
+                )
                 continue
 
             # Start tool execution
@@ -130,7 +133,11 @@ class AgentRunner:
 
             try:
                 maybe_result = executor(**args)
-                result = await maybe_result if asyncio.iscoroutine(maybe_result) else maybe_result
+                result = (
+                    await maybe_result
+                    if asyncio.iscoroutine(maybe_result)
+                    else maybe_result
+                )
                 yield ("tool_result", {"name": name, "result": result})
             except ConfirmationRequired as exc:
                 logger.info(f"User confirmation needed for tool '{name}'")
@@ -170,7 +177,9 @@ class AgentRunner:
         if not tool_results:
             # No new tool results, possibly all duplicates or skipped
             logger.debug("No executable tool calls produced results this iteration")
-            dup_msg = "All tool calls were duplicates or skipped. Try a different approach."
+            dup_msg = (
+                "All tool calls were duplicates or skipped. Try a different approach."
+            )
             await context_manager.add_message("system", dup_msg)
 
         self.tool_results.extend(tool_results)
@@ -367,54 +376,50 @@ class AgentRunner:
                 )
                 tool_calls = None
 
-            # ── No Tool Calls = Review & Reflection Path (or clean finish) ────────────
+            # ── Handle completion & no-tool-call cases ───────────────────────────────
             if not tool_calls:
                 await context_manager.add_external_content(
                     source_type="assistant_output",
                     content=full_reply,
                     metadata={"iteration": iteration},
                 )
-                self.messages.append(
-                    {"role": "assistant", "content": full_reply}
-                )  # ← track
+                self.messages.append({"role": "assistant", "content": full_reply})
 
-                if is_task_complete:
-                    was_non_agentic = (
-                        iteration <= 2
-                        and len(self.executed_signatures) == 0
-                        and not any(
-                            "reflection" in msg.get("content", "").lower()
-                            for msg in self.messages[-4:]
-                        )
+                # ── Completion detection (marker OR casual chat heuristics) ──
+                is_casual_complete = (
+                    iteration <= 2
+                    and len(self.executed_signatures) == 0
+                    and len(self.tool_results) == 0
+                    and not any(
+                        "reflection" in msg.get("content", "").lower()
+                        for msg in self.messages[-5:]
+                    )
+                )
+
+                if is_task_complete or is_casual_complete:
+                    reason = "task_complete" if is_task_complete else "casual_complete"
+
+                    logger.info(
+                        f"Clean exit — {reason} "
+                        f"(marker={is_task_complete}, casual={is_casual_complete}, iter={iteration})"
                     )
 
-                    if was_non_agentic:
-                        logger.info(
-                            f"Non-agentic / casual conversation detected → clean exit (iter={iteration})"
-                        )
-                        yield (
-                            "finish",
-                            {"reason": "casual_complete"},
-                        )  # ← CRITICAL FIX: CLI now sees SUCCESS
-                        return
-
-                    else:
-                        logger.info(
-                            "Task complete signal received → generating final summary"
-                        )
+                    # Optional: still generate summary for multi-turn tasks
+                    if iteration > 1 or is_task_complete:
+                        logger.info(f"Generating final summary ({reason})")
                         async for event, payload in self._generate_final_summary(
-                            user_prompt, self.messages, tools, "task_complete"
+                            user_prompt, self.messages, tools, reason
                         ):
                             yield (event, payload)
-                        return
+                    else:
+                        # Pure single-turn casual chat → just finish
+                        yield ("finish", {"reason": reason})
 
-                # Reflection only when truly stuck (iteration > 1)
+                    return
+
+                # ── Reflection only when we are probably stuck ──
                 if iteration > 1:
-                    logger.debug(
-                        f"Turn {iteration} completed with no tool calls. Analyzing..."
-                    )
-
-                    payload = None
+                    logger.debug(f"Turn {iteration} no tools → reflection")
                     async for event, payload in self._force_reflection(
                         context_manager,
                         original_prompt=user_prompt,
@@ -422,33 +427,13 @@ class AgentRunner:
                     ):
                         yield (event, payload)
 
-                    if isinstance(payload, dict):
-                        if payload.get("reason") == "reflection_stuck":
-                            logger.warning("Reflection stuck")
-                            break
-                        elif (
-                            payload.get("reason") == "normal" or "reason" not in payload
-                        ):
-                            continue
-                        else:
-                            yield ("review_phase", payload)
-                            continue
-                    elif isinstance(payload, str):
-                        logger.info("Reflection triggered")
-                        yield (
-                            "review_phase",
-                            {"summary": payload, "type": "reflection_triggered"},
-                        )
-                        continue
-                    else:
-                        logger.info("Reflection complete")
-                        yield (
-                            "review_phase",
-                            {"summary": "Reflection complete", "type": "unknown"},
-                        )
-                        continue
+                        # You can keep your existing reflection exit/continue logic here if needed
+                        # (but most implementations just continue the loop after reflection)
 
-            # ── Tool Calls Path (now uses helper – no duplication) ─────────────────────
+                # If not complete and not reflecting → just continue to next iteration
+                continue
+
+            # ── Normal tool-calling path ─────────────────────────────────────────────
             if tool_calls:
                 assistant_text = f"Executed {len(tool_calls)} tool call(s)"
                 await context_manager.add_external_content(
@@ -456,7 +441,6 @@ class AgentRunner:
                     content=assistant_text,
                     metadata={"iteration": iteration},
                 )
-                # Note: we do NOT append assistant_text to self.messages here (helper will handle real tool responses)
 
                 yield ("tool_calls", tool_calls)
 
@@ -464,9 +448,10 @@ class AgentRunner:
                     tool_calls, get_exec, context_manager, iteration
                 ):
                     yield (event, payload)
-                    # Early exit on confirmation or cancel (helper already returned)
                     if event in ("needs_confirmation", "cancelled"):
                         return
+
+            # end of main loop body
 
         # ── Max Iterations Reached ─────────────────────────────────────────
         logger.info("Max iterations reached, generating final summary...")
