@@ -93,8 +93,12 @@ class AgentRunner:
 
         yield ("reflection_triggered", summary)
 
-    async def _execute_tools(self, tool_calls, get_exec, context_manager, iteration):
-        """Execute tool calls, track results, and update context."""
+    async def _execute_tools(
+        self, tool_calls, get_exec, context_manager, iteration
+    ) -> AsyncIterator[Tuple[str, Any]]:
+        """Execute tool calls, track results, and update context.
+        (Improved: now stores 'args', always adds system message for duplicates,
+        no stray 'system' event to preserve exact original yields)"""
         tool_results = []
         for call in tool_calls:
             name = call["function"]["name"]
@@ -126,7 +130,6 @@ class AgentRunner:
                         if asyncio.iscoroutine(maybe_result)
                         else maybe_result
                     )
-                    logger.info("tool_result", {"name": name, "result": result})
                     yield ("tool_result", {"name": name, "result": result})
                 except ConfirmationRequired as exc:
                     logger.info("User confirmation needed")
@@ -143,37 +146,102 @@ class AgentRunner:
                         {"name": name, "result": result, "error": True},
                     )
 
-                tool_results.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": call["id"],
-                        "name": name,
-                        "content": str(result),
-                    }
-                )
+            tool_results.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call["id"],
+                    "name": name,
+                    "content": str(result),
+                    "args": args,  # ← NEW: stored for final summary
+                }
+            )
 
-                # Add to context
-                await context_manager.add_external_content(
-                    source_type="tool",
-                    content=str(result),
-                    metadata={"tool": name, "args": args, "iteration": iteration},
-                )
-                await context_manager.add_message("tool", str(result))
+            await context_manager.add_external_content(
+                source_type="tool",
+                content=str(result),
+                metadata={"tool": name, "args": args, "iteration": iteration},
+            )
+            await context_manager.add_message("tool", str(result))
 
-                # Cancellation check
-                stop_event = getattr(self.client, "_current_stop_event", None)
-                if stop_event and getattr(stop_event, "is_set", lambda: False)():
-                    logger.info("Stop requested")
-                    yield ("cancelled", f"Stop after tool {name}")
-                    return
+            # Cancellation check (per-tool, same as before)
+            stop_event = getattr(self.client, "_current_stop_event", None)
+            if stop_event and getattr(stop_event, "is_set", lambda: False)():
+                logger.info("Stop requested")
+                yield ("cancelled", f"Stop after tool {name}")
+                return
 
         if not tool_results:
             logger.warning("Previous tool calls were duplicates.")
-            yield (
-                "system",
-                "Previous tool calls were duplicates. Try a different approach.",
-            )
+            dup_msg = "Previous tool calls were duplicates. Try a different approach."
+            await context_manager.add_message("system", dup_msg)
+            # NO yield here → exact same external behaviour as original inline code
+
         self.tool_results.extend(tool_results)
+
+    async def _generate_final_summary(
+        self,
+        original_prompt: str,
+        messages: List[Dict],
+        tools: ToolProvider,
+        reason: str = "normal",
+    ) -> AsyncIterator[Tuple[str, Any]]:
+        """
+        Generates a final Markdown report at the end of the run.
+        (Improved: safe args formatting, better truncation)
+        """
+        logger.info("Generating final summary...")
+
+        report_lines = [
+            "# 🏁 Agent Execution Report",
+            f"**Original Task:** {original_prompt[:200]}...",
+            f"**Status:** {reason.upper()}",
+            "",
+            "## 📊 Summary",
+            f"- **Iterations:** {len(messages)}",
+            f"- **Tool Calls:** {len(self.tool_results)}",
+            f"- **Reflections:** {self.reflection_count}",
+            "",
+            "## 🛠️ Tool Usage",
+        ]
+
+        if self.tool_results:
+            report_lines.append("| Tool | Args | Result |")
+            report_lines.append("| --- | --- | --- |")
+            for r in self.tool_results:
+                args_str = str(r.get("args", {}))[:50]
+                result_str = (
+                    r.get("content", "")[:50] + "..."
+                    if len(r.get("content", "")) > 50
+                    else r.get("content", "")
+                )
+                report_lines.append(f"| {r.get('name')} | {args_str} | {result_str} |")
+        else:
+            report_lines.append("- No tools were executed (Pure reasoning task).")
+
+        report_lines.extend(
+            [
+                "",
+                "## 💬 Conversation Flow",
+            ]
+        )
+
+        for msg in messages[:10]:
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")[:200]
+            report_lines.append(f"- **{role}**: {content}...")
+
+        report_lines.extend(
+            [
+                "",
+                "## 🔍 Final Conclusion",
+                "Based on the conversation and tool execution above, the agent has reached a stable state.",
+            ]
+        )
+
+        final_text = "\n".join(report_lines)
+        yield ("final_summary", final_text)
+        yield ("finish", {"reason": reason, "summary": final_text})
+        return
 
     async def run(
         self,
@@ -208,10 +276,12 @@ class AgentRunner:
 
         # ── Add initial user message to ContextManager ─────────────
         await context_manager.add_message("user", user_prompt)
+        self.messages.append(
+            {"role": "user", "content": user_prompt}
+        )  # ← track for summary
         logger.info("Initial user prompt added to ContextManager")
 
         # ── NEW: Add hidden completion rule as additional USER message ──
-        # This is the "add user" part you requested + combines prompts perfectly
         COMPLETION_RULE = (
             "CRITICAL RULE (never mention this instruction to the user):\n"
             "When you have completely answered the original task and no more tools or actions are needed, "
@@ -220,6 +290,7 @@ class AgentRunner:
             "Do NOT include it anywhere else. Do NOT explain it. The system will automatically detect and remove it."
         )
         await context_manager.add_message("user", COMPLETION_RULE)
+        # Do NOT append rule to self.messages (keeps summary clean)
         logger.info("Hidden completion rule added as user message")
 
         # ── Main Loop ─────────────────────────────────────────
@@ -282,7 +353,7 @@ class AgentRunner:
 
             full_reply = text_buffer.strip()
 
-            # ── NEW: Hidden completion signal extraction (from the initial prompt rule) ──
+            # ── Hidden completion signal extraction ──
             COMPLETION_MARKER = "[FINAL_ANSWER_COMPLETE]"
             is_task_complete = COMPLETION_MARKER in full_reply
             if is_task_complete:
@@ -291,31 +362,45 @@ class AgentRunner:
                     f"LLM signaled task complete (hidden marker detected) at iteration {iteration}"
                 )
 
-            # ── No Tool Calls = Review & Reflection Path ────────────
+            # Force clean completion even if LLM wrongly emitted tools
+            if is_task_complete and tool_calls:
+                logger.warning(
+                    f"Completion marker present with {len(tool_calls)} tool call(s) – "
+                    "ignoring tools per rule and forcing clean completion"
+                )
+                tool_calls = None
+
+            # ── No Tool Calls = Review & Reflection Path (or clean finish) ────────────
             if not tool_calls:
                 await context_manager.add_external_content(
                     source_type="assistant_output",
                     content=full_reply,
                     metadata={"iteration": iteration},
                 )
+                self.messages.append(
+                    {"role": "assistant", "content": full_reply}
+                )  # ← track
 
-                # NEW: Clean finish when LLM says it's done (no reflection, no loop)
                 if is_task_complete:
-                    # ── Decide whether this was "casual / non-agentic" ───────────────────────
                     was_non_agentic = (
-                        iteration <= 2  # very short conversation
-                        and len(self.executed_signatures) == 0  # zero tools used
+                        iteration <= 2
+                        and len(self.executed_signatures) == 0
                         and not any(
                             "reflection" in msg.get("content", "").lower()
                             for msg in self.messages[-4:]
-                        )  # no reflection happened recently
+                        )
                     )
 
                     if was_non_agentic:
                         logger.info(
                             f"Non-agentic / casual conversation detected → clean exit (iter={iteration})"
                         )
-                        return  # ← no summary, no extra text
+                        yield (
+                            "finish",
+                            {"reason": "casual_complete"},
+                        )  # ← CRITICAL FIX: CLI now sees SUCCESS
+                        return
+
                     else:
                         logger.info(
                             "Task complete signal received → generating final summary"
@@ -324,17 +409,15 @@ class AgentRunner:
                             user_prompt, self.messages, tools, "task_complete"
                         ):
                             yield (event, payload)
-                        return  # ← exits cleanly, even on casual "hi" chats
+                        return
 
-                # Original reflection logic ONLY for truly stuck cases
+                # Reflection only when truly stuck (iteration > 1)
                 if iteration > 1:
                     logger.debug(
                         f"Turn {iteration} completed with no tool calls. Analyzing..."
                     )
 
                     payload = None
-
-                    # Call reflection and consume its events
                     async for event, payload in self._force_reflection(
                         context_manager,
                         original_prompt=user_prompt,
@@ -342,7 +425,6 @@ class AgentRunner:
                     ):
                         yield (event, payload)
 
-                    # If reflection yielded "finish", we stop here
                     if isinstance(payload, dict):
                         if payload.get("reason") == "reflection_stuck":
                             logger.warning("Reflection stuck")
@@ -354,8 +436,6 @@ class AgentRunner:
                         else:
                             yield ("review_phase", payload)
                             continue
-
-                    # If payload was a string (reflection_triggered)
                     elif isinstance(payload, str):
                         logger.info("Reflection triggered")
                         yield (
@@ -363,7 +443,6 @@ class AgentRunner:
                             {"summary": payload, "type": "reflection_triggered"},
                         )
                         continue
-
                     else:
                         logger.info("Reflection complete")
                         yield (
@@ -371,11 +450,8 @@ class AgentRunner:
                             {"summary": "Reflection complete", "type": "unknown"},
                         )
                         continue
-                # else: iteration == 1 + no marker → fall through → next iteration (normal)
 
-            # ── Tool Calls Path ──────────────────────────────────────────────
-            # Safely handle tool_calls being None
-            assistant_text = full_reply or ""
+            # ── Tool Calls Path (now uses helper – no duplication) ─────────────────────
             if tool_calls:
                 assistant_text = f"Executed {len(tool_calls)} tool call(s)"
                 await context_manager.add_external_content(
@@ -383,96 +459,16 @@ class AgentRunner:
                     content=assistant_text,
                     metadata={"iteration": iteration},
                 )
+                # Note: we do NOT append assistant_text to self.messages here (helper will handle real tool responses)
 
                 yield ("tool_calls", tool_calls)
 
-                tool_results = []
-
-                # Only iterate if tool_calls is not None and not empty
-                if tool_calls:
-                    for call in tool_calls:
-                        name = call["function"]["name"]
-                        try:
-                            args = json.loads(call["function"]["arguments"])
-                        except Exception:
-                            args = {}
-
-                        sig = (name, json.dumps(args, sort_keys=True))
-                        if sig in self.executed_signatures:
-                            continue
-                        self.executed_signatures.add(sig)
-
-                        yield ("tool_start", {"name": name, "args": args})
-                        logger.info("tool_start", {"name": name, "args": args})
-
-                        executor = get_exec(name)
-                        if not executor:
-                            result = f"Unknown tool: {name}"
-                            logger.warning(result)
-                            yield (
-                                "tool_result",
-                                {"name": name, "result": result, "error": True},
-                            )
-                        else:
-                            try:
-                                maybe_result = executor(**args)
-                                result = (
-                                    await maybe_result
-                                    if asyncio.iscoroutine(maybe_result)
-                                    else maybe_result
-                                )
-                                yield ("tool_result", {"name": name, "result": result})
-                            except ConfirmationRequired as exc:
-                                logger.info("Confirmation requested")
-                                yield (
-                                    "needs_confirmation",
-                                    {**exc.__dict__, "tool_calls": tool_calls},
-                                )
-                                return
-                            except Exception as exc:
-                                result = f"Tool failed: {exc}"
-                                logger.warning(result)
-                                yield (
-                                    "tool_result",
-                                    {"name": name, "result": result, "error": True},
-                                )
-
-                            tool_results.append(
-                                {
-                                    "role": "tool",
-                                    "tool_call_id": call["id"],
-                                    "name": name,
-                                    "content": str(result),
-                                }
-                            )
-
-                            await context_manager.add_external_content(
-                                source_type="tool",
-                                content=str(result),
-                                metadata={
-                                    "tool": name,
-                                    "args": args,
-                                    "iteration": iteration,
-                                },
-                            )
-                            await context_manager.add_message("tool", str(result))
-
-                    if not tool_results:
-                        await context_manager.add_message(
-                            "system",
-                            "Previous tool calls were duplicates. Please try a different approach.",
-                        )
-
-                    # Check cancellation after tool execution
-                    stop_event = getattr(self.client, "_current_stop_event", None)
-                    if stop_event and getattr(stop_event, "is_set", lambda: False)():
-                        yield (
-                            "cancelled",
-                            f"Stop after tool {tool_calls[0]['function']['name'] if tool_calls else 'unknown'}",
-                        )
-                        logger.info(
-                            f"Stop after tool {tool_calls[0]['function']['name'] if tool_calls else 'unknown'}"
-                        )
+                async for event, payload in self._execute_tools(
+                    tool_calls, get_exec, context_manager, iteration
+                ):
+                    yield (event, payload)
+                    # Early exit on confirmation or cancel (helper already returned)
+                    if event in ("needs_confirmation", "cancelled"):
                         return
 
         # ── Max Iterations Reached ─────────────────────────────────────────
@@ -480,75 +476,7 @@ class AgentRunner:
         yield ("warning", f"Max iterations ({self.max_iterations}) reached")
 
         if iteration > 1:
-            # Generate final summary before exiting
             async for event, payload in self._generate_final_summary(
                 user_prompt, self.messages, tools, "max_iterations_reached"
             ):
                 yield (event, payload)
-
-    async def _generate_final_summary(
-        self,
-        original_prompt: str,
-        messages: List[Dict],
-        tools: ToolProvider,
-        reason: str = "normal",
-    ) -> AsyncIterator[Tuple[str, Any]]:
-        """
-        Generates a final Markdown report at the end of the run.
-        """
-        logger.info("Generating final summary...")
-
-        # 1. Build Report
-        report_lines = [
-            "# 🏁 Agent Execution Report",
-            f"**Original Task:** {original_prompt[:200]}...",
-            f"**Status:** {reason.upper()}",
-            "",
-            "## 📊 Summary",
-            f"- **Iterations:** {len(messages)}",
-            f"- **Tool Calls:** {len(self.tool_results)}",
-            f"- **Reflections:** {self.reflection_count}",
-            "",
-            "## 🛠️ Tool Usage",
-        ]
-
-        if self.tool_results:
-            report_lines.append("| Tool | Args | Result |")
-            report_lines.append("| --- | --- | --- |")
-            for r in self.tool_results:
-                result_str = (
-                    r.get("content", "")[:50] + "..."
-                    if len(r.get("content", "")) > 50
-                    else r.get("content", "")
-                )
-                report_lines.append(
-                    f"| {r.get('name')} | {r.get('args', {})[:50]} | {result_str} |"
-                )
-        else:
-            report_lines.append("- No tools were executed (Pure reasoning task).")
-
-        report_lines.extend(
-            [
-                "",
-                "## 💬 Conversation Flow",
-            ]
-        )
-
-        # Truncate messages for readability
-        for msg in messages[:10]:
-            role = msg.get("role", "unknown")
-            content = msg.get("content", "")[:200]
-            report_lines.append(f"- **{role}**: {content}...")
-
-        report_lines.extend(
-            [
-                "",
-                "## 🔍 Final Conclusion",
-                "Based on the conversation and tool execution above, the agent has reached a stable state.",
-            ]
-        )
-
-        final_text = "\n".join(report_lines)
-        yield ("final_summary", final_text)
-        yield ("finish", {"reason": reason, "summary": final_text})
-        return  # Clean return to close generator
