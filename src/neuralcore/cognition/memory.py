@@ -42,6 +42,30 @@ def keyword_score(query_words: List[str], text: str) -> float:
     return coverage * 3.0 + prefix_bonus * 0.5
 
 
+import re
+import asyncio
+import time
+import numpy as np
+from typing import Tuple, List, Dict, Any
+from neuralcore.utils.logger import Logger
+from neuralcore.utils.prompt_builder import PromptBuilder as PromptHelper
+from neuralcore.utils.config import get_loader
+from neuralcore.core.client_factory import get_clients
+from neuralcore.utils.text_tokenizer import TextTokenizer
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONSTANTS
+# ─────────────────────────────────────────────────────────────────────────────
+MSG_THR = 0.5
+NUM_MSG = 5
+OFF_THR = 0.7
+OFF_FREQ = 4
+SLICE_SIZE = 4
+
+logger = Logger.get_logger()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # KNOWLEDGE ITEM (external tools/files/terminal/code)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -121,7 +145,17 @@ class ContextManager:
         self.knowledge_base: Dict[str, KnowledgeItem] = {}
         self.embedding_cache: Dict[str, np.ndarray] = {}
         self.fs_state = {"cwd": ".", "known_folders": [], "negative_findings": []}
-        self.max_tokens = max_tokens
+
+        # ── ACTION TRACKING + SUMMARY (new) ─────────────────────────────────
+        self.action_log: List[Dict[str, Any]] = []  # all actions (kept last 60)
+        self.files_checked: set[str] = set()
+        self.tools_executed: List[str] = []
+        self.context_stats = {
+            "kb_added": 0,
+            "messages_added": 0,
+            "topics_switched": 0,
+            "prunes": 0,
+        }
 
     # ========================================================================
     # EMBEDDING (cached)
@@ -137,6 +171,46 @@ class ContextManager:
             self.embedding_cache[text] = emb
             return emb
         return np.array([])
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # ACTION LOGGER + SUMMARY (what you asked for)
+    # ─────────────────────────────────────────────────────────────────────────────
+    def _log_action(
+        self, action_type: str, description: str, metadata: Dict[str, Any] | None = None
+    ) -> None:
+        entry = {
+            "type": action_type,
+            "desc": description[:200],
+            "ts": time.time(),
+            "meta": metadata or {},
+        }
+        self.action_log.append(entry)
+        if len(self.action_log) > 60:
+            self.action_log.pop(0)
+
+        # Quick counters
+        if action_type.startswith("add_"):
+            self.context_stats["messages_added"] += 1
+        elif action_type == "switch_topic":
+            self.context_stats["topics_switched"] += 1
+        elif action_type == "prune":
+            self.context_stats["prunes"] += 1
+
+    def get_context_summary(self) -> str:
+        """Tiny summary that is embedded into every LLM prompt"""
+        files = sorted(list(self.files_checked))[-6:]
+        tools = self.tools_executed[-5:]
+
+        lines = [
+            "📋 LIVE CONTEXT SUMMARY",
+            f"• Files checked: {', '.join(files) if files else '—'}",
+            f"• Tools used: {', '.join(tools) if tools else '—'}",
+            f"• KB items: {len(self.knowledge_base)} | Messages in topic: {len(self.current_topic.history)}",
+            f"• Active topic: {self.current_topic.name}",
+            f"• Archived: {len(self.current_topic.archived_history)} | Prunes: {self.context_stats['prunes']}",
+            f"• Recent action: {self.action_log[-1]['desc'] if self.action_log else '—'}",
+        ]
+        return "\n".join(lines)[:650]
 
     # ========================================================================
     # EXTERNAL KNOWLEDGE BASE
@@ -168,6 +242,12 @@ class ContextManager:
         item.embedding = embedding
         self.knowledge_base[key] = item
         logger.info(f"Added/updated KB item: {key}")
+
+        # ── LOGGING & STATS ───────────────────────────────────────────────────
+        if metadata and metadata.get("path"):
+            self.files_checked.add(str(metadata["path"]))
+        self._log_action("add_knowledge", f"Added {source_type} → {key}", metadata)
+        self.context_stats["kb_added"] += 1
         return key
 
     async def _retrieve_relevant_knowledge(self, query: str, max_kb_tokens: int) -> str:
@@ -234,6 +314,11 @@ class ContextManager:
         await self.current_topic.add_message(role, message, embedding)
         asyncio.create_task(self._analyze_history())
 
+        # ── LOGGING & STATS ───────────────────────────────────────────────────
+        self._log_action(
+            "add_message", f"{role} message ({len(message)} chars)", {"role": role}
+        )
+
     async def switch_topic(self, topic: Topic) -> None:
         async with asyncio.Lock():
             if topic.name != self.current_topic.name:
@@ -241,6 +326,8 @@ class ContextManager:
                     self.topics.append(self.current_topic)
                 logger.info(f"Switched topic → {topic.name}")
                 self.current_topic = topic
+                # ── LOGGING & STATS ──────────────────────────────────────────────
+                self._log_action("switch_topic", f"Switched to {topic.name}")
 
     async def _match_topic(
         self, embedding: np.ndarray, exclude_topic: Topic | None = None
@@ -368,12 +455,15 @@ class ContextManager:
     ) -> List[Dict[str, Any]]:
         messages: List[Dict[str, Any]] = []
 
-        # 1. Build the messages list first (System + History + Query)
-        # --------------------------------------------------------
-
-        # System Prompt
+        # === ENHANCED SYSTEM + LIVE SUMMARY (this is the core you asked for) ===
         base_system = system_prompt.strip()
-        messages.append({"role": "system", "content": base_system})
+        summary = self.get_context_summary()
+
+        full_system = base_system
+        if summary:
+            full_system += f"\n\n{summary}\n\n→ Use this context to stay aware. Never repeat the summary back to the user."
+
+        messages.append({"role": "system", "content": full_system})
 
         # Knowledge Base (Optional)
         kb_budget = (max_input_tokens - reserved_for_output) // 3
@@ -538,6 +628,12 @@ class ContextManager:
                             i = j
                             break
 
+        # ── LOGGING & STATS ───────────────────────────────────────────────────
+        if removed > 0:
+            self._log_action(
+                "prune", f"Pruned {removed} turns", {"kept": len(messages)}
+            )
+
         logger.info(f"Pruned {removed} messages from prompt, Final Count: {current}")
         return removed, pruned_turns
 
@@ -607,4 +703,13 @@ class ContextManager:
                 **metadata,
                 "negative": "not found" in result.lower(),
             },
+        )
+
+        # ── LOGGING & STATS ───────────────────────────────────────────────────
+        self.tools_executed.append(tool_name)
+        self.files_checked.update(
+            m.get("path", "") for m in [metadata] if m.get("path")
+        )
+        self._log_action(
+            "tool_outcome", f"Tool {tool_name} → {summary[:80]}...", metadata
         )
