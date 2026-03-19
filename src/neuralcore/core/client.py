@@ -37,10 +37,7 @@ def prepare_messages_for_stream(messages, enable_thinking=False):
             cleaned.append(m)
 
     if sys_parts:
-        cleaned.insert(0, {
-            "role": "system",
-            "content": "\n\n".join(sys_parts)
-        })
+        cleaned.insert(0, {"role": "system", "content": "\n\n".join(sys_parts)})
 
     # 2. REMOVE assistant→assistant loops
     deduped = []
@@ -79,6 +76,7 @@ def prepare_messages_for_stream(messages, enable_thinking=False):
         cleaned.pop()
 
     return cleaned
+
 
 async def embed_single_chunk(
     client: AsyncOpenAI,
@@ -123,7 +121,7 @@ class LLMClient:
         extra_body: Optional[Dict[str, Any]] = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
-        system_prompt: Optional[str] = None
+        system_prompt: Optional[str] = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -847,23 +845,21 @@ class LLMClient:
     # -------------------------------------------------------------------------
     # Quick single-turn convenience
     # -------------------------------------------------------------------------
-    
-    async def ask(
+
+    def ask(
         self,
         prompt: str,
         system: Optional[str] = None,
         **kwargs,
     ) -> str:
         messages = build_messages(user_content=prompt, system_prompt=system)
-        message = await self.chat(messages, **kwargs)
-        return message
-
+        return self.chat_sync(messages, **kwargs)
 
     async def ask_stream(
         self,
         prompt: str,
         system: Optional[str] = None,
         **kwargs,
-    ) -> asyncio.Queue:          # or AsyncIterator[str]
+    ) -> asyncio.Queue:  # or AsyncIterator[str]
         messages = build_messages(user_content=prompt, system_prompt=system)
         return await self.stream_chat(messages, **kwargs)
