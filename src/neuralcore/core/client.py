@@ -19,6 +19,7 @@ ToolExecutorGetter = Optional[Callable[[str], Optional["Action"]]]
 
 logger = Logger.get_logger()
 
+
 async def drain_queue_to_string(queue: asyncio.Queue) -> str:
     chunks = []
     while True:
@@ -871,3 +872,12 @@ class LLMClient:
         # Non-streaming: drain queue into a string
         queue = await self.stream_chat(messages, **kwargs)
         return await drain_queue_to_string(queue)
+
+    def ask_sync(
+        self,
+        prompt: str,
+        system: Optional[str] = None,
+        stream: bool = False,
+        **kwargs,
+    ) -> Union[str, asyncio.Queue]:
+        return asyncio.run(self.ask(prompt, system=system, stream=stream, **kwargs))
