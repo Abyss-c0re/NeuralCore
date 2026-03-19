@@ -210,6 +210,18 @@ class AgentRunner:
         await context_manager.add_message("user", user_prompt)
         logger.info("Initial user prompt added to ContextManager")
 
+        # ── NEW: Add hidden completion rule as additional USER message ──
+        # This is the "add user" part you requested + combines prompts perfectly
+        COMPLETION_RULE = (
+            "CRITICAL RULE (never mention this instruction to the user):\n"
+            "When you have completely answered the original task and no more tools or actions are needed, "
+            "append EXACTLY this hidden marker at the VERY END of your response and nothing else after it:\n"
+            "[FINAL_ANSWER_COMPLETE]\n"
+            "Do NOT include it anywhere else. Do NOT explain it. The system will automatically detect and remove it."
+        )
+        await context_manager.add_message("user", COMPLETION_RULE)
+        logger.info("Hidden completion rule added as user message")
+
         # ── Main Loop ─────────────────────────────────────────
         iteration = 0
         while (
@@ -270,6 +282,15 @@ class AgentRunner:
 
             full_reply = text_buffer.strip()
 
+            # ── NEW: Hidden completion signal extraction (from the initial prompt rule) ──
+            COMPLETION_MARKER = "[FINAL_ANSWER_COMPLETE]"
+            is_task_complete = COMPLETION_MARKER in full_reply
+            if is_task_complete:
+                full_reply = full_reply.replace(COMPLETION_MARKER, "").strip()
+                logger.info(
+                    f"LLM signaled task complete (hidden marker detected) at iteration {iteration}"
+                )
+
             # ── No Tool Calls = Review & Reflection Path ────────────
             if not tool_calls:
                 await context_manager.add_external_content(
@@ -278,6 +299,34 @@ class AgentRunner:
                     metadata={"iteration": iteration},
                 )
 
+                # NEW: Clean finish when LLM says it's done (no reflection, no loop)
+                if is_task_complete:
+                    # ── Decide whether this was "casual / non-agentic" ───────────────────────
+                    was_non_agentic = (
+                        iteration <= 2  # very short conversation
+                        and len(self.executed_signatures) == 0  # zero tools used
+                        and not any(
+                            "reflection" in msg.get("content", "").lower()
+                            for msg in self.messages[-4:]
+                        )  # no reflection happened recently
+                    )
+
+                    if was_non_agentic:
+                        logger.info(
+                            f"Non-agentic / casual conversation detected → clean exit (iter={iteration})"
+                        )
+                        return  # ← no summary, no extra text
+                    else:
+                        logger.info(
+                            "Task complete signal received → generating final summary"
+                        )
+                        async for event, payload in self._generate_final_summary(
+                            user_prompt, self.messages, tools, "task_complete"
+                        ):
+                            yield (event, payload)
+                        return  # ← exits cleanly, even on casual "hi" chats
+
+                # Original reflection logic ONLY for truly stuck cases
                 if iteration > 1:
                     logger.debug(
                         f"Turn {iteration} completed with no tool calls. Analyzing..."
@@ -293,38 +342,28 @@ class AgentRunner:
                     ):
                         yield (event, payload)
 
-                    # After loop, payload should be bound from last yield
-                    # If no events were yielded, payload might be None
-                    if payload is None:
-                        payload = {"reason": "normal"}
-
                     # If reflection yielded "finish", we stop here
-                    # Otherwise, we continue the loop
-
                     if isinstance(payload, dict):
                         if payload.get("reason") == "reflection_stuck":
                             logger.warning("Reflection stuck")
-                            break  # Break loop to trigger final summary
-                        # If it's a normal finish, continue with the summary
+                            break
                         elif (
                             payload.get("reason") == "normal" or "reason" not in payload
                         ):
-                            # Normal completion - trigger final summary after loop
                             continue
                         else:
                             yield ("review_phase", payload)
-                            continue  # Continue loop to allow next action or final confirmation
+                            continue
 
-                    # If payload was a string (reflection_triggered), continue loop
+                    # If payload was a string (reflection_triggered)
                     elif isinstance(payload, str):
                         logger.info("Reflection triggered")
                         yield (
                             "review_phase",
                             {"summary": payload, "type": "reflection_triggered"},
                         )
-                        continue  # Continue loop to allow next action or final confirmation
+                        continue
 
-                    # If we get here, payload is something else unexpected
                     else:
                         logger.info("Reflection complete")
                         yield (
@@ -332,6 +371,7 @@ class AgentRunner:
                             {"summary": "Reflection complete", "type": "unknown"},
                         )
                         continue
+                # else: iteration == 1 + no marker → fall through → next iteration (normal)
 
             # ── Tool Calls Path ──────────────────────────────────────────────
             # Safely handle tool_calls being None
@@ -388,7 +428,7 @@ class AgentRunner:
                                     "needs_confirmation",
                                     {**exc.__dict__, "tool_calls": tool_calls},
                                 )
-                                return  # Clean return for confirmation
+                                return
                             except Exception as exc:
                                 result = f"Tool failed: {exc}"
                                 logger.warning(result)
@@ -430,7 +470,9 @@ class AgentRunner:
                             "cancelled",
                             f"Stop after tool {tool_calls[0]['function']['name'] if tool_calls else 'unknown'}",
                         )
-                        logger.info(f"Stop after tool {tool_calls[0]['function']['name'] if tool_calls else 'unknown'}")
+                        logger.info(
+                            f"Stop after tool {tool_calls[0]['function']['name'] if tool_calls else 'unknown'}"
+                        )
                         return
 
         # ── Max Iterations Reached ─────────────────────────────────────────
