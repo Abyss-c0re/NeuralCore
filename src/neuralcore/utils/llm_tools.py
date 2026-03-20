@@ -89,11 +89,26 @@ class InternalTools:
                 parameters[name]["default"] = param.default
 
         async def executor_wrapper(**provided_kwargs):
-            filtered = {k: v for k, v in provided_kwargs.items() if k in sig.parameters}
-            result = method(**filtered)
+            sig = inspect.signature(method)
+            bound_args = {}
+            extra_kwargs = {}
+
+            for name, value in provided_kwargs.items():
+                if name == "kwargs":
+                    # skip literal 'kwargs' key
+                    continue
+                if name in sig.parameters:
+                    bound_args[name] = value
+                else:
+                    # Only send unknown args if method supports **kwargs
+                    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                        extra_kwargs[name] = value
+
+            result = method(**bound_args, **extra_kwargs)
             if inspect.iscoroutine(result):
                 result = await result
             return result
+
 
         doc = inspect.getdoc(method) or f"Call {method.__name__}"
         return Action(
