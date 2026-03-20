@@ -8,6 +8,7 @@ from neuralcore.utils.prompt_builder import PromptBuilder as PromptHelper
 from neuralcore.utils.config import get_loader
 from neuralcore.core.client_factory import get_clients
 from neuralcore.utils.text_tokenizer import TextTokenizer
+from neuralcore.utils.search import keyword_score, cosine_similarity
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -20,27 +21,6 @@ OFF_FREQ = 4
 SLICE_SIZE = 4
 
 logger = Logger.get_logger()
-
-
-def cosine_similarity(vec1: np.ndarray, vec2: np.ndarray) -> float:
-    vec1 = np.asarray(vec1, dtype=np.float32)
-    vec2 = np.asarray(vec2, dtype=np.float32)
-    dot = np.dot(vec1, vec2)
-    norm1 = np.sum(vec1**2)
-    norm2 = np.sum(vec2**2)
-    if norm1 == 0 or norm2 == 0:
-        return 0.0
-    return dot / (np.sqrt(norm1) * np.sqrt(norm2))
-
-
-def keyword_score(query_words: List[str], text: str) -> float:
-    if not query_words:
-        return 0.0
-    words = text.lower().split()
-    overlap = len(set(query_words) & set(words))
-    coverage = overlap / max(len(query_words), 1)
-    prefix_bonus = sum(1 for qw in query_words for w in words if w.startswith(qw))
-    return coverage * 3.0 + prefix_bonus * 0.5
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -358,30 +338,38 @@ class ContextManager:
         return None, None
 
     async def _analyze_history(self) -> None:
-        if (
-            len(self.current_topic.history) > 4
-            and not self.current_topic.description.strip()
-        ):
+        # Step 1: Generate topic info if description is missing
+        if len(self.current_topic.history) > 4 and not self.current_topic.description.strip():
             name, desc = await self.generate_topic_info_from_history(
                 self.current_topic.history
             )
             if name and desc:
                 self.current_topic.name = name
                 self.current_topic.description = desc
-                self.current_topic.embedded_description = await self.fetch_embedding(
-                    desc
-                )
+                self.current_topic.embedded_description = await self.fetch_embedding(desc)
                 return
 
-        if (
-            len(self.current_topic.history) >= OFF_FREQ
-            and len(self.current_topic.history) % OFF_FREQ == 0
-        ):
+        # Step 2: Only proceed if we have enough history
+        if len(self.current_topic.history) >= OFF_FREQ and len(self.current_topic.history) % OFF_FREQ == 0:
+            # Ensure embedded_description exists
+            if (
+                self.current_topic.embedded_description is None
+                or len(self.current_topic.embedded_description) == 0
+            ):
+                if self.current_topic.description.strip():
+                    self.current_topic.embedded_description = await self.fetch_embedding(
+                        self.current_topic.description
+                    )
+                else:
+                    # Cannot compute similarity without description
+                    return
+
             current_name = self.current_topic.name
             slice_msgs = self.current_topic.history[-SLICE_SIZE:]
             embeddings = await asyncio.gather(
                 *(self.fetch_embedding(m["content"]) for m in slice_msgs)
             )
+
             sims = [
                 cosine_similarity(e, self.current_topic.embedded_description)
                 for e in embeddings
@@ -395,18 +383,20 @@ class ContextManager:
                         break
                 segment = self.current_topic.history[off_start:]
 
+                # Generate new topic info from the segment
                 name, desc = await self.generate_topic_info_from_history(segment)
                 if name and desc:
                     emb = await self.fetch_embedding(desc)
-                    matched = await self._match_topic(
-                        emb, exclude_topic=self.current_topic
-                    )
+                    matched = await self._match_topic(emb, exclude_topic=self.current_topic)
+
                     if matched:
+                        # Add messages to matched topic
                         for m in segment:
                             e = await self.fetch_embedding(m["content"])
                             await matched.add_message(m["role"], m["content"], e)
                         await self.switch_topic(matched)
                     else:
+                        # Create new topic
                         new_topic = Topic(name, desc)
                         new_topic.embedded_description = emb
                         for m in segment:
@@ -414,11 +404,11 @@ class ContextManager:
                             await new_topic.add_message(m["role"], m["content"], e)
                         await self.switch_topic(new_topic)
 
-                    target = next(
-                        (t for t in self.topics if t.name == current_name), None
-                    )
+                    # Trim the old topic history
+                    target = next((t for t in self.topics if t.name == current_name), None)
                     if target:
                         target.history = target.history[:off_start]
+
 
     # ========================================================================
     # PROVIDE CONTEXT – STRICT token limit + permanent archive

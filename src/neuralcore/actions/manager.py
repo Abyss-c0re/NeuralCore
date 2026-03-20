@@ -1,6 +1,6 @@
 import math
 from typing import Any, Dict, List, Optional
-from rapidfuzz import fuzz
+from neuralcore.utils.search import fuzzy_score, keyword_score
 from neuralcore.actions.actions import Action, ActionSet
 
 from inspect import signature, _empty
@@ -33,25 +33,6 @@ def map_type_to_json(param_annotation):
     # Fallback
     print(f"[Warning] Unmapped annotation {param_annotation}, defaulting to 'string'")
     return "string"
-
-
-# ─────────────────────────────────────────────────────────────
-# Fuzzy & keyword scoring
-# ─────────────────────────────────────────────────────────────
-def keyword_score(query_words, text):
-    words = text.split()
-
-    overlap = len(set(query_words) & set(words))
-    coverage = overlap / max(len(query_words), 1)
-
-    prefix_bonus = sum(1 for qw in query_words for w in words if w.startswith(qw))
-
-    return coverage * 3 + prefix_bonus * 0.5
-
-
-def fuzzy_score(query: str, text: str) -> float:
-    # token_set_ratio handles reordering & missing words better than partial_ratio
-    return fuzz.token_set_ratio(query, text) / 100
 
 
 # ─────────────────────────────────────────────────────────────
@@ -210,7 +191,7 @@ class ActionRegistry:
         self._index.append({"action": action, "set": set_name, "text": searchable})
         print(f"[Debug] Added action '{action.name}' to index under set '{set_name}'")
 
-    def search(self, query: str, limit: int = 8):
+    def search(self, query: str, limit: int = 10):
         query = query.lower().strip()
         query_words = query.split()
 
