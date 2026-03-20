@@ -17,6 +17,7 @@ class Action:
         require_confirmation: bool = False,
         confirmation_preview: Optional[Callable[[dict], str]] = None,
         tags: Optional[List[str]] = None,  # NEW
+        aliases: Optional[List[str]] = None,  # NEW
     ):
         if action_type not in {"tool", "function"}:
             raise ValueError("action_type must be 'tool' or 'function'")
@@ -26,8 +27,10 @@ class Action:
         self.executor = executor
         self.type = action_type
         self.strict = strict
-        self.tags = tags or []  # NEW
-        self.usage_count = 0  # NEW (for ranking later)
+        self.tags = tags or []
+        self.usage_count = 0
+
+        self.aliases = aliases or []  # NEW
 
         self.require_confirmation = require_confirmation
         self.confirmation_preview = confirmation_preview or (
@@ -138,6 +141,7 @@ class ActionSet:
             # "categories": [...],
             # "domain": "web" | "math" | "files" | ...
         }
+
     def remove(self, action: Action) -> None:
         """Remove a specific Action instance from the set."""
         if action not in self.actions:
