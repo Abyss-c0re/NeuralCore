@@ -1,44 +1,103 @@
-from typing import Any, Dict, Optional, List
+import math
+from typing import Any, Dict, List, Optional
+from rapidfuzz import fuzz
 from neuralcore.actions.actions import Action, ActionSet
-from neuralcore.actions.registry import ActionRegistry
+
+from inspect import signature, _empty
+from typing import get_origin
+
+PYTHON_TO_JSON_TYPE = {
+    str: "string",
+    int: "integer",
+    float: "number",
+    bool: "boolean",
+    list: "array",
+    dict: "object",
+}
 
 
+def map_type_to_json(param_annotation):
+    """Convert Python type annotation to JSON Schema type."""
+    if param_annotation is _empty:
+        return "string"  # default type
+
+    # Handle basic types
+    if param_annotation in PYTHON_TO_JSON_TYPE:
+        return PYTHON_TO_JSON_TYPE[param_annotation]
+
+    # Handle typing generics like list[str], dict[str, int], etc.
+    origin = get_origin(param_annotation)
+    if origin in PYTHON_TO_JSON_TYPE:
+        return PYTHON_TO_JSON_TYPE[origin]
+
+    # Fallback
+    print(f"[Warning] Unmapped annotation {param_annotation}, defaulting to 'string'")
+    return "string"
+
+
+# ─────────────────────────────────────────────────────────────
+# Fuzzy & keyword scoring
+# ─────────────────────────────────────────────────────────────
+def keyword_score(query_words, text):
+    words = text.split()
+
+    overlap = len(set(query_words) & set(words))
+    coverage = overlap / max(len(query_words), 1)
+
+    prefix_bonus = sum(1 for qw in query_words for w in words if w.startswith(qw))
+
+    return coverage * 3 + prefix_bonus * 0.5
+
+
+def fuzzy_score(query: str, text: str) -> float:
+    # token_set_ratio handles reordering & missing words better than partial_ratio
+    return fuzz.token_set_ratio(query, text) / 100
+
+
+# ─────────────────────────────────────────────────────────────
+# Dynamic Action Manager
+# ─────────────────────────────────────────────────────────────
 class DynamicActionManager:
-    def __init__(self, registry: ActionRegistry):
+    """Manages dynamic tools loaded for the session."""
+
+    def __init__(self, registry: "ActionRegistry"):
         self.registry = registry
         self.current_set = ActionSet("DynamicCore")
         self._loaded = set()
+        print("[Debug] DynamicActionManager initialized")
 
-    # Delegate all important ActionSet methods
+    def add(self, action: Action):
+        print(f"[Debug] Adding action '{action.name}' to DynamicCore")
+        self.current_set.add(action)
+
     def get_llm_tools(self) -> List[Dict[str, Any]]:
+        """Return dynamic tools in a format suitable for the LLM to call."""
         return self.current_set.get_llm_tools()
 
     def get_executor(self, name: str) -> Optional[Action]:
-        action = self.current_set.by_name.get(name)
-        if action:
-            return action  # always the Action object
-        return None
-
-    def add(self, action: Action) -> None:
-        self.current_set.add(action)
+        return self.current_set.by_name.get(name)
 
     def load_tools(self, tool_names: List[str]):
+        print(f"[Debug] Loading tools dynamically: {tool_names}")
         for name in tool_names:
             if name in self._loaded:
+                print(f"[Debug] Tool '{name}' already loaded, skipping")
                 continue
             if name not in self.registry.all_actions:
+                print(f"[Warning] Tool '{name}' not found in registry, skipping")
                 continue
             action, _ = self.registry.all_actions[name]
-            self.add(action)  # now works
+            self.add(action)
             self._loaded.add(name)
+            print(f"[Debug] Tool '{name}' loaded into DynamicCore")
 
     def unload_all(self):
         browser = self.current_set.by_name.get("browse_tools")
         self.current_set = ActionSet("DynamicCore")
         if browser:
             self.current_set.add(browser)
+        print("[Debug] Unloaded all dynamic tools, retained ToolBrowser")
 
-    # Optional: more delegation if needed
     @property
     def actions(self):
         return self.current_set.actions
@@ -46,3 +105,263 @@ class DynamicActionManager:
     @property
     def by_name(self):
         return self.current_set.by_name
+
+
+# ─────────────────────────────────────────────────────────────
+# Tool Browser
+# ─────────────────────────────────────────────────────────────
+class ToolBrowser(Action):
+    def __init__(self, registry: "ActionRegistry", manager: DynamicActionManager):
+        super().__init__(
+            name="browse_tools",
+            description=(
+                "Find and load tools not currently available. "
+                "Provide a short action query (e.g. 'open file', 'edit file')."
+            ),
+            parameters={
+                "query": {"type": "string", "description": "Short action phrase"},
+                "limit": {"type": "integer", "default": 8},
+            },
+            executor=self._search,
+            required=["query"],
+        )
+        self.registry = registry
+        self.manager = manager
+        manager.current_set.add(self)
+        print("[Debug] ToolBrowser added to DynamicCore")
+
+    async def _search(self, query: str, limit: int = 8):
+        print(f"[Debug] ToolBrowser search: query='{query}', limit={limit}")
+        results = self.registry.search(query, limit)
+        if not results:
+            print("[Debug] No matching tools found")
+            return {
+                "status": "no_matches",
+                "message": "No tools found. Try broader terms.",
+            }
+
+        best = results[:3]
+        self.manager.load_tools([a.name for a, _ in best])
+        print(f"[Debug] ToolBrowser loaded {len(best)} tools")
+
+        return {
+            "status": "success",
+            "loaded_tools": [a.name for a, _ in best],
+            "matching_tools": [
+                {
+                    "name": a.name,
+                    "description": a.description,
+                    "category": set_name,
+                    "parameters": getattr(a, "_raw_schema", {}).get("parameters", {}),
+                }
+                for a, set_name in results
+            ],
+            "message": f"{len(best)} tools loaded and ready.",
+        }
+
+
+# ─────────────────────────────────────────────────────────────
+# Main Action Registry
+# ─────────────────────────────────────────────────────────────
+class ActionRegistry:
+    """Central searchable registry of all tools."""
+
+    def __init__(self):
+        self.sets: Dict[str, ActionSet] = {}
+        self.all_actions: Dict[str, tuple[Action, str]] = {}
+        self._index = []
+
+        # Dynamic manager
+        self.manager = DynamicActionManager(self)
+
+        print("[Debug] ActionRegistry initialized")
+
+        # Load ToolBrowser
+        ToolBrowser(self, self.manager)
+        print("[Debug] ToolBrowser registered")
+
+    def register_set(self, name: str, action_set: ActionSet):
+        print(
+            f"[Debug] Registering set '{name}' with {len(action_set.actions)} actions"
+        )
+        if name in self.sets:
+            raise ValueError(f"Set {name} already exists")
+        self.sets[name] = action_set
+
+        for action in action_set.actions:
+            self._add_to_index(action, name)
+
+    def register_action(self, action: Action, set_name: str):
+        if set_name in self.sets:
+            self.sets[set_name].add(action)
+        else:
+            aset = ActionSet(name=set_name)
+            aset.add(action)
+            self.register_set(set_name, aset)
+        self._add_to_index(action, set_name)
+
+    def _add_to_index(self, action: Action, set_name: str):
+        self.all_actions[action.name] = (action, set_name)
+        searchable = " ".join(
+            [action.name, action.description]
+            + getattr(action, "tags", [])
+            + getattr(action, "aliases", [])
+        ).lower()
+        self._index.append({"action": action, "set": set_name, "text": searchable})
+        print(f"[Debug] Added action '{action.name}' to index under set '{set_name}'")
+
+    def search(self, query: str, limit: int = 8):
+        query = query.lower().strip()
+        query_words = query.split()
+
+        results = []
+
+        for entry in self._index:
+            action = entry["action"]
+            text = entry["text"]
+            set_name = entry["set"]
+
+            # 1. Scoring
+            k_score = keyword_score(query_words, text.split())
+            f_score = fuzzy_score(query, text)
+
+            usage_bonus = math.log1p(action.usage_count)
+            set_bonus = 1.5 if query in set_name.lower() else 0
+
+            # 2. Weighted Total (Increased weights to ensure matches)
+            total = k_score * 5 + f_score * 3 + usage_bonus * 0.4 + set_bonus
+
+            # 3. Debug Output (Optional: Remove if you want cleaner logs)
+            if "ls" in action.name or "list" in query:
+                print(
+                    f"[SCORE] {action.name:12} | f={f_score:.2f} k={k_score:.2f} tot={total:.2f}"
+                )
+
+            # 4. Lower Threshold (0.10 is safe; 0.4 was too strict)
+            if total > 0.10:
+                results.append((total, action, set_name))
+
+        # Sort by score (highest first)
+        results.sort(key=lambda x: x[0], reverse=True)
+        return [(a, s) for _, a, s in results[:limit]]
+
+    def list_all_tools(self, limit: int = 8) -> List[Dict]:
+        """
+        Returns a list of all tools currently in the registry.
+        """
+        tools = []
+
+        # Correct Unpacking:
+        # 1. key (name_string)
+        # 2. value (tuple containing Action and set_name)
+        for name, (action, set_name) in self.all_actions.items():
+            tools.append(
+                {
+                    "name": action.name,
+                    "description": action.description,
+                    "set_name": set_name,
+                    "tags": getattr(action, "tags", []),
+                }
+            )
+
+        # Sort by name for readability
+        tools.sort(key=lambda x: x["name"])
+
+        if limit:
+            return tools[:limit]
+
+        return tools
+
+    # Optional: Quick debug print version
+    def debug_print_all_tools(self, limit: int = 8):
+        tools = self.list_all_tools(limit)
+        print("\n" + "=" * 80)
+        print("📂 GLOBAL TOOL REGISTRY CONTENTS")
+        print("=" * 80)
+        for tool in tools:
+            print(f"  🛠️  [ {tool['name']:30} ] @ {tool['set_name']}")
+            print(f"     📖 {tool['description']}")
+            if tool.get("tags"):
+                print(f"     🏷️  Tags: {', '.join(tool['tags'])}")
+            print("-" * 80)
+        print(f"✅ Total Tools: {len(tools)}")
+        print("=" * 80 + "\n")
+
+    def execute(self, name: str, **kwargs):
+        if name not in self.all_actions:
+            raise ValueError(f"Action '{name}' not found")
+        action, _ = self.all_actions[name]
+        print(f"[Debug] Executing action '{name}' with args: {kwargs}")
+        result = action.executor(**kwargs)
+        action.usage_count = getattr(action, "usage_count", 0) + 1
+        return result
+
+
+# ─────────────────────────────────────────────────────────────
+# Create global singleton
+# ─────────────────────────────────────────────────────────────
+registry = ActionRegistry()
+print(f"[Debug] Global registry created with sets: {list(registry.sets.keys())}")
+
+
+def tool(set_name: str, **kwargs):
+    """
+    Wrap a function as an Action and auto-add it to a set.
+    Converts all Python type annotations to JSON Schema types.
+    """
+
+    def wrapper(fn):
+        name = kwargs.get("name", fn.__name__)
+        description = kwargs.get("description", fn.__doc__ or "")
+        tags = kwargs.get("tags", [])
+        aliases = kwargs.get("aliases", [])
+
+        # ---- Infer parameters from signature if not explicitly provided ----
+        sig = signature(fn)
+        parameters = kwargs.get("parameters", {})
+        required = kwargs.get("required", [])
+
+        for param_name, param in sig.parameters.items():
+            if param_name not in parameters:
+                param_type = map_type_to_json(param.annotation)
+                parameters[param_name] = {
+                    "type": param_type,
+                    "description": f"Parameter '{param_name}'",
+                }
+
+            # Determine if required
+            if param.default is _empty and param_name not in required:
+                required.append(param_name)
+
+        # ---- Create the Action ----
+        action = Action(
+            name=name,
+            description=description,
+            tags=tags,
+            parameters=parameters,
+            required=required,
+            executor=fn,
+        )
+        action.aliases = aliases
+        action.usage_count = 0
+
+        # ---- Add to or create ActionSet ----
+        if set_name in registry.sets:
+            aset = registry.sets[set_name]
+        else:
+            aset = ActionSet(name=set_name, description=f"{set_name} tools")
+            registry.register_set(set_name, aset)
+            print(f"[Debug] Created new ActionSet '{set_name}' for decorator")
+
+        # Add action to the set
+        aset.add(action)
+
+        # ---- Immediately add to search index ----
+        registry._add_to_index(action, set_name)
+        print(
+            f"[Debug] Registered action '{name}' under set '{set_name}' with required args: {required}"
+        )
+
+        return fn
+
+    return wrapper
