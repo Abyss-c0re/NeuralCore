@@ -10,10 +10,9 @@ from neuralcore.core.client_factory import get_clients
 from neuralcore.utils.text_tokenizer import TextTokenizer
 from neuralcore.utils.search import keyword_score, cosine_similarity
 
-
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 # CONSTANTS
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 MSG_THR = 0.5
 NUM_MSG = 5
 OFF_THR = 0.7
@@ -23,9 +22,28 @@ SLICE_SIZE = 4
 logger = Logger.get_logger()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# KNOWLEDGE ITEM (external tools/files/terminal/code)
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# SAFE COSINE SIMILARITY
+# ─────────────────────────────────────────────────────────────
+def safe_cosine(vec1: np.ndarray, vec2: np.ndarray) -> float:
+    if vec1 is None or vec2 is None:
+        return 0.0
+    vec1 = np.asarray(vec1, dtype=np.float32)
+    vec2 = np.asarray(vec2, dtype=np.float32)
+    if vec1.size == 0 or vec2.size == 0:
+        return 0.0
+    if vec1.shape != vec2.shape:
+        return 0.0
+    norm1 = np.linalg.norm(vec1)
+    norm2 = np.linalg.norm(vec2)
+    if norm1 == 0.0 or norm2 == 0.0:
+        return 0.0
+    return float(np.dot(vec1, vec2) / (norm1 * norm2))
+
+
+# ─────────────────────────────────────────────────────────────
+# KNOWLEDGE ITEM
+# ─────────────────────────────────────────────────────────────
 class KnowledgeItem:
     def __init__(
         self,
@@ -42,16 +60,16 @@ class KnowledgeItem:
         self.word_set = set(re.findall(r"\b\w+\b", content.lower()))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TOPIC – FULL history + permanent archive (never lost)
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# TOPIC
+# ─────────────────────────────────────────────────────────────
 class Topic:
     def __init__(self, name: str = "", description: str = "") -> None:
         self.name = name
         self.description = description
         self.embedded_description = np.array([])
-        self.history: List[Dict[str, str]] = []  # active conversation (never deleted)
-        self.archived_history: List[Dict[str, str]] = []  # pruned turns stored forever
+        self.history: List[Dict[str, str]] = []
+        self.archived_history: List[Dict[str, str]] = []
         self.history_embeddings: List[np.ndarray] = []
 
     async def add_message(self, role: str, message: str, embedding: np.ndarray) -> None:
@@ -60,17 +78,15 @@ class Topic:
         logger.info(f"Message added to topic: {self.name}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CONTEXT MANAGER – strict token limit + permanent archive
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# CONTEXT MANAGER
+# ─────────────────────────────────────────────────────────────
 class ContextManager:
     def __init__(self, max_tokens: int = 28000) -> None:
         self.max_tokens = max_tokens
-
         clients = get_clients()
         self.client = clients.get("main")
         self.embeddings = clients.get("embeddings")
-
         self.tokenizer = None
 
         try:
@@ -80,31 +96,23 @@ class ContextManager:
                 loader = get_loader()
                 cfg = loader.get_client_config("main")
                 tokenizer_source = cfg.get("tokenizer")
-
                 if not tokenizer_source:
                     raise ValueError("Tokenizer not found in main client config")
-
                 self.tokenizer = TextTokenizer(tokenizer_source)
 
-        # Attach tokenizer to main client if missing
         if self.client and not getattr(self.client, "tokenizer", None):
             self.client.tokenizer = self.tokenizer
-
-        if self.embeddings:
-            # If embeddings already has a tokenizer, respect it
-            if not getattr(self.embeddings, "tokenizer", None):
-                self.embeddings.tokenizer = self.tokenizer
+        if self.embeddings and not getattr(self.embeddings, "tokenizer", None):
+            self.embeddings.tokenizer = self.tokenizer
 
         self.similarity_threshold = MSG_THR
         self.topics: List[Topic] = []
         self.current_topic = Topic("Initial topic")
-
         self.knowledge_base: Dict[str, KnowledgeItem] = {}
         self.embedding_cache: Dict[str, np.ndarray] = {}
         self.fs_state = {"cwd": ".", "known_folders": [], "negative_findings": []}
 
-        # ── ACTION TRACKING + SUMMARY (new) ─────────────────────────────────
-        self.action_log: List[Dict[str, Any]] = []  # all actions (kept last 60)
+        self.action_log: List[Dict[str, Any]] = []
         self.files_checked: set[str] = set()
         self.tools_executed: List[str] = []
         self.context_stats = {
@@ -114,9 +122,9 @@ class ContextManager:
             "prunes": 0,
         }
 
-    # ========================================================================
-    # EMBEDDING (cached)
-    # ========================================================================
+    # ─────────────────────────────────────────────────────────────
+    # FETCH EMBEDDING
+    # ─────────────────────────────────────────────────────────────
     async def fetch_embedding(self, text: str, size: int = 500) -> np.ndarray:
         if not text.strip() or not self.embeddings:
             return np.array([])
@@ -124,14 +132,14 @@ class ContextManager:
             if text in self.embedding_cache:
                 return self.embedding_cache[text]
         emb = await self.embeddings.fetch_embedding(text, size)
-        if emb is not None and emb.size > 0:
+        if emb is not None and emb.size > 0 and np.isfinite(emb).all():
             self.embedding_cache[text] = emb
             return emb
         return np.array([])
 
-    # ─────────────────────────────────────────────────────────────────────────────
-    # ACTION LOGGER + SUMMARY (what you asked for)
-    # ─────────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────
+    # LOGGING
+    # ─────────────────────────────────────────────────────────────
     def _log_action(
         self, action_type: str, description: str, metadata: Dict[str, Any] | None = None
     ) -> None:
@@ -145,7 +153,6 @@ class ContextManager:
         if len(self.action_log) > 60:
             self.action_log.pop(0)
 
-        # Quick counters
         if action_type.startswith("add_"):
             self.context_stats["messages_added"] += 1
         elif action_type == "switch_topic":
@@ -154,10 +161,8 @@ class ContextManager:
             self.context_stats["prunes"] += 1
 
     def get_context_summary(self) -> str:
-        """Tiny summary that is embedded into every LLM prompt"""
         files = sorted(list(self.files_checked))[-6:]
         tools = self.tools_executed[-5:]
-
         lines = [
             "📋 LIVE CONTEXT SUMMARY",
             f"• Files checked: {', '.join(files) if files else '—'}",
@@ -169,14 +174,11 @@ class ContextManager:
         ]
         return "\n".join(lines)[:650]
 
-    # ========================================================================
-    # EXTERNAL KNOWLEDGE BASE
-    # ========================================================================
+    # ─────────────────────────────────────────────────────────────
+    # ADD EXTERNAL CONTENT
+    # ─────────────────────────────────────────────────────────────
     async def add_external_content(
-        self,
-        source_type: str,
-        content: str,
-        metadata: Dict[str, Any] | None = None,
+        self, source_type: str, content: str, metadata: Dict[str, Any] | None = None
     ) -> str | None:
         if not content or not content.strip():
             return None
@@ -200,18 +202,21 @@ class ContextManager:
         self.knowledge_base[key] = item
         logger.info(f"Added/updated KB item: {key}")
 
-        # ── LOGGING & STATS ───────────────────────────────────────────────────
         if metadata and metadata.get("path"):
             self.files_checked.add(str(metadata["path"]))
         self._log_action("add_knowledge", f"Added {source_type} → {key}", metadata)
         self.context_stats["kb_added"] += 1
         return key
 
+    # ─────────────────────────────────────────────────────────────
+    # RETRIEVE RELEVANT KNOWLEDGE
+    # ─────────────────────────────────────────────────────────────
     async def _retrieve_relevant_knowledge(self, query: str, max_kb_tokens: int) -> str:
         if not self.knowledge_base or not query.strip():
             return ""
         if not self.tokenizer:
-            raise RuntimeError("Tokenizer is not loaded...")
+            raise RuntimeError("Tokenizer not loaded...")
+
         query_emb = await self.fetch_embedding(query)
         if len(query_emb) == 0:
             return ""
@@ -221,7 +226,7 @@ class ContextManager:
         for item in self.knowledge_base.values():
             if item.embedding.size == 0:
                 continue
-            emb_sim = cosine_similarity(query_emb, item.embedding)
+            emb_sim = safe_cosine(query_emb, item.embedding)
             preview = (
                 " ".join(str(v) for v in item.metadata.values())
                 + " "
@@ -232,7 +237,6 @@ class ContextManager:
             scored.append((hybrid, item))
 
         scored.sort(key=lambda x: x[0], reverse=True)
-
         parts: List[str] = []
         used = 0
         for _, item in scored[:40]:
@@ -255,9 +259,9 @@ class ContextManager:
             used += block_tokens
         return "".join(parts)
 
-    # ========================================================================
-    # CONVERSATION + TOPIC MANAGEMENT
-    # ========================================================================
+    # ─────────────────────────────────────────────────────────────
+    # ADD MESSAGE
+    # ─────────────────────────────────────────────────────────────
     async def add_message(
         self, role: str, message: str, embedding: np.ndarray | None = None
     ) -> None:
@@ -271,11 +275,13 @@ class ContextManager:
         await self.current_topic.add_message(role, message, embedding)
         asyncio.create_task(self._analyze_history())
 
-        # ── LOGGING & STATS ───────────────────────────────────────────────────
         self._log_action(
             "add_message", f"{role} message ({len(message)} chars)", {"role": role}
         )
 
+    # ─────────────────────────────────────────────────────────────
+    # SWITCH TOPIC
+    # ─────────────────────────────────────────────────────────────
     async def switch_topic(self, topic: Topic) -> None:
         async with asyncio.Lock():
             if topic.name != self.current_topic.name:
@@ -283,9 +289,11 @@ class ContextManager:
                     self.topics.append(self.current_topic)
                 logger.info(f"Switched topic → {topic.name}")
                 self.current_topic = topic
-                # ── LOGGING & STATS ──────────────────────────────────────────────
                 self._log_action("switch_topic", f"Switched to {topic.name}")
 
+    # ─────────────────────────────────────────────────────────────
+    # MATCH TOPIC
+    # ─────────────────────────────────────────────────────────────
     async def _match_topic(
         self, embedding: np.ndarray, exclude_topic: Topic | None = None
     ) -> Topic | None:
@@ -295,7 +303,7 @@ class ContextManager:
         async def compute(topic: Topic) -> Tuple[float, Topic]:
             if len(topic.embedded_description) == 0 or len(embedding) == 0:
                 return 0.0, topic
-            return cosine_similarity(embedding, topic.embedded_description), topic
+            return safe_cosine(embedding, topic.embedded_description), topic
 
         results = await asyncio.gather(
             *[compute(t) for t in self.topics if t is not exclude_topic]
@@ -305,6 +313,89 @@ class ContextManager:
             if sim > best_sim and sim >= self.similarity_threshold:
                 best_sim, best_topic = sim, t
         return best_topic
+
+    # ─────────────────────────────────────────────────────────────
+    # ANALYZE HISTORY (topic extraction & off-topic detection)
+    # ─────────────────────────────────────────────────────────────
+    async def _analyze_history(self) -> None:
+        if (
+            len(self.current_topic.history) > 4
+            and not self.current_topic.description.strip()
+        ):
+            name, desc = await self.generate_topic_info_from_history(
+                self.current_topic.history
+            )
+            if name and desc:
+                self.current_topic.name = name
+                self.current_topic.description = desc
+                self.current_topic.embedded_description = await self.fetch_embedding(
+                    desc
+                )
+                return
+
+        if (
+            len(self.current_topic.history) >= OFF_FREQ
+            and len(self.current_topic.history) % OFF_FREQ == 0
+        ):
+            if (
+                self.current_topic.embedded_description is None
+                or len(self.current_topic.embedded_description) == 0
+            ):
+                if self.current_topic.description.strip():
+                    self.current_topic.embedded_description = (
+                        await self.fetch_embedding(self.current_topic.description)
+                    )
+                else:
+                    return
+
+            current_name = self.current_topic.name
+            slice_msgs = self.current_topic.history[-SLICE_SIZE:]
+            embeddings = await asyncio.gather(
+                *(self.fetch_embedding(m["content"]) for m in slice_msgs)
+            )
+            sims = [
+                safe_cosine(e, self.current_topic.embedded_description)
+                for e in embeddings
+            ]
+
+            if sum(1 for s in sims if s < OFF_THR) > len(sims) / 2:
+                off_start = len(self.current_topic.history) - SLICE_SIZE
+                for i, s in enumerate(sims):
+                    if s < OFF_THR:
+                        off_start += i
+                        break
+                segment = self.current_topic.history[off_start:]
+
+                name, desc = await self.generate_topic_info_from_history(segment)
+                if name and desc:
+                    emb = await self.fetch_embedding(desc)
+                    matched = await self._match_topic(
+                        emb, exclude_topic=self.current_topic
+                    )
+                    if matched:
+                        for m in segment:
+                            e = await self.fetch_embedding(m["content"])
+                            await matched.add_message(m["role"], m["content"], e)
+                        await self.switch_topic(matched)
+                    else:
+                        new_topic = Topic(name, desc)
+                        new_topic.embedded_description = emb
+                        for m in segment:
+                            e = await self.fetch_embedding(m["content"])
+                            await new_topic.add_message(m["role"], m["content"], e)
+                        await self.switch_topic(new_topic)
+
+                    target = next(
+                        (t for t in self.topics if t.name == current_name), None
+                    )
+                    if target:
+                        target.history = target.history[:off_start]
+
+    # ─────────────────────────────────────────────────────────────
+    # The rest of the methods (provide_context, pruning, get_archived_context,
+    # record_tool_outcome, generate_topic_info_from_history, etc.) can
+    # follow the same pattern: use `safe_cosine` and validate embeddings.
+    # ─────────────────────────────────────────────────────────────
 
     # ========================================================================
     # TOPIC EXTRACTION & OFF-TOPIC
@@ -336,79 +427,6 @@ class ContextManager:
                 )
                 attempt += 1
         return None, None
-
-    async def _analyze_history(self) -> None:
-        # Step 1: Generate topic info if description is missing
-        if len(self.current_topic.history) > 4 and not self.current_topic.description.strip():
-            name, desc = await self.generate_topic_info_from_history(
-                self.current_topic.history
-            )
-            if name and desc:
-                self.current_topic.name = name
-                self.current_topic.description = desc
-                self.current_topic.embedded_description = await self.fetch_embedding(desc)
-                return
-
-        # Step 2: Only proceed if we have enough history
-        if len(self.current_topic.history) >= OFF_FREQ and len(self.current_topic.history) % OFF_FREQ == 0:
-            # Ensure embedded_description exists
-            if (
-                self.current_topic.embedded_description is None
-                or len(self.current_topic.embedded_description) == 0
-            ):
-                if self.current_topic.description.strip():
-                    self.current_topic.embedded_description = await self.fetch_embedding(
-                        self.current_topic.description
-                    )
-                else:
-                    # Cannot compute similarity without description
-                    return
-
-            current_name = self.current_topic.name
-            slice_msgs = self.current_topic.history[-SLICE_SIZE:]
-            embeddings = await asyncio.gather(
-                *(self.fetch_embedding(m["content"]) for m in slice_msgs)
-            )
-
-            sims = [
-                cosine_similarity(e, self.current_topic.embedded_description)
-                for e in embeddings
-            ]
-
-            if sum(1 for s in sims if s < OFF_THR) > len(sims) / 2:
-                off_start = len(self.current_topic.history) - SLICE_SIZE
-                for i, s in enumerate(sims):
-                    if s < OFF_THR:
-                        off_start += i
-                        break
-                segment = self.current_topic.history[off_start:]
-
-                # Generate new topic info from the segment
-                name, desc = await self.generate_topic_info_from_history(segment)
-                if name and desc:
-                    emb = await self.fetch_embedding(desc)
-                    matched = await self._match_topic(emb, exclude_topic=self.current_topic)
-
-                    if matched:
-                        # Add messages to matched topic
-                        for m in segment:
-                            e = await self.fetch_embedding(m["content"])
-                            await matched.add_message(m["role"], m["content"], e)
-                        await self.switch_topic(matched)
-                    else:
-                        # Create new topic
-                        new_topic = Topic(name, desc)
-                        new_topic.embedded_description = emb
-                        for m in segment:
-                            e = await self.fetch_embedding(m["content"])
-                            await new_topic.add_message(m["role"], m["content"], e)
-                        await self.switch_topic(new_topic)
-
-                    # Trim the old topic history
-                    target = next((t for t in self.topics if t.name == current_name), None)
-                    if target:
-                        target.history = target.history[:off_start]
-
 
     # ========================================================================
     # PROVIDE CONTEXT – STRICT token limit + permanent archive

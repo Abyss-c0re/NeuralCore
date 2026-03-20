@@ -57,11 +57,25 @@ def fuzzy_score(query, text):
 
 
 def cosine_similarity(vec1: np.ndarray, vec2: np.ndarray) -> float:
+    if vec1 is None or vec2 is None:
+        return 0.0
+
     vec1 = np.asarray(vec1, dtype=np.float32)
     vec2 = np.asarray(vec2, dtype=np.float32)
-    dot = np.dot(vec1, vec2)
-    norm1 = np.sum(vec1**2)
-    norm2 = np.sum(vec2**2)
-    if norm1 == 0 or norm2 == 0:
+
+    if vec1.size == 0 or vec2.size == 0:
         return 0.0
-    return dot / (np.sqrt(norm1) * np.sqrt(norm2))
+
+    if vec1.shape != vec2.shape:
+        return 0.0
+
+    if not np.isfinite(vec1).all() or not np.isfinite(vec2).all():
+        return 0.0
+
+    norm1 = np.linalg.norm(vec1)
+    norm2 = np.linalg.norm(vec2)
+
+    if norm1 == 0.0 or norm2 == 0.0:
+        return 0.0
+
+    return float(np.dot(vec1, vec2) / (norm1 * norm2))
