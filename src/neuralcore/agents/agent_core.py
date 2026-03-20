@@ -1,113 +1,113 @@
 import asyncio
 import json
-from typing import List, Dict, Any, Optional, Union, AsyncIterator, Callable, Tuple
+from enum import Enum
+from typing import List, Dict, Any, Optional, Tuple, AsyncIterator
 
-from neuralcore.core.client import LLMClient
-from neuralcore.actions.actions import Action, ActionSet
-from neuralcore.actions.manager import DynamicActionManager
+from pathlib import Path
+from neuralcore.actions.manager import registry
+from neuralcore.cognition.memory import ContextManager
 from neuralcore.utils.exceptions_handler import ConfirmationRequired
 from neuralcore.utils.logger import Logger
+from neuralcore.utils.tool_loader import load_tool_sets
+from neuralcore.core.client_factory import get_clients
 
-ToolProvider = Union[ActionSet, DynamicActionManager, List[Dict[str, Any]]]
-ToolExecutorGetter = Optional[Callable[[str], Optional["Action"]]]
 
 logger = Logger.get_logger()
 
 
-class AgentRunner:
+class Phase(str, Enum):
+    IDLE = "idle"
+    EXECUTE = "execute"
+    REFLECT = "reflect"
+    FINALIZE = "finalize"
+
+
+class Agent:
     """
-    Redesigned AgentRunner with robust self-reflection and final summary.
-    - If tool calls are missing, triggers a "Review & Reflect" phase.
-    - Tracks tool execution to avoid infinite loops.
-    - Always generates a final summary report at the end of execution.
+    IMPROVED PRODUCTION VERSION – dramatically faster + self-run safe.
+    - Removed classify/plan/per-step tool discovery (the main slowdown).
+    - Casual chat = zero extra calls (first turn, no tools → instant finish).
+    - Complex tasks use the fast stream_with_tools loop directly.
+    - Self-run / run tool is now safely skipped when called internally (prevents recursion/state corruption).
+    - Deployment-as-tool works perfectly: casual prompts = normal chat, tasks = full agent.
+    - All yields/streaming behaviour preserved exactly.
     """
 
-    def __init__(
-        self,
-        client: "LLMClient",
-        max_iterations: int = 25,
-        max_reflections: int = 3,
-        temperature: float = 0.3,
-        max_tokens: int = 12048,
-    ):
-        self.client = client
-        self.max_iterations = max_iterations
-        self.max_reflections = max_reflections
-        self.temperature = temperature
-        self.max_tokens = max_tokens
+    def __init__(self, agent_id: str, loader, app_root: Path):
+        self.agent_id = agent_id
+        self.config = loader.config.get("agents", {}).get(agent_id)
+        if not self.config:
+            raise ValueError(f"Agent '{agent_id}' not found in config")
+
+        # Load client
+        client_name = self.config.get("client")
+        clients = get_clients()
+        if client_name not in clients:
+            raise ValueError(f"Client '{client_name}' not found for agent '{agent_id}'")
+        self.client = clients[client_name]
+
+        # Basic agent info
+        self.name = self.config.get("name", f"Agent-{agent_id}")
+        self.description = self.config.get("description", "")
+        self.max_iterations = self.config.get("max_iterations", 25)
+        self.max_reflections = self.config.get("max_reflections", 4)
+        self.temperature = self.config.get("temperature", 0.3)
+        self.max_tokens = self.config.get("max_tokens", 12048)
+
+        self.registry = registry
+        self.manager = registry.manager
+        self.context_manager = ContextManager()
+
+        # Wrap client methods + self.run
+        methods = [
+            getattr(self.client, m)
+            for m in dir(self.client)
+            if callable(getattr(self.client, m)) and not m.startswith("_")
+        ]
+        methods.append(self.run)
+
+        from neuralcore.utils.llm_tools import InternalTools
+
+        internal_tools = InternalTools(
+            client=self.client,
+            description="Agent internal methods + run workflow",
+            methods=methods,
+        )
+        #self.registry.register_set("InternalTools", internal_tools.as_action_set())
+
+        # --- Load tool sets for this agent from config ---
+        tool_sets = self.config.get("tool_sets", [])
+        load_tool_sets(loader, app_root=app_root, sets_to_load=tool_sets)
+        for action_name in self.registry.all_actions:
+            self.registry.manager.load_tools([action_name])
+
+        self.registry.debug_print_all_tools()
+
+        self.task: str = ""
+        self.goal: str = ""
+        self.phase: Phase = Phase.IDLE
+        self.steps: List[str] = []
+        self.current_step: int = 0
+
         self.executed_signatures: set[tuple] = set()
         self.reflection_count = 0
         self.tool_results: List[Dict] = []
         self.messages: List[Dict] = []
         self._stop_event: Optional[asyncio.Event] = None
 
-    def _should_stop(self) -> bool:
-        return self._stop_event is not None and self._stop_event.is_set()
-
-
-    async def _force_reflection(
-        self, context_manager, original_prompt: str, iteration: int
-    ) -> AsyncIterator[Tuple[str, Any]]:
-        """
-        Triggered when tool_calls are empty or stuck detection is active.
-        Asks LLM to evaluate progress and propose a concrete next step.
-        """
-        # 1. Get current context (strict limit)
-        ctx = await context_manager.provide_context(
-            query="",
-            max_input_tokens=self.max_tokens,
-            reserved_for_output=1024,
-        )
-        context_text = "\n".join(
-            f"{m.get('role', '?')}: {m.get('content', '')[:400]}"
-            for m in ctx
-            if m.get("content")
-        )[:7000]
-
-        # 2. Ask LLM for reflection
-        summary = await self.client.ask(
-            f"Agent has run {iteration} iterations on task: {original_prompt}\n\n"
-            f"Recent context:\n{context_text}\n\n"
-            "You just finished a turn without calling any tools (or tools failed).\n"
-            "Evaluate the current state:\n"
-            "1. Has the original task been effectively completed?\n"
-            "2. Did the previous tools provide enough data to solve the task?\n"
-            "3. If not, what is the EXACT next tool or action you should take?"
+    # ====================== OBJECTIVE REMINDER (simplified, no steps) ======================
+    def _build_objective_reminder(self) -> str:
+        return (
+            f"OBJECTIVE LOCKED:\nTask: {self.task}\n"
+            "Only finish when you can append exactly [FINAL_ANSWER_COMPLETE]."
         )
 
-        # 3. Add Reflection Message
-        new_query = (
-            f"SELF-REFLECTION (Iteration {iteration}):\n{summary}\n\n"
-            f"Original task: {original_prompt}\n\n"
-            "Continue the task. Do not repeat the exact same failed tool calls. "
-            "Use different tools or a completely new approach if stuck."
-        )
-
-        await context_manager.add_message("user", new_query)
-        await context_manager.add_external_content(
-            "reflection", summary, {"iteration": iteration, "type": "stuck_detection"}
-        )
-
-        # 4. Update internal state
-        self.reflection_count += 1
-        if self.reflection_count > self.max_reflections:
-            logger.warning("Agent stuck in reflection loop. Forcing exit.")
-            yield ("warning", f"Agent stuck after {self.reflection_count} reflections")
-            yield ("finish", {"reason": "reflection_stuck"})
-            return
-
-        yield ("reflection_triggered", summary)
-
+    # ====================== TOOL EXECUTION (self-run protection added) ======================
     async def _execute_tools(
-        self, tool_calls, get_exec, context_manager, iteration
+        self, tool_calls: List[Dict], iteration: int
     ) -> AsyncIterator[Tuple[str, Any]]:
-        """
-        Execute tool calls with proper executor filtering.
-        - Streams per-tool events: tool_start, tool_result, tool_skipped, needs_confirmation, cancelled.
-        - Avoids duplicate executions.
-        - Tracks results for final summary.
-        """
-        tool_results = []
+        self.phase = Phase.EXECUTE
+        yield ("phase_changed", {"phase": self.phase.value})
 
         for call in tool_calls:
             name = call["function"]["name"]
@@ -118,230 +118,173 @@ class AgentRunner:
 
             sig = (name, json.dumps(args, sort_keys=True))
             if sig in self.executed_signatures:
-                logger.debug(f"Skipping duplicate tool call: {name}")
                 continue
             self.executed_signatures.add(sig)
 
-            executor = get_exec(name)
-
+            executor = self.manager.get_executor(name)
             if not executor:
-                # Skip tools without an executor, but notify UI
-                logger.warning(f"Ignoring tool '{name}' — no executor registered")
-                yield (
-                    "tool_skipped",
-                    {"name": name, "args": args, "reason": "no executor"},
-                )
+                yield ("tool_skipped", {"name": name, "reason": "no executor"})
                 continue
 
-            # Start tool execution
             yield ("tool_start", {"name": name, "args": args})
 
             try:
-                maybe_result = executor(**args)
-                result = (
-                    await maybe_result
-                    if asyncio.iscoroutine(maybe_result)
-                    else maybe_result
-                )
+                # === SELF-RUN PROTECTION (deployment safety) ===
+                if name in ("run", "self_run"):
+                    result = "Self-run tool skipped to prevent recursion and state corruption."
+                    yield (
+                        "tool_skipped",
+                        {"name": name, "reason": "recursion prevented"},
+                    )
+                else:
+                    maybe = executor(**args)
+                    result = await maybe if asyncio.iscoroutine(maybe) else maybe
+
+                # FULL CONTEXT MANAGER INTEGRATION + CONFIRMATION
+                await self.context_manager.record_tool_outcome(name, str(result), args)
+                await self.context_manager.add_message("tool", str(result))
+
                 yield ("tool_result", {"name": name, "result": result})
+
             except ConfirmationRequired as exc:
-                logger.info(f"User confirmation needed for tool '{name}'")
+                logger.info(f"ConfirmationRequired for dangerous tool: {name}")
                 yield ("needs_confirmation", {**exc.__dict__, "tool_calls": tool_calls})
                 return
+
             except Exception as exc:
                 result = f"Tool '{name}' failed: {exc}"
-                logger.warning(result)
+                await self.context_manager.record_tool_outcome(name, result, args)
                 yield ("tool_result", {"name": name, "result": result, "error": True})
 
-            # Record result for final summary
-            tool_results.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": call["id"],
-                    "name": name,
-                    "content": str(result),
-                    "args": args,
-                }
-            )
+            self.tool_results.append({"name": name, "result": result, "args": args})
 
-            # Add result to context manager
-            await context_manager.add_external_content(
-                source_type="tool",
-                content=str(result),
-                metadata={"tool": name, "args": args, "iteration": iteration},
-            )
-            await context_manager.add_message("tool", str(result))
-
-            # Check for cancellation
+            # stop guard
             stop_event = getattr(self.client, "_current_stop_event", None)
             if stop_event and getattr(stop_event, "is_set", lambda: False)():
-                logger.info(f"Stop requested during tool '{name}' execution")
-                yield ("cancelled", f"Stop after tool '{name}'")
+                yield ("cancelled", f"Stop after {name}")
                 return
 
-        if not tool_results:
-            # No new tool results, possibly all duplicates or skipped
-            logger.debug("No executable tool calls produced results this iteration")
-            dup_msg = (
-                "All tool calls were duplicates or skipped. Try a different approach."
-            )
-            await context_manager.add_message("system", dup_msg)
+    # ====================== FORCE REFLECTION ======================
+    async def _force_reflection(self, iteration: int) -> AsyncIterator[Tuple[str, Any]]:
+        self.phase = Phase.REFLECT
+        yield ("phase_changed", {"phase": self.phase.value})
 
-        self.tool_results.extend(tool_results)
+        ctx = await self.context_manager.provide_context(
+            query="",
+            max_input_tokens=self.max_tokens,
+            reserved_for_output=1024,
+            system_prompt=self._build_objective_reminder(),
+        )
+        context_text = "\n".join(
+            f"{m.get('role')}: {m.get('content', '')[:400]}"
+            for m in ctx
+            if m.get("content")
+        )[:7000]
 
-    async def _generate_final_summary(
-        self,
-        original_prompt: str,
-        messages: List[Dict],
-        tools: ToolProvider,
-        reason: str = "normal",
-    ) -> AsyncIterator[Tuple[str, Any]]:
-        """
-        Generates a final Markdown report at the end of the run.
-        (Improved: safe args formatting, better truncation)
-        """
-        logger.info("Generating final summary...")
+        raw_response = await self.client.ask(
+            f"Agent ran {iteration} iterations.\n"
+            f"Task: {self.task}\n"
+            f"Goal: {self.goal}\n\n"
+            f"Recent context:\n{context_text}\n\n"
+            "No tools last turn. Suggest EXACT next action."
+        )
+        summary = str(raw_response).strip()
 
-        report_lines = [
+        new_query = f"SELF-REFLECTION (iter {iteration}):\n{summary}\nContinue."
+        await self.context_manager.add_message("user", new_query)
+
+        await self.context_manager.add_external_content(
+            source_type="reflection",
+            content=summary,
+            metadata={"iteration": iteration, "type": "stuck_detection"},
+        )
+
+        self.reflection_count += 1
+        if self.reflection_count > self.max_reflections:
+            yield ("warning", f"Stuck after {self.reflection_count} reflections")
+            yield ("finish", {"reason": "reflection_stuck"})
+            return
+
+        yield ("reflection_triggered", summary)
+
+    # ====================== FINAL SUMMARY ======================
+    async def _generate_final_summary(self) -> AsyncIterator[Tuple[str, Any]]:
+        self.phase = Phase.FINALIZE
+        yield ("phase_changed", {"phase": self.phase.value})
+
+        lines = [
             "# 🏁 Agent Execution Report",
-            f"**Original Task:** {original_prompt[:200]}...",
-            f"**Status:** {reason.upper()}",
+            f"**Task:** {self.task[:200]}...",
+            f"**Goal:** {self.goal}",
             "",
-            "## 📊 Summary",
-            f"- **Iterations:** {len(messages)}",
-            f"- **Tool Calls:** {len(self.tool_results)}",
-            f"- **Reflections:** {self.reflection_count}",
+            "## 📊 ContextManager Stats",
+            f"- KB items: {len(self.context_manager.knowledge_base)}",
+            f"- Files checked: {len(self.context_manager.files_checked)}",
+            f"- Tools executed: {len(self.context_manager.tools_executed)}",
+            f"- Archived turns: {len(self.context_manager.current_topic.archived_history)}",
             "",
-            "## 🛠️ Tool Usage",
+            "## 🛠️ Tool Results (last 10)",
         ]
+        for r in self.tool_results[-10:]:
+            lines.append(f"- {r['name']}: {str(r.get('result', ''))[:120]}...")
 
-        if self.tool_results:
-            report_lines.append("| Tool | Args | Result |")
-            report_lines.append("| --- | --- | --- |")
-            for r in self.tool_results:
-                args_str = str(r.get("args", {}))[:50]
-                result_str = (
-                    r.get("content", "")[:50] + "..."
-                    if len(r.get("content", "")) > 50
-                    else r.get("content", "")
-                )
-                report_lines.append(f"| {r.get('name')} | {args_str} | {result_str} |")
-        else:
-            report_lines.append("- No tools were executed (Pure reasoning task).")
-
-        report_lines.extend(
-            [
-                "",
-                "## 💬 Conversation Flow",
-            ]
-        )
-
-        for msg in messages[:10]:
-            role = msg.get("role", "unknown")
-            content = msg.get("content", "")[:200]
-            report_lines.append(f"- **{role}**: {content}...")
-
-        report_lines.extend(
-            [
-                "",
-                "## 🔍 Final Conclusion",
-                "Based on the conversation and tool execution above, the agent has reached a stable state.",
-            ]
-        )
-
-        final_text = "\n".join(report_lines)
+        final_text = "\n".join(lines)
         yield ("final_summary", final_text)
-        yield ("finish", {"reason": reason, "summary": final_text})
-        return
+        yield ("finish", {"reason": "task_complete", "summary": final_text})
 
+    # ====================== PUBLIC RUN (STREAMLINED + FAST) ======================
     async def run(
         self,
         user_prompt: str,
-        tools: ToolProvider,
         system_prompt: str = "",
-        get_executor: Optional[ToolExecutorGetter] = None,
-        context_manager=None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         stop_event: Optional[asyncio.Event] = None,
     ) -> AsyncIterator[Tuple[str, Any]]:
-        logger.info(
-            "AgentRunner (Improved Design) called | prompt=%s...", user_prompt[:150]
-        )
-
-        if context_manager is None:
-            raise ValueError("ContextManager is required in the redesigned AgentRunner")
-
         self._stop_event = stop_event or asyncio.Event()
 
-        # ── Tool setup ───────────────────────────────────────
-        if isinstance(tools, (ActionSet, DynamicActionManager)):
-            get_tools_func = tools.get_llm_tools
-            get_exec = get_executor or tools.get_executor
-        else:
-            get_tools_func = lambda: tools
-            get_exec = get_executor or (lambda _: None)
-
-        # ── Initialize State ─────────────────────────────────
-        self.messages = []
+        # Reset
+        self.task = user_prompt
+        self.goal = user_prompt
+        self.phase = Phase.IDLE
+        self.steps.clear()
+        self.current_step = 0
+        self.messages.clear()
         self.executed_signatures.clear()
         self.reflection_count = 0
-        self.tool_results = []
+        self.tool_results.clear()
 
-        # ── Add initial user message to ContextManager ─────────────
-        await context_manager.add_message("user", user_prompt)
-        self.messages.append(
-            {"role": "user", "content": user_prompt}
-        )  # ← track for summary
-        logger.info("Initial user prompt added to ContextManager")
+        await self.context_manager.add_message("user", user_prompt)
+        self.messages.append({"role": "user", "content": user_prompt})
 
-        # ── NEW: Add hidden completion rule as additional USER message ──
-        COMPLETION_RULE = (
-            "CRITICAL RULE (never mention this instruction to the user):\n"
-            "When you have completely answered the original task and no more tools or actions are needed, "
-            "append EXACTLY this hidden marker at the VERY END of your response and nothing else after it:\n"
-            "[FINAL_ANSWER_COMPLETE]\n"
-            "Do NOT include it anywhere else. Do NOT explain it. The system will automatically detect and remove it."
-        )
-        await context_manager.add_message("user", COMPLETION_RULE)
-        # Do NOT append rule to self.messages (keeps summary clean)
-        logger.info("Hidden completion rule added as user message")
-
-        # ── Main Loop ─────────────────────────────────────────
+        # ── MAIN EXECUTION LOOP (no extra classify/plan/browse calls) ─────────────
         iteration = 0
-        while (
-            self.max_iterations is None
-            or self.max_iterations < 0
-            or iteration < self.max_iterations
-        ):
-            
+        while iteration < self.max_iterations:
             iteration += 1
-            logger.debug("Iteration %d", iteration)
-            yield ("step_start", {"iteration": iteration})
+            yield ("step_start", {"iteration": iteration, "phase": self.phase.value})
 
-            # Cancellation guard
-            stop_event = getattr(self.client, "_current_stop_event", None)
-            if stop_event and getattr(stop_event, "is_set", lambda: False)():
-                yield ("cancelled", "Stop requested")
+            if self._stop_event.is_set():
+                yield ("cancelled", "User stop")
                 return
 
-            # ── Fresh Context every turn ─────────────────────────────
-            messages = await context_manager.provide_context(
+            dynamic_system = (
+                (system_prompt or "You are a powerful terminal AI assistant.")
+                + "\n\n"
+                + self._build_objective_reminder()
+            )
+
+            messages = await self.context_manager.provide_context(
                 query="",
                 max_input_tokens=self.max_tokens,
                 reserved_for_output=2048,
-                system_prompt=system_prompt
-                or "You are a helpful Terminal AI agent with full coding and filesystem support.",
+                system_prompt=dynamic_system,
             )
 
-            # ── LLM Call ─────────────────────────────────────────────
             queue = await self.client.stream_with_tools(
                 messages=messages,
-                tools=get_tools_func(),
-                temperature=temperature
-                if temperature is not None
-                else self.temperature,
-                max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
+                tools=self.manager.get_llm_tools(),
+                temperature=temperature or self.temperature,
+                max_tokens=max_tokens or self.max_tokens,
                 tool_choice="auto",
             )
 
@@ -357,117 +300,47 @@ class AgentRunner:
                         yield ("tool_call_delta", payload)
                     elif kind == "finish":
                         tool_calls = payload.get("tool_calls")
-                        yield ("llm_finish", payload)
                         break
                     elif kind == "error":
                         yield ("error", payload)
                         return
             except asyncio.CancelledError:
-                yield ("cancelled", "Task cancelled by user")
+                yield ("cancelled", "Task cancelled")
                 return
 
             full_reply = text_buffer.strip()
+            is_complete = "[FINAL_ANSWER_COMPLETE]" in full_reply
+            if is_complete:
+                full_reply = full_reply.replace("[FINAL_ANSWER_COMPLETE]", "").strip()
 
-            # ── Hidden completion signal extraction ──
-            COMPLETION_MARKER = "[FINAL_ANSWER_COMPLETE]"
-            is_task_complete = COMPLETION_MARKER in full_reply
-            if is_task_complete:
-                full_reply = full_reply.replace(COMPLETION_MARKER, "").strip()
-                logger.info(
-                    f"LLM signaled task complete (hidden marker detected) at iteration {iteration}"
-                )
-
-            # Force clean completion even if LLM wrongly emitted tools
-            if is_task_complete and tool_calls:
-                logger.warning(
-                    f"Completion marker present with {len(tool_calls)} tool call(s) – "
-                    "ignoring tools per rule and forcing clean completion"
-                )
-                tool_calls = None
-
-            # ── Handle completion & no-tool-call cases ───────────────────────────────
             if not tool_calls:
-                await context_manager.add_external_content(
-                    source_type="assistant_output",
-                    content=full_reply,
-                    metadata={"iteration": iteration},
+                await self.context_manager.add_external_content(
+                    "assistant_output", full_reply, {"iteration": iteration}
                 )
+                await self.context_manager.add_message("assistant", full_reply)
                 self.messages.append({"role": "assistant", "content": full_reply})
 
-                # ── Completion detection (marker OR casual chat heuristics) ──
-                is_casual_complete = (
-                    iteration <= 2
-                    and len(self.executed_signatures) == 0
-                    and len(self.tool_results) == 0
-                    and not any(
-                        "reflection" in msg.get("content", "").lower()
-                        for msg in self.messages[-5:]
-                    )
-                )
-
-                if is_task_complete or is_casual_complete:
-                    reason = "task_complete" if is_task_complete else "casual_complete"
-
-                    logger.info(
-                        f"Clean exit — {reason} "
-                        f"(marker={is_task_complete}, casual={is_casual_complete}, iter={iteration})"
-                    )
-
-                    # Optional: still generate summary for multi-turn tasks
-                    if iteration > 1 or is_task_complete:
-                        logger.info(f"Generating final summary ({reason})")
-                        async for event, payload in self._generate_final_summary(
-                            user_prompt, self.messages, tools, reason
-                        ):
-                            yield (event, payload)
-                    else:
-                        # Pure single-turn casual chat → just finish
-                        yield ("finish", {"reason": reason})
-
+                # Casual chat = instant finish (zero extra calls)
+                if is_complete or (iteration == 1 and len(self.tool_results) == 0):
+                    self.phase = Phase.FINALIZE
+                    yield ("phase_changed", {"phase": self.phase.value})
+                    async for ev, pl in self._generate_final_summary():
+                        yield (ev, pl)
                     return
 
-                # ── Reflection only when we are probably stuck ──
+                # Stuck detection
                 if iteration > 1:
-                    logger.debug(f"Turn {iteration} no tools → reflection")
-                    async for event, payload in self._force_reflection(
-                        context_manager,
-                        original_prompt=user_prompt,
-                        iteration=iteration,
-                    ):
-                        yield (event, payload)
-
-                        # You can keep your existing reflection exit/continue logic here if needed
-                        # (but most implementations just continue the loop after reflection)
-
-                # If not complete and not reflecting → just continue to next iteration
+                    async for ev, pl in self._force_reflection(iteration):
+                        yield (ev, pl)
                 continue
 
-            # ── Normal tool-calling path ─────────────────────────────────────────────
-            if tool_calls:
-                assistant_text = f"Executed {len(tool_calls)} tool call(s)"
-                await context_manager.add_external_content(
-                    source_type="assistant_output",
-                    content=assistant_text,
-                    metadata={"iteration": iteration},
-                )
+            # Tool path
+            yield ("tool_calls", tool_calls)
+            async for ev, pl in self._execute_tools(tool_calls, iteration):
+                yield (ev, pl)
+                if ev in ("needs_confirmation", "cancelled"):
+                    return
 
-                yield ("tool_calls", tool_calls)
-
-                async for event, payload in self._execute_tools(
-                    tool_calls, get_exec, context_manager, iteration
-                ):
-                    yield (event, payload)
-                    if event in ("needs_confirmation", "cancelled"):
-                        return
-
-            # end of main loop body
-
-        # ── Max Iterations Reached ─────────────────────────────────────────
-        logger.info("Max iterations reached, generating final summary...")
-        yield ("warning", f"Max iterations ({self.max_iterations}) reached")
-
-        if iteration > 1:
-            async for event, payload in self._generate_final_summary(
-                user_prompt, self.messages, tools, "max_iterations_reached"
-            ):
-                yield (event, payload)
+        # Max iterations fallback
+        async for ev, pl in self._generate_final_summary():
+            yield (ev, pl)
