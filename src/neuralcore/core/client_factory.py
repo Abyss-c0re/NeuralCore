@@ -1,7 +1,9 @@
+import inspect
 from typing import Dict, Any
 
 from neuralcore.core.client import LLMClient
-from neuralcore.utils.llm_tools import InternalTools
+from neuralcore.actions.actions import Action, ActionSet
+
 from neuralcore.utils.config import ConfigLoader, get_loader
 
 
@@ -79,7 +81,6 @@ class ClientFactory:
             extra_body=extra_body or None,
             temperature=cfg.get("temperature", 0.7),
             max_tokens=cfg.get("max_tokens", 4096),
-            # ✅ NEW: pass system prompt
             system_prompt=cfg.get("system_prompt") or self.loader.get_system_prompt(),
         )
 
@@ -106,11 +107,10 @@ class ClientFactory:
 
     # ----------------------
     # Tool registration
-    # ----------------------
-    def register_tool_clients(self, registry, main_client: LLMClient):
+    def register_tool_clients(self, registry):
         """
-        Register clients marked with `register_as_tool: true` as InternalTools.
-        Only applies to chat clients.
+        Register clients marked with `register_as_tool: true` as tools.
+        Supports method-level overrides from config.
         """
         clients_cfg = self.loader.config.get("clients", {})
 
@@ -119,22 +119,74 @@ class ClientFactory:
                 continue
 
             client = self.clients.get(name)
-
-            if client is None:
+            if not client:
                 continue
 
-            # Only chat clients should be exposed as tools
             if cfg.get("type", "chat") != "chat":
                 continue
 
-            tools = InternalTools(
-                client=client,
-                description=cfg.get("description", name),
-                methods=[client.ask, client.stream_chat, client.chat],
-            )
+            toolset_name = cfg.get("tool_name", name)
+            action_set = ActionSet(name=toolset_name)
+            action_set.description = cfg.get("description", f"Client {name}")
 
-            tool_name = cfg.get("tool_name", name)
-            registry.register_set(tool_name, tools.as_action_set(tool_name))
+            methods_cfg = cfg.get("methods")
+
+            # 🔹 If no methods specified → fallback defaults
+            if not methods_cfg:
+                methods_cfg = [
+                    {"target": "ask"},
+                    {"target": "chat"},
+                ]
+
+            for mcfg in methods_cfg:
+                method_name = mcfg["target"]
+                method = getattr(client, method_name, None)
+
+                if not method:
+                    continue
+
+                sig = inspect.signature(method)
+
+                parameters = {}
+                required = []
+
+                for pname, param in sig.parameters.items():
+                    if pname == "self":
+                        continue
+
+                    parameters[pname] = {
+                        "type": "string",
+                        "description": f"{pname} parameter",
+                    }
+
+                    if param.default is inspect.Parameter.empty:
+                        required.append(pname)
+                    else:
+                        parameters[pname]["default"] = param.default
+
+                # 🔥 SAFE EXECUTOR (fixes your kwargs bug)
+                async def executor_wrapper(_method=method, _sig=sig, **kwargs):
+                    filtered = {k: v for k, v in kwargs.items() if k in _sig.parameters}
+                    result = _method(**filtered)
+                    if inspect.iscoroutine(result):
+                        result = await result
+                    return result
+
+                action = Action(
+                    name=mcfg.get("name", method_name),
+                    description=mcfg.get(
+                        "description", f"{method_name} via client '{name}'"
+                    ),
+                    parameters=parameters,
+                    required=required,
+                    executor=executor_wrapper,
+                    tags=["client", name, method_name],
+                    action_type="tool",
+                )
+
+                action_set.add(action)
+
+            registry.register_set(toolset_name, action_set)
 
 
 # --------------------------
