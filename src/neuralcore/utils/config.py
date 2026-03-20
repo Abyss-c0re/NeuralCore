@@ -43,7 +43,9 @@ class ConfigLoader:
         with open(path, "r") as f:
             data = yaml.safe_load(f) or {}
             if not isinstance(data, dict):
-                raise ValueError(f"YAML config must be a dict at top level, got {type(data)}")
+                raise ValueError(
+                    f"YAML config must be a dict at top level, got {type(data)}"
+                )
             return data
 
     def get_client_config(self, client_name: str) -> dict:
@@ -115,10 +117,13 @@ class ConfigLoader:
             "log_to_ui": app_cfg.get("log_to_ui", False),
             "log_file": log_file,
         }
+
+
 # --------------------------
 # Singleton instance
 # --------------------------
 loader: ConfigLoader | None = None
+
 
 def get_loader(cli_path: str | None = None) -> ConfigLoader:
     global loader
