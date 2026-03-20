@@ -345,6 +345,19 @@ class AgentRunner:
 
         return "\n\n".join(p for p in parts if p.strip())
 
+    def _is_exploratory_tool(self, name: str) -> bool:
+        n = (name or "").lower()
+        return n in {
+            "search",
+            "browse",
+            "browse_tools",
+            "tool_browser",
+            "browser",
+            "ls",
+            "pwd",
+            "find",
+        }
+
     def _should_reflect(
         self,
         *,
@@ -356,6 +369,8 @@ class AgentRunner:
         reflection_count: int,
         casual_mode: bool,
         browser_followup_turns: int,
+        tool_exploration_lock: int,
+        distinct_tools_tried: int,
     ) -> bool:
         if casual_mode:
             return False
@@ -367,13 +382,23 @@ class AgentRunner:
             return False
         if browser_followup_turns > 0:
             return False
+
+        if tool_exploration_lock > 0:
+            return False
+
+        if distinct_tools_tried < 2 and self.tool_results:
+            return False
+
+        if no_progress_turns < 3:
+            return False
+
         if self.tool_results and no_progress_turns == 0:
             return False
 
         if not tool_calls and (no_progress_turns >= 1 or same_fingerprint_count >= 1):
             return True
 
-        if same_fingerprint_count >= 1:
+        if same_fingerprint_count >= 2:
             return True
 
         return False
@@ -465,14 +490,20 @@ class AgentRunner:
     ) -> AsyncIterator[Tuple[str, Any]]:
         """
         Execute tool calls with executor filtering and duplicate protection.
-        Handles tool-browser discovery as a first-class state transition.
+
+        FIXES:
+        - Exploration lock applies to ALL exploratory tools (ls, find, etc.)
+        - Browser tools extend exploration window
+        - Distinct tool tracking for better reflection decisions
         """
+
         tool_results = []
 
         for call in tool_calls or []:
             if self._should_stop():
                 yield ("cancelled", "Stop during tool execution")
                 return
+
             if not isinstance(call, dict):
                 continue
 
@@ -485,11 +516,17 @@ class AgentRunner:
             except Exception:
                 args = {}
 
+            # ------------------------------------------------------------------
+            # Duplicate protection
+            # ------------------------------------------------------------------
             sig = self._tool_signature(name, args)
             if sig in self.executed_signatures:
                 logger.debug(f"Skipping duplicate tool call: {name}")
                 continue
             self.executed_signatures.add(sig)
+
+            # Track distinct tools (important for reflection policy)
+            state.setdefault("distinct_tools_tried", set()).add(name)
 
             executor = get_exec(name)
 
@@ -503,6 +540,9 @@ class AgentRunner:
 
             yield ("tool_start", {"name": name, "args": args})
 
+            # ------------------------------------------------------------------
+            # Execute tool
+            # ------------------------------------------------------------------
             try:
                 maybe_result = executor(**args)
                 result = (
@@ -510,19 +550,26 @@ class AgentRunner:
                     if asyncio.iscoroutine(maybe_result)
                     else maybe_result
                 )
+
                 if self._should_stop():
                     yield ("cancelled", f"Stopped after tool '{name}'")
                     return
+
                 yield ("tool_result", {"name": name, "result": result})
+
             except ConfirmationRequired as exc:
                 logger.info(f"User confirmation needed for tool '{name}'")
                 yield ("needs_confirmation", {**exc.__dict__, "tool_calls": tool_calls})
                 return
+
             except Exception as exc:
                 result = f"Tool '{name}' failed: {exc}"
                 logger.warning(result)
                 yield ("tool_result", {"name": name, "result": result, "error": True})
 
+            # ------------------------------------------------------------------
+            # Store result
+            # ------------------------------------------------------------------
             tool_entry = {
                 "role": "tool",
                 "tool_call_id": call.get("id"),
@@ -551,10 +598,16 @@ class AgentRunner:
             except Exception:
                 pass
 
-            # Tool browser is a discovery step, not a dead end.
+            # ------------------------------------------------------------------
+            # 🧠 EXPLORATION CONTROL (THIS IS THE FIX)
+            # ------------------------------------------------------------------
+
+            # 1. Browser tools → strong exploration phase
             if self._is_tool_browser(name):
                 discovered = self._extract_browser_tools(result)
-                state["browser_followup_turns"] = 1
+
+                state["browser_followup_turns"] = 2
+                state["tool_exploration_lock"] = 2
                 state["phase"] = self.Phase.TOOL_DISCOVERY
                 state["no_progress_turns"] = 0
 
@@ -578,19 +631,39 @@ class AgentRunner:
                 except Exception:
                     pass
 
+            # 2. ANY exploratory tool (ls, find, etc.) → block reflection
+            elif self._is_exploratory_tool(name):
+                state["tool_exploration_lock"] = max(
+                    state.get("tool_exploration_lock", 0),
+                    1,
+                )
+                state["no_progress_turns"] = 0
+
+            # 3. Real execution tools → stay in EXECUTE phase
+            else:
+                state["phase"] = self.Phase.EXECUTE
+
+            # ------------------------------------------------------------------
+            # Stop handling
+            # ------------------------------------------------------------------
             stop_event = getattr(self.client, "_current_stop_event", None)
             if stop_event and getattr(stop_event, "is_set", lambda: False)():
                 logger.info(f"Stop requested during tool '{name}' execution")
                 yield ("cancelled", f"Stop after tool '{name}'")
                 return
 
+        # ----------------------------------------------------------------------
+        # No tool results case
+        # ----------------------------------------------------------------------
         if not tool_results:
             logger.debug("No executable tool calls produced results this iteration")
-            dup_msg = (
-                "All tool calls were duplicates or skipped. Try a different approach."
-            )
+
             try:
-                await context_manager.add_message("system", dup_msg)
+                await context_manager.add_message(
+                    "system",
+                    "All tool calls were duplicates or skipped. "
+                    "Try a DIFFERENT tool or strategy (do not repeat).",
+                )
             except Exception:
                 pass
 
@@ -695,6 +768,7 @@ class AgentRunner:
         self.reflection_count = 0
         self.tool_results = []
 
+        # add to state
         state = {
             "phase": self.Phase.TOOL_DISCOVERY
             if has_tool_provider
@@ -704,6 +778,9 @@ class AgentRunner:
             "no_progress_turns": 0,
             "last_tool_result_count": 0,
             "browser_followup_turns": 0,
+            # NEW
+            "tool_exploration_lock": 0,
+            "distinct_tools_tried": set(),
         }
 
         await context_manager.add_message("user", user_prompt)
@@ -889,6 +966,8 @@ class AgentRunner:
                     reflection_count=self.reflection_count,
                     casual_mode=casual_mode,
                     browser_followup_turns=state["browser_followup_turns"],
+                    tool_exploration_lock=state.get("tool_exploration_lock", 0),
+                    distinct_tools_tried=len(state.get("distinct_tools_tried", [])),
                 ):
                     state["phase"] = self.Phase.REFLECT
                     logger.debug("Stagnation detected → reflection")
