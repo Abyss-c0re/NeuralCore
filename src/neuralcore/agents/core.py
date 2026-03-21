@@ -7,7 +7,7 @@ import yaml
 
 from neuralcore.actions.manager import registry
 from neuralcore.cognition.memory import ContextManager
-from neuralcore.agents.flow import WorkflowEngine
+from neuralcore.agents.engine import WorkflowEngine
 from neuralcore.utils.logger import Logger
 from neuralcore.utils.tool_loader import load_tool_sets
 from neuralcore.core.client_factory import get_clients
@@ -100,7 +100,7 @@ class Agent:
         max_tokens: int = 1212,
         stop_event: Optional[asyncio.Event] = None,
     ) -> AsyncIterator[Tuple[str, Any]]:
-        async for event, payload in self.workflow.execute(
+        async for event, payload in self.workflow.run(
             user_prompt, system_prompt, temperature, max_tokens, stop_event
         ):
             yield event, payload
