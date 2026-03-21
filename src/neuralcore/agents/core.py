@@ -1,16 +1,15 @@
-import asyncio
-
-from pathlib import Path
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
-
 import yaml
+import asyncio
+from pathlib import Path
 
-from neuralcore.actions.manager import registry
-from neuralcore.cognition.memory import ContextManager
-from neuralcore.agents.engine import WorkflowEngine
 from neuralcore.utils.logger import Logger
-from neuralcore.utils.tool_loader import load_tool_sets
+from neuralcore.actions.manager import registry
+from neuralcore.agents.engine import WorkflowEngine
+from neuralcore.cognition.memory import ContextManager
 from neuralcore.core.client_factory import get_clients
+from neuralcore.utils.tool_loader import load_tool_sets
+
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 logger = Logger.get_logger()
 
@@ -41,15 +40,12 @@ class Agent:
             "system_prompt",
             self.client.system_prompt if hasattr(self.client, "system_prompt") else "",
         )
-
         self.registry = registry
         self.manager = registry.manager
         self.context_manager = ContextManager()
-
-        self._register_internal_tools()
+        self.workflow = WorkflowEngine(self)
         self._load_agent_tools()
 
-        self.workflow = WorkflowEngine(self)
         self._reset_state()
 
     def _load_agent_config(self, agent_id: str, config_file: Optional[Path]) -> dict:
@@ -63,25 +59,11 @@ class Agent:
             raise ValueError(f"Agent '{agent_id}' not found")
         return cfg
 
-    def _register_internal_tools(self):
-        from neuralcore.utils.llm_tools import InternalTools
-
-        methods = [
-            getattr(self.client, m)
-            for m in dir(self.client)
-            if callable(getattr(self.client, m)) and not m.startswith("_")
-        ]
-        methods.append(self.run)
-        internal_tools = InternalTools(
-            client=self.client, description="Agent internals", methods=methods
-        )
-
     def _load_agent_tools(self):
         tool_sets = self.config.get("tool_sets", [])
         load_tool_sets(self.loader, app_root=self.app_root, sets_to_load=tool_sets)
         for action_name in self.registry.all_actions:
             self.registry.manager.load_tools([action_name])
-        self.registry.debug_print_all_tools()
 
     def _reset_state(self):
         self.task = ""

@@ -3,6 +3,12 @@ import importlib
 from pathlib import Path
 from neuralcore.actions.manager import registry
 
+from neuralcore.utils.logger import Logger
+
+
+logger = Logger.get_logger()
+
+
 def load_tool_sets(loader, app_root: Path, sets_to_load: list[str] | None = None):
     """
     Load all tool sets for the given list of set names.
@@ -14,23 +20,23 @@ def load_tool_sets(loader, app_root: Path, sets_to_load: list[str] | None = None
     """
     sets_cfg = loader.config.get("tools", {})
 
-    print(f"[Debug] App root: {app_root}")
-    print(f"[Debug] Sets to load: {sets_to_load or 'ALL'}")
-    print(f"[Debug] Found sets in config: {list(sets_cfg.keys())}")
+    logger.debug(f" App root: {app_root}")
+    logger.debug(f" Sets to load: {sets_to_load or 'ALL'}")
+    logger.debug(f" Found sets in config: {list(sets_cfg.keys())}")
 
     for set_name, cfg in sets_cfg.items():
         if sets_to_load and set_name not in sets_to_load:
-            print(f"[Debug] Skipping set '{set_name}' (not requested)")
+            logger.debug(f" Skipping set '{set_name}' (not requested)")
             continue
 
-        print(f"[Debug] Loading tool set '{set_name}'")
+        logger.debug(f" Loading tool set '{set_name}'")
 
         folder = cfg.get("folder")
 
         # Determine folder path
         if folder:
             folder_path = Path(folder).expanduser().resolve()
-            print(f"[Debug] Using external folder for set '{set_name}': {folder_path}")
+            logger.debug(f" Using external folder for set '{set_name}': {folder_path}")
             if not folder_path.exists() or not folder_path.is_dir():
                 print(f"[Warning] Tool folder '{folder_path}' does not exist")
                 continue
@@ -42,9 +48,13 @@ def load_tool_sets(loader, app_root: Path, sets_to_load: list[str] | None = None
                     print(f"[Warning] No tools folder for set '{set_name}'")
                     continue
                 else:
-                    print(f"[Debug] Fallback folder for set '{set_name}': {folder_path}")
+                    logger.debug(
+                        f" Fallback folder for set '{set_name}': {folder_path}"
+                    )
             else:
-                print(f"[Debug] Using internal folder for set '{set_name}': {folder_path}")
+                logger.debug(
+                    f" Using internal folder for set '{set_name}': {folder_path}"
+                )
 
         # Temporarily add folder to sys.path and import all .py files
         sys.path.insert(0, str(folder_path))
@@ -54,18 +64,20 @@ def load_tool_sets(loader, app_root: Path, sets_to_load: list[str] | None = None
                 continue
             try:
                 importlib.import_module(py_file.stem)
-                print(f"[Info] Imported '{py_file.name}' for set '{set_name}'")
+                logger.info(f" Imported '{py_file.name}' for set '{set_name}'")
                 imported_any = True
             except Exception as e:
-                print(f"[Error] Failed to import {py_file.name}: {e}")
+                logger.error(f" Failed to import {py_file.name}: {e}")
         sys.path.pop(0)
 
         # Check registry
         if imported_any:
             if registry.sets.get(set_name):
-                print(f"[Info] Tool set '{set_name}' registered successfully")
+                logger.info(f" Tool set '{set_name}' registered successfully")
             else:
                 # The module imported but the set name is not exactly matching
-                print(f"[Warning] Tool set '{set_name}' imported but not found in registry")
+                print(
+                    f"[Warning] Tool set '{set_name}' imported but not found in registry"
+                )
         else:
             print(f"[Warning] No .py files imported for set '{set_name}'")

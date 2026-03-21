@@ -6,6 +6,11 @@ from neuralcore.actions.actions import Action, ActionSet
 from inspect import signature, _empty
 from typing import get_origin
 
+from neuralcore.utils.logger import Logger
+
+
+logger = Logger.get_logger()
+
 PYTHON_TO_JSON_TYPE = {
     str: "string",
     int: "integer",
@@ -45,10 +50,10 @@ class DynamicActionManager:
         self.registry = registry
         self.current_set = ActionSet("DynamicCore")
         self._loaded = set()
-        print("[Debug] DynamicActionManager initialized")
+        logger.debug(" DynamicActionManager initialized")
 
     def add(self, action: Action):
-        print(f"[Debug] Adding action '{action.name}' to DynamicCore")
+        logger.debug(f" Adding action '{action.name}' to DynamicCore")
         self.current_set.add(action)
 
     def get_llm_tools(self) -> List[Dict[str, Any]]:
@@ -59,10 +64,10 @@ class DynamicActionManager:
         return self.current_set.by_name.get(name)
 
     def load_tools(self, tool_names: List[str]):
-        print(f"[Debug] Loading tools dynamically: {tool_names}")
+        logger.debug(f" Loading tools dynamically: {tool_names}")
         for name in tool_names:
             if name in self._loaded:
-                print(f"[Debug] Tool '{name}' already loaded, skipping")
+                logger.debug(f" Tool '{name}' already loaded, skipping")
                 continue
             if name not in self.registry.all_actions:
                 print(f"[Warning] Tool '{name}' not found in registry, skipping")
@@ -70,14 +75,14 @@ class DynamicActionManager:
             action, _ = self.registry.all_actions[name]
             self.add(action)
             self._loaded.add(name)
-            print(f"[Debug] Tool '{name}' loaded into DynamicCore")
+            logger.debug(f" Tool '{name}' loaded into DynamicCore")
 
     def unload_all(self):
         browser = self.current_set.by_name.get("browse_tools")
         self.current_set = ActionSet("DynamicCore")
         if browser:
             self.current_set.add(browser)
-        print("[Debug] Unloaded all dynamic tools, retained ToolBrowser")
+        logger.debug(" Unloaded all dynamic tools, retained ToolBrowser")
 
     @property
     def actions(self):
@@ -109,13 +114,13 @@ class ToolBrowser(Action):
         self.registry = registry
         self.manager = manager
         manager.current_set.add(self)
-        print("[Debug] ToolBrowser added to DynamicCore")
+        logger.debug(" ToolBrowser added to DynamicCore")
 
     async def _search(self, query: str, limit: int = 8):
-        print(f"[Debug] ToolBrowser search: query='{query}', limit={limit}")
+        logger.debug(f" ToolBrowser search: query='{query}', limit={limit}")
         results = self.registry.search(query, limit)
         if not results:
-            print("[Debug] No matching tools found")
+            logger.debug(" No matching tools found")
             return {
                 "status": "no_matches",
                 "message": "No tools found. Try broader terms.",
@@ -123,7 +128,7 @@ class ToolBrowser(Action):
 
         best = results[:3]
         self.manager.load_tools([a.name for a, _ in best])
-        print(f"[Debug] ToolBrowser loaded {len(best)} tools")
+        logger.debug(f" ToolBrowser loaded {len(best)} tools")
 
         return {
             "status": "success",
@@ -155,16 +160,14 @@ class ActionRegistry:
         # Dynamic manager
         self.manager = DynamicActionManager(self)
 
-        print("[Debug] ActionRegistry initialized")
+        logger.debug(" ActionRegistry initialized")
 
         # Load ToolBrowser
         ToolBrowser(self, self.manager)
-        print("[Debug] ToolBrowser registered")
+        logger.debug(" ToolBrowser registered")
 
     def register_set(self, name: str, action_set: ActionSet):
-        print(
-            f"[Debug] Registering set '{name}' with {len(action_set.actions)} actions"
-        )
+        logger.debug(f"Registering set '{name}' with {len(action_set.actions)} actions")
         if name in self.sets:
             raise ValueError(f"Set {name} already exists")
         self.sets[name] = action_set
@@ -189,7 +192,7 @@ class ActionRegistry:
             + getattr(action, "aliases", [])
         ).lower()
         self._index.append({"action": action, "set": set_name, "text": searchable})
-        print(f"[Debug] Added action '{action.name}' to index under set '{set_name}'")
+        logger.debug(f" Added action '{action.name}' to index under set '{set_name}'")
 
     def search(self, query: str, limit: int = 10):
         query = query.lower().strip()
@@ -272,7 +275,7 @@ class ActionRegistry:
         if name not in self.all_actions:
             raise ValueError(f"Action '{name}' not found")
         action, _ = self.all_actions[name]
-        print(f"[Debug] Executing action '{name}' with args: {kwargs}")
+        logger.debug(f" Executing action '{name}' with args: {kwargs}")
         result = action.executor(**kwargs)
         action.usage_count = getattr(action, "usage_count", 0) + 1
         return result
@@ -282,7 +285,7 @@ class ActionRegistry:
 # Create global singleton
 # ─────────────────────────────────────────────────────────────
 registry = ActionRegistry()
-print(f"[Debug] Global registry created with sets: {list(registry.sets.keys())}")
+logger.debug(f" Global registry created with sets: {list(registry.sets.keys())}")
 
 
 def tool(set_name: str, **kwargs):
@@ -332,16 +335,14 @@ def tool(set_name: str, **kwargs):
         else:
             aset = ActionSet(name=set_name, description=f"{set_name} tools")
             registry.register_set(set_name, aset)
-            print(f"[Debug] Created new ActionSet '{set_name}' for decorator")
+            logger.debug(f" Created new ActionSet '{set_name}' for decorator")
 
         # Add action to the set
         aset.add(action)
 
         # ---- Immediately add to search index ----
         registry._add_to_index(action, set_name)
-        print(
-            f"[Debug] Registered action '{name}' under set '{set_name}' with required args: {required}"
-        )
+        logger.debug(f"Registered action '{name}' under set '{set_name}' with required args: {required}")
 
         return fn
 
