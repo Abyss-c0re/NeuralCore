@@ -153,6 +153,16 @@ class ContextManager:
         elif action_type == "prune":
             self.context_stats["prunes"] += 1
 
+    def get_last_user_message(self) -> str | None:
+        """
+        Return the content of the last message with role 'user' from current topic history.
+        Returns None if no user message is found.
+        """
+        for msg in reversed(self.current_topic.history):
+            if msg.get("role") == "user":
+                return msg.get("content", "").strip()
+        return None
+
     def get_context_summary(self) -> str:
 
         files = sorted(list(self.files_checked))[-6:]
