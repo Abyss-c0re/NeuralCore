@@ -77,7 +77,7 @@ class Agent:
         self.name = self.config.get("name", f"Agent-{agent_id}")
         self.description = self.config.get("description", "")
         self.max_iterations = self.config.get("max_iterations", 25)
-        self.max_reflections = self.config.get("max_reflections", 4)
+        self.max_reflections = self.config.get("max_reflections", 2)
         self.temperature = self.config.get("temperature", 0.3)
         self.max_tokens = self.config.get("max_tokens", 12048)
 
@@ -126,7 +126,7 @@ class Agent:
             description="Agent internal methods + run workflow",
             methods=methods,
         )
-        self.registry.register_set("InternalTools", internal_tools.as_action_set())
+        # self.registry.register_set("InternalTools", internal_tools.as_action_set())
         add_decisions(self)
 
     # ---------------- LOAD TOOLS ----------------
@@ -211,54 +211,79 @@ class Agent:
     async def _wf_check_complete(
         self, iteration: int, state: AgentState
     ) -> AsyncIterator[Tuple[str, Any]]:
-        if state.is_complete or (iteration == 1 and len(self.tool_results) == 0):
+        """
+        If no tools and first iteration, treat as casual mode and provide full reply immediately.
+        """
+        if iteration == 1 and not state.tool_calls:
+            # Full casual reply mode
+            self.phase = Phase.FINALIZE
+            yield ("phase_changed", {"phase": self.phase.value})
+            yield (
+                "llm_response",
+                {"full_reply": state.full_reply, "tool_calls": [], "is_complete": True},
+            )
+            yield ("finish", {"reason": "casual_complete"})
+            return
+
+        if state.is_complete:
             self.phase = Phase.FINALIZE
             yield ("phase_changed", {"phase": self.phase.value})
             async for ev, pl in self._generate_final_summary():
                 yield (ev, pl)
             yield ("finish", {"reason": "complete"})
 
-    async def _wf_reflect_if_stuck(
-        self, iteration: int, state: AgentState
-    ) -> AsyncIterator[Tuple[str, Any]]:
-        if iteration > 1 and not state.tool_calls:
+    async def _wf_reflect_if_stuck(self, iteration, state):
+        if iteration > 3 and not state.tool_calls:
             async for ev, pl in self._force_reflection(iteration):
                 yield (ev, pl)
 
-    async def _wf_decide_after_reflection(self, iteration: int, state: AgentState):
-        """
-        Calls the decision sequence and routes workflow based on its output.
-        """
-        decision_action = self.registry.manager.get_executor("decision_maker")
-        if not decision_action:
-            yield ("warning", "Decision tool not found")
-            return
+                if ev == "reflection_decision":
+                    next_step = pl.get("next_step")
 
-        result = await decision_action(input=state.full_reply)
-        # Check if waiting for human input
-        if isinstance(result, dict) and result.get("status") == "waiting_for_human":
-            yield (
-                "needs_confirmation",
-                {
-                    "message": result.get("question"),
-                    "step_index": result.get("step_index"),
-                },
-            )
-            return
+                    if next_step == "tool":
+                        tool_name = pl.get("tool_name")
 
-        # Otherwise, process decision
-        next_step = result.get("next_step")
-        tool_to_run = result.get("tool_to_run")
-        stop = result.get("stop", False)
+                        if not tool_name:
+                            yield ("warning", "Reflection chose tool but none provided")
+                            return
 
-        if stop:
-            yield ("finish", {"reason": result.get("reason", "decision_stop")})
-        elif tool_to_run:
-            state.tool_calls = state.tool_calls or []
-            state.tool_calls.append(tool_to_run)
-            yield ("info", {"message": f"Tool enqueued by decision: {tool_to_run}"})
-        elif next_step:
-            yield ("info", {"message": f"Next workflow step decided: {next_step}"})
+                        args = pl.get("arguments", {})
+
+                        state.tool_calls = [
+                            {
+                                "function": {
+                                    "name": tool_name,
+                                    "arguments": json.dumps(args),
+                                }
+                            }
+                        ]
+
+                        yield (
+                            "info",
+                            {"message": f"[REFLECTION] Enqueued tool: {tool_name}"},
+                        )
+                        return
+
+                    elif next_step == "finish":
+                        yield (
+                            "finish",
+                            {
+                                "reason": "reflection_finish",
+                                "details": pl.get("reason"),
+                            },
+                        )
+                        return
+
+                    elif next_step == "llm":
+                        await self.context_manager.add_message(
+                            "system",
+                            f"[REFLECTION GUIDANCE]\n{json.dumps(pl, indent=2)}",
+                        )
+                        return
+
+                    else:
+                        yield ("warning", f"Unknown reflection step: {next_step}")
+                        return
 
     async def _wf_safety_fallback(
         self, iteration: int, state: AgentState
@@ -412,6 +437,13 @@ class Agent:
 
             yield ("tool_start", {"name": name, "args": args})
 
+            # Always define task_id
+            task_id = f"{name}:{hash(json.dumps(args, sort_keys=True))}"
+
+            # Track subtask in context manager if available
+            if hasattr(self.context_manager, "add_subtask"):
+                self.context_manager.add_subtask(task_id)
+
             try:
                 if name in ("run", "self_run"):
                     result = "Self-run tool skipped"
@@ -423,8 +455,16 @@ class Agent:
                     maybe = executor(**args)
                     result = await maybe if asyncio.iscoroutine(maybe) else maybe
 
+                # Record outcome
                 await self.context_manager.record_tool_outcome(name, str(result), args)
                 await self.context_manager.add_message("tool", str(result))
+
+                # Mark subtask complete and add findings
+                if hasattr(self.context_manager, "complete_subtask"):
+                    self.context_manager.complete_subtask(task_id)
+                if hasattr(self.context_manager, "add_finding"):
+                    self.context_manager.add_finding(f"{name} → {str(result)[:200]}")
+
                 yield ("tool_result", {"name": name, "result": result})
 
             except ConfirmationRequired as exc:
@@ -434,10 +474,16 @@ class Agent:
             except Exception as exc:
                 result = f"Tool '{name}' failed: {exc}"
                 await self.context_manager.record_tool_outcome(name, result, args)
+
+                # Track unknown in context
+                if hasattr(self.context_manager, "add_unknown"):
+                    self.context_manager.add_unknown(f"{name} failed: {str(exc)[:200]}")
+
                 yield ("tool_result", {"name": name, "result": result, "error": True})
 
             self.tool_results.append({"name": name, "result": result, "args": args})
 
+            # Handle manual stop
             stop_event = getattr(self.client, "_current_stop_event", None)
             if stop_event and getattr(stop_event, "is_set", lambda: False)():
                 yield ("cancelled", f"Stop after {name}")
@@ -453,27 +499,61 @@ class Agent:
             reserved_for_output=1024,
             system_prompt=self._build_objective_reminder(),
         )
+
         context_text = "\n".join(
-            f"{m.get('role')}: {m.get('content', '')[:400]}"
+            f"{m.get('role')}: {m.get('content', '')[:300]}"
             for m in ctx
             if m.get("content")
-        )[:7000]
+        )[:6000]
+
+        inv_state = getattr(self.context_manager, "investigation_state", {})
 
         raw_response = await self.client.ask(
-            f"Agent ran {iteration} iterations.\n"
-            f"Task: {self.task}\n"
-            f"Goal: {self.goal}\n\n"
-            f"Recent context:\n{context_text}\n\n"
-            "No tools last turn. Suggest EXACT next action."
-        )
-        summary = str(raw_response).strip()
+            f"""
+    Agent is stuck after {iteration} iterations.
 
-        new_query = f"SELF-REFLECTION (iter {iteration}):\n{summary}\nContinue."
-        await self.context_manager.add_message("user", new_query)
+    TASK:
+    {self.task}
+
+    INVESTIGATION STATE:
+    {json.dumps(inv_state, indent=2)}
+
+    RECENT CONTEXT:
+    {context_text}
+
+    You MUST return valid JSON ONLY:
+
+    {{
+    "reason": "why stuck",
+    "next_step": "tool" | "llm" | "finish",
+    "tool_name": "optional",
+    "arguments": {{}},
+    "new_subtask": "optional"
+    }}
+    """
+        )
+
+        try:
+            decision = json.loads(str(raw_response).strip())
+        except Exception:
+            decision = {"reason": "failed_to_parse", "next_step": "llm"}
+
+        yield ("reflection_decision", decision)
+
+        if decision.get("new_subtask"):
+            self.context_manager.add_subtask(decision["new_subtask"])
+
+        if decision.get("reason"):
+            self.context_manager.add_finding(f"Reflection: {decision['reason']}")
+
+        await self.context_manager.add_message(
+            "system", f"[REFLECTION]\n{json.dumps(decision, indent=2)}"
+        )
+
         await self.context_manager.add_external_content(
             source_type="reflection",
-            content=summary,
-            metadata={"iteration": iteration, "type": "stuck_detection"},
+            content=json.dumps(decision, indent=2),
+            metadata={"iteration": iteration},
         )
 
         self.reflection_count += 1
@@ -482,7 +562,7 @@ class Agent:
             yield ("finish", {"reason": "reflection_stuck"})
             return
 
-        yield ("reflection_triggered", summary)
+        yield ("reflection_triggered", decision)
 
     async def _generate_final_summary(self) -> AsyncIterator[Tuple[str, Any]]:
         self.phase = Phase.FINALIZE

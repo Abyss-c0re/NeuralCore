@@ -1,6 +1,5 @@
 import re
 import numpy as np
-from typing import List
 from rapidfuzz import fuzz
 
 

@@ -121,6 +121,15 @@ class ContextManager:
             "topics_switched": 0,
             "prunes": 0,
         }
+        self.investigation_state = {
+            "goal": "",
+            "subtasks": [],
+            "completed": [],
+            "pending": [],
+            "findings": [],
+            "hypotheses": [],
+            "unknowns": [],
+        }
 
     # ─────────────────────────────────────────────────────────────
     # FETCH EMBEDDING
@@ -161,6 +170,7 @@ class ContextManager:
             self.context_stats["prunes"] += 1
 
     def get_context_summary(self) -> str:
+
         files = sorted(list(self.files_checked))[-6:]
         tools = self.tools_executed[-5:]
         lines = [
@@ -172,7 +182,39 @@ class ContextManager:
             f"• Archived: {len(self.current_topic.archived_history)} | Prunes: {self.context_stats['prunes']}",
             f"• Recent action: {self.action_log[-1]['desc'] if self.action_log else '—'}",
         ]
+        inv = self.investigation_state
+
+        investigation_block = [
+            "",
+            "🧠 INVESTIGATION STATE",
+            f"• Goal: {inv['goal'] or '—'}",
+            f"• Pending: {inv['pending'][:5]}",
+            f"• Completed: {inv['completed'][-5:]}",
+            f"• Findings: {inv['findings'][-3:]}",
+            f"• Unknowns: {inv['unknowns'][-3:]}",
+        ]
+        lines.extend(investigation_block)
+
         return "\n".join(lines)[:650]
+
+    def set_goal(self, goal: str):
+        self.investigation_state["goal"] = goal
+
+    def add_subtask(self, task: str):
+        if task not in self.investigation_state["subtasks"]:
+            self.investigation_state["subtasks"].append(task)
+            self.investigation_state["pending"].append(task)
+
+    def complete_subtask(self, task: str):
+        if task in self.investigation_state["pending"]:
+            self.investigation_state["pending"].remove(task)
+            self.investigation_state["completed"].append(task)
+
+    def add_finding(self, finding: str):
+        self.investigation_state["findings"].append(finding[:500])
+
+    def add_unknown(self, unknown: str):
+        self.investigation_state["unknowns"].append(unknown[:300])
 
     # ─────────────────────────────────────────────────────────────
     # ADD EXTERNAL CONTENT
@@ -689,6 +731,22 @@ class ContextManager:
                 "negative": "not found" in result.lower(),
             },
         )
+
+        # Heuristic extraction (fast, no LLM needed)
+        text = result.lower()
+
+        if any(k in text for k in ["error", "exception", "failed"]):
+            self.add_unknown(f"{tool_name} issue: {summary[:200]}")
+
+        if "def " in result or "class " in result:
+            self.add_finding(f"Code structure found via {tool_name}")
+
+        if "not found" in text:
+            self.add_unknown(f"{metadata.get('path', 'unknown')} not found")
+
+        # Track progress
+        if metadata.get("path"):
+            self.complete_subtask(f"inspect {metadata['path']}")
 
         # ── LOGGING & STATS ───────────────────────────────────────────────────
         self.tools_executed.append(tool_name)
