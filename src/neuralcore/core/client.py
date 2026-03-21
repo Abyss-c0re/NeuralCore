@@ -592,14 +592,13 @@ class LLMClient:
         Streaming with tool support — returns queue of tagged events
 
         Queue items are tuples: (kind: str, payload: Any)
-
         Possible kinds:
-        - "content"         → str (text delta)
-        - "tool_delta"      → dict (partial or initial update of one tool call)
-        - "tool_complete"   → dict (finished tool call)
-        - "finish"          → dict { "finish_reason": str, "tool_calls": list|None }
-        - "error"           → str (error message)
-        - None              → end of stream marker
+            - "content"       → str (text delta)
+            - "tool_delta"    → dict (partial update of one tool call)
+            - "tool_complete" → dict (finished tool call)
+            - "finish"        → dict { "finish_reason": str, "tool_calls": list|None }
+            - "error"         → str
+            - None            → end-of-stream marker
         """
 
         # ── Normalize tools ─────────────────────────────
@@ -651,6 +650,7 @@ class LLMClient:
             except json.JSONDecodeError:
                 return False
 
+        # ── Streaming task ─────────────────────────────
         async def _run_stream():
             nonlocal last_chunk
             try:
@@ -699,83 +699,44 @@ class LLMClient:
                             if tc_delta.function.arguments:
                                 tc["function"]["arguments"] += tc_delta.function.arguments
 
-                            name = tc["function"]["name"]
-                            args = tc["function"]["arguments"]
-
-                            # ignore until name exists
-                            if not name or meta["completed"]:
+                            # skip if name missing or already completed
+                            if not tc["function"]["name"] or meta["completed"]:
                                 continue
 
-                            # ── PHASE 1: BUFFER until JSON complete ──
-                            if meta["phase"] == "buffering":
-                                if args.strip() and is_valid_json(args):
-                                    # switch to streaming phase
-                                    meta["phase"] = "streaming"
-                                    meta["last_len"] = len(args)
-
-                                    # emit initial delta
-                                    await queue.put(
-                                        (
-                                            "tool_delta",
-                                            {
-                                                "index": idx,
-                                                "id": tc["id"],
-                                                "name": name,
-                                                "arguments_delta": args,
-                                            },
-                                        )
+                            # ── STREAM incremental updates ──
+                            args = tc["function"]["arguments"]
+                            new_len = len(args)
+                            if new_len > meta["last_len"]:
+                                chunk_delta = args[meta["last_len"]:new_len]
+                                meta["last_len"] = new_len
+                                await queue.put(
+                                    (
+                                        "tool_delta",
+                                        {
+                                            "index": idx,
+                                            "id": tc["id"],
+                                            "name": tc["function"]["name"],
+                                            "arguments_delta": chunk_delta,
+                                        },
                                     )
+                                )
 
-                                    # emit complete immediately
-                                    meta["completed"] = True
-                                    await queue.put(
-                                        (
-                                            "tool_complete",
-                                            {
-                                                "index": idx,
-                                                **tc,
-                                            },
-                                        )
+                            # ── COMPLETE when JSON valid
+                            if is_valid_json(args) and not meta["completed"]:
+                                meta["completed"] = True
+                                await queue.put(
+                                    (
+                                        "tool_complete",
+                                        {
+                                            "index": idx,
+                                            **tc,
+                                        },
                                     )
+                                )
 
-                                    if auto_stop_on_complete_tool:
-                                        stop_event.set()
-                                        break
-                                continue  # do not fall through
-
-                            # ── PHASE 2: STREAM incremental updates ──
-                            if meta["phase"] == "streaming" and not meta["completed"]:
-                                new_len = len(args)
-                                if new_len > meta["last_len"]:
-                                    chunk_delta = args[meta["last_len"]:new_len]
-                                    meta["last_len"] = new_len
-
-                                    await queue.put(
-                                        (
-                                            "tool_delta",
-                                            {
-                                                "index": idx,
-                                                "id": tc["id"],
-                                                "name": name,
-                                                "arguments_delta": chunk_delta,
-                                            },
-                                        )
-                                    )
-
-                                if is_valid_json(args):
-                                    meta["completed"] = True
-                                    await queue.put(
-                                        (
-                                            "tool_complete",
-                                            {
-                                                "index": idx,
-                                                **tc,
-                                            },
-                                        )
-                                    )
-                                    if auto_stop_on_complete_tool:
-                                        stop_event.set()
-                                        break
+                                if auto_stop_on_complete_tool:
+                                    stop_event.set()
+                                    break
 
                 # ── STREAM ENDED ─────────────────────────────
                 final_tool_calls = None

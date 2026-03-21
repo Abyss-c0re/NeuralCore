@@ -262,9 +262,7 @@ class Agent:
             yield (ev, pl)
 
     # ---------------- Original streaming, tools, reflection, summary ----------------
-    async def _llm_stream_with_tools(
-        self, iteration: int
-    ) -> AsyncIterator[Tuple[str, Any]]:
+    async def _llm_stream_with_tools(self, iteration: int) -> AsyncIterator[Tuple[str, Any]]:
         self.phase = Phase.EXECUTE
         messages = await self.context_manager.provide_context(
             query="",
@@ -282,16 +280,24 @@ class Agent:
         )
 
         text_buffer = ""
-        tool_calls = None
+        completed_tool_calls = []
+
         try:
             async for kind, payload in self.client._drain_queue(queue):
                 if kind == "content":
                     text_buffer += payload
                     yield ("content_delta", payload)
+
                 elif kind == "tool_delta":
-                    yield ("tool_call_delta", payload)
+                    # just for UI display, do NOT execute yet
+                    yield ("tool_delta", payload)
+
+                elif kind == "tool_complete":
+                    # only append fully completed tool calls
+                    completed_tool_calls.append(payload)
+                    yield ("tool_complete", payload)
+
                 elif kind == "finish":
-                    tool_calls = payload.get("tool_calls")
                     break
                 elif kind == "error":
                     yield ("error", payload)
@@ -302,11 +308,12 @@ class Agent:
 
         state = {
             "full_reply": text_buffer.strip(),
-            "tool_calls": tool_calls,
+            "tool_calls": completed_tool_calls,  # only fully complete calls here
             "is_complete": "[FINAL_ANSWER_COMPLETE]" in text_buffer,
         }
 
         yield ("llm_response", state)
+
 
     async def _execute_tools(
         self, tool_calls: List[Dict], iteration: int
