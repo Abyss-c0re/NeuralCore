@@ -8,7 +8,7 @@ from neuralcore.utils.prompt_builder import PromptBuilder as PromptHelper
 from neuralcore.utils.config import get_loader
 from neuralcore.core.client_factory import get_clients
 from neuralcore.utils.text_tokenizer import TextTokenizer
-from neuralcore.utils.search import keyword_score, cosine_similarity
+from neuralcore.utils.search import keyword_score, safe_cosine
 
 # ─────────────────────────────────────────────────────────────
 # CONSTANTS
@@ -20,25 +20,6 @@ OFF_FREQ = 4
 SLICE_SIZE = 4
 
 logger = Logger.get_logger()
-
-
-# ─────────────────────────────────────────────────────────────
-# SAFE COSINE SIMILARITY
-# ─────────────────────────────────────────────────────────────
-def safe_cosine(vec1: np.ndarray, vec2: np.ndarray) -> float:
-    if vec1 is None or vec2 is None:
-        return 0.0
-    vec1 = np.asarray(vec1, dtype=np.float32)
-    vec2 = np.asarray(vec2, dtype=np.float32)
-    if vec1.size == 0 or vec2.size == 0:
-        return 0.0
-    if vec1.shape != vec2.shape:
-        return 0.0
-    norm1 = np.linalg.norm(vec1)
-    norm2 = np.linalg.norm(vec2)
-    if norm1 == 0.0 or norm2 == 0.0:
-        return 0.0
-    return float(np.dot(vec1, vec2) / (norm1 * norm2))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -69,13 +50,16 @@ class Topic:
         self.description = description
         self.embedded_description = np.array([])
         self.history: List[Dict[str, str]] = []
+        self.history_tokens: List[int] = []
         self.archived_history: List[Dict[str, str]] = []
         self.history_embeddings: List[np.ndarray] = []
 
-    async def add_message(self, role: str, message: str, embedding: np.ndarray) -> None:
-        self.history.append({"role": role, "content": message})
+    async def add_message(
+        self, role: str, content: str, embedding: np.ndarray, token_count: int
+    ) -> None:
+        self.history.append({"role": role, "content": content})
         self.history_embeddings.append(embedding)
-        logger.info(f"Message added to topic: {self.name}")
+        self.history_tokens.append(token_count)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -309,12 +293,18 @@ class ContextManager:
     ) -> None:
         if embedding is None or embedding.size == 0:
             embedding = await self.fetch_embedding(message)
+        token_count = (
+            self.tokenizer.count_tokens(message)
+            if self.tokenizer
+            else len(message) // 4
+        )
 
+        # Match topic first (optional topic switch)
         topic = await self._match_topic(embedding, exclude_topic=self.current_topic)
         if topic:
             await self.switch_topic(topic)
 
-        await self.current_topic.add_message(role, message, embedding)
+        await self.current_topic.add_message(role, message, embedding, token_count)
         asyncio.create_task(self._analyze_history())
 
         self._log_action(
@@ -357,87 +347,93 @@ class ContextManager:
         return best_topic
 
     # ─────────────────────────────────────────────────────────────
-    # ANALYZE HISTORY (topic extraction & off-topic detection)
+    # TOKEN-AWARE HISTORY ANALYSIS & OFF-TOPIC DETECTION
     # ─────────────────────────────────────────────────────────────
+
+    # ─────────────────────────────────────────────────────────────
+    # MESSAGE RELEVANCE & OFF-TOPIC ANALYSIS
+    # ─────────────────────────────────────────────────────────────
+    async def _score_messages_by_relevance(
+        self, messages: list, ref_emb: np.ndarray
+    ) -> list:
+        """Compute (score, message, embedding) tuples for relevance-aware pruning."""
+        scored = []
+        for msg in messages:
+            emb = await self.fetch_embedding(msg["content"])
+            score = safe_cosine(emb, ref_emb) if len(emb) > 0 else 0.0
+            scored.append((score, msg, emb))
+        return scored
+
     async def _analyze_history(self) -> None:
-        if (
-            len(self.current_topic.history) > 4
-            and not self.current_topic.description.strip()
-        ):
-            name, desc = await self.generate_topic_info_from_history(
-                self.current_topic.history
+        topic = self.current_topic
+        if len(topic.history) <= 4:
+            return  # Not enough messages to analyze
+
+        # Ensure topic embedding
+        if topic.embedded_description.size == 0 and topic.description.strip():
+            topic.embedded_description = await self.fetch_embedding(topic.description)
+
+        # Sliding window to detect off-topic segments
+        window_size = min(len(topic.history), SLICE_SIZE * 3)
+        window_msgs = topic.history[-window_size:]
+
+        # Score messages by relevance
+        scored_msgs = await self._score_messages_by_relevance(
+            window_msgs, topic.embedded_description
+        )
+
+        # Identify off-topic messages: score below threshold
+        off_topic_indices = [
+            i for i, (s, _, _) in enumerate(scored_msgs) if s < OFF_THR
+        ]
+        if len(off_topic_indices) <= len(scored_msgs) / 2:
+            return  # Mostly on-topic, nothing to move
+
+        # Segment of off-topic messages
+        off_start_idx = len(topic.history) - window_size + off_topic_indices[0]
+        segment = topic.history[off_start_idx:]
+
+        # Token counts for the segment
+        segment_tokens = [
+            self.tokenizer.count_tokens(m["content"])
+            if self.tokenizer
+            else len(m["content"]) // 4
+            for m in segment
+        ]
+
+        # Generate new topic info
+        name, desc = await self.generate_topic_info_from_history(segment)
+        if not name or not desc:
+            return
+
+        emb = await self.fetch_embedding(desc)
+        matched = await self._match_topic(emb, exclude_topic=topic)
+
+        # Target topic (existing or new)
+        target_topic = matched or Topic(name, desc)
+        if not matched:
+            target_topic.embedded_description = emb
+
+        # Move messages to target topic with token_count
+        segment_embeddings = await asyncio.gather(
+            *(self.fetch_embedding(m["content"]) for m in segment)
+        )
+        for m, emb_m, tks in zip(segment, segment_embeddings, segment_tokens):
+            await target_topic.add_message(
+                m["role"], m["content"], emb_m, token_count=tks
             )
-            if name and desc:
-                self.current_topic.name = name
-                self.current_topic.description = desc
-                self.current_topic.embedded_description = await self.fetch_embedding(
-                    desc
-                )
-                return
 
-        if (
-            len(self.current_topic.history) >= OFF_FREQ
-            and len(self.current_topic.history) % OFF_FREQ == 0
-        ):
-            if (
-                self.current_topic.embedded_description is None
-                or len(self.current_topic.embedded_description) == 0
-            ):
-                if self.current_topic.description.strip():
-                    self.current_topic.embedded_description = (
-                        await self.fetch_embedding(self.current_topic.description)
-                    )
-                else:
-                    return
+        # Switch to the new/matched topic
+        await self.switch_topic(target_topic)
 
-            current_name = self.current_topic.name
-            slice_msgs = self.current_topic.history[-SLICE_SIZE:]
-            embeddings = await asyncio.gather(
-                *(self.fetch_embedding(m["content"]) for m in slice_msgs)
-            )
-            sims = [
-                safe_cosine(e, self.current_topic.embedded_description)
-                for e in embeddings
-            ]
+        # Remove moved messages from original topic
+        topic.history = topic.history[:off_start_idx]
 
-            if sum(1 for s in sims if s < OFF_THR) > len(sims) / 2:
-                off_start = len(self.current_topic.history) - SLICE_SIZE
-                for i, s in enumerate(sims):
-                    if s < OFF_THR:
-                        off_start += i
-                        break
-                segment = self.current_topic.history[off_start:]
-
-                name, desc = await self.generate_topic_info_from_history(segment)
-                if name and desc:
-                    emb = await self.fetch_embedding(desc)
-                    matched = await self._match_topic(
-                        emb, exclude_topic=self.current_topic
-                    )
-                    if matched:
-                        for m in segment:
-                            e = await self.fetch_embedding(m["content"])
-                            await matched.add_message(m["role"], m["content"], e)
-                        await self.switch_topic(matched)
-                    else:
-                        new_topic = Topic(name, desc)
-                        new_topic.embedded_description = emb
-                        for m in segment:
-                            e = await self.fetch_embedding(m["content"])
-                            await new_topic.add_message(m["role"], m["content"], e)
-                        await self.switch_topic(new_topic)
-
-                    target = next(
-                        (t for t in self.topics if t.name == current_name), None
-                    )
-                    if target:
-                        target.history = target.history[:off_start]
-
-    # ─────────────────────────────────────────────────────────────
-    # The rest of the methods (provide_context, pruning, get_archived_context,
-    # record_tool_outcome, generate_topic_info_from_history, etc.) can
-    # follow the same pattern: use `safe_cosine` and validate embeddings.
-    # ─────────────────────────────────────────────────────────────
+        # Archive segment
+        topic.archived_history.extend(segment)
+        logger.info(
+            f"Off-topic segment moved → {target_topic.name} | {len(segment)} messages"
+        )
 
     # ========================================================================
     # TOPIC EXTRACTION & OFF-TOPIC
@@ -482,51 +478,48 @@ class ContextManager:
     ) -> List[Dict[str, Any]]:
         messages: List[Dict[str, Any]] = []
 
-        # === ENHANCED SYSTEM + LIVE SUMMARY (this is the core you asked for) ===
+        # --- SYSTEM PROMPT + LIVE SUMMARY ---
         base_system = system_prompt.strip()
         summary = self.get_context_summary()
-
         full_system = base_system
         if summary:
             full_system += f"\n\n{summary}\n\n→ Use this context to stay aware. Never repeat the summary back to the user."
-
         messages.append({"role": "system", "content": full_system})
 
-        # Knowledge Base (Optional)
+        # --- KNOWLEDGE BASE ---
         kb_budget = (max_input_tokens - reserved_for_output) // 3
-        kb_text = ""
         if query.strip() and kb_budget > 500:
             kb_text = await self._retrieve_relevant_knowledge(query, kb_budget)
             if kb_text:
-                # Append KB content as a system/tool message or user context?
-                # Usually added as System/Tool context for clarity
                 messages.append(
                     {
                         "role": "system",
-                        "content": f"=== RELEVANT EXTERNAL CONTEXT ===\n{kb_text}=== END EXTERNAL CONTEXT ===\n",
+                        "content": f"=== RELEVANT EXTERNAL CONTEXT ===\n{kb_text}=== END EXTERNAL CONTEXT ===",
                     }
                 )
 
-        # Conversation History
-        # Limit to last 120 messages to prevent exponential growth
-        temp_history = self.current_topic.history[-120:]
-        for msg in temp_history:
-            messages.append(msg.copy())
+        # --- RECENT CONVERSATION (TOKEN-LIMITED) ---
+        tokens_used = self.count_tokens(messages)
+        recent_msgs: List[Dict[str, str]] = []
+        for msg, t in zip(
+            reversed(self.current_topic.history),
+            reversed(self.current_topic.history_tokens),
+        ):
+            if tokens_used + t > max_input_tokens - reserved_for_output:
+                break
+            recent_msgs.insert(0, msg)
+            tokens_used += t
+        messages.extend(recent_msgs)
 
-        # New Query
+        # --- ADD USER QUERY ---
         if query.strip():
             messages.append({"role": "user", "content": query})
 
-        # 2. Calculate Actual Token Count
-        # ------------------------------
-        total_tokens = self.count_tokens(messages)
-
-        # 3. Check if Pruning is Needed
-        # -----------------------------
+        # --- PRUNE IF NECESSARY ---
         target_context_tokens = max_input_tokens - reserved_for_output
-
+        total_tokens = self.count_tokens(messages)
         if total_tokens > target_context_tokens:
-            removed_count, pruned_turns = self.prune_to_fit_context(
+            removed, pruned_turns = self.prune_to_fit_context(
                 messages,
                 max_tokens=target_context_tokens,
                 min_keep_messages=5,
@@ -537,37 +530,6 @@ class ContextManager:
             )
             if pruned_turns:
                 self.current_topic.archived_history.extend(pruned_turns)
-                logger.info(
-                    f"Pruned {removed_count} turns → archived "
-                    f"({len(self.current_topic.archived_history)} total archived)"
-                )
-            # 4. Recalculate AFTER pruning to be 100% sure
-            total_tokens = self.count_tokens(messages)
-
-        logger.info(
-            f"provide_context → {len(messages)} msgs | ≈{total_tokens:,} tokens "
-            f"(strictly ≤ {max_input_tokens:,}) | KB: {len(self.knowledge_base)} | "
-            f"Archived: {len(self.current_topic.archived_history)} | Reserved: {reserved_for_output:,}"
-        )
-
-        # Final Safety Check: Ensure (Input + Output Reserve) <= Max Input
-        final_total = total_tokens + reserved_for_output
-        if final_total > max_input_tokens:
-            logger.warning(
-                f"Final check: Input({total_tokens:,}) + Output({reserved_for_output:,}) > Max({max_input_tokens:,})"
-            )
-            # Emergency prune 1 more chunk if possible
-            if total_tokens > target_context_tokens:
-                _, emergency_turns = self.prune_to_fit_context(
-                    messages,
-                    max_tokens=target_context_tokens,
-                    min_keep_messages=5,
-                )
-                total_tokens = self.count_tokens(messages)
-                if total_tokens + reserved_for_output > max_input_tokens:
-                    logger.warning(
-                        f"Emergency prune still exceeded. Final: {total_tokens + reserved_for_output}"
-                    )
 
         return messages
 
@@ -693,7 +655,7 @@ class ContextManager:
             emb = await self.fetch_embedding(text)  # always safe + cached
             if len(emb) == 0:  # ← FIXED: no more str/None
                 continue
-            sim = cosine_similarity(query_emb, emb)
+            sim = safe_cosine(query_emb, emb)
             kw = keyword_score(query_words, text[:400])
             scored.append((0.65 * sim + 0.35 * kw, msg))
 

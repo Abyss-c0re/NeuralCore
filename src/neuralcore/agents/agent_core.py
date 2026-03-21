@@ -310,7 +310,6 @@ class Agent:
         self.phase = Phase.IDLE
         self.steps.clear()
         self.current_step = 0
-        self.messages.clear()
         self.executed_signatures.clear()
         self.reflection_count = 0
         self.tool_results.clear()
@@ -318,8 +317,8 @@ class Agent:
         self.temperature = temperature
         self.max_tokens = max_tokens
 
+        # Add user message to ContextManager only
         await self.context_manager.add_message("user", user_prompt)
-        self.messages.append({"role": "user", "content": user_prompt})
 
         iteration = 0
         state = AgentState()
@@ -344,10 +343,13 @@ class Agent:
                 try:
                     async for event, payload in handler(iteration, state):
                         yield (event, payload)
+
+                        # Update state from LLM responses
                         if event == "llm_response":
                             state.full_reply = payload.get("full_reply", "")
                             state.tool_calls = payload.get("tool_calls", [])
                             state.is_complete = payload.get("is_complete", False)
+
                         if event in ("needs_confirmation", "cancelled", "finish"):
                             return
                 except Exception as e:
