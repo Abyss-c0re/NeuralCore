@@ -8,8 +8,8 @@ TOKENIZER = re.compile(r"\b\w+\b")
 
 
 def keyword_score(
-    query_words: List[str],
-    text: str,
+    query_words: list,
+    text,
     *,
     case_sensitive: bool = False,
     coverage_weight: float = 3.0,
@@ -17,38 +17,36 @@ def keyword_score(
     prefix_cap: int = 10,
 ) -> float:
     """
-    Universal lexical scoring function for both tag search and embedding support.
-
-    - Normalized tokenization
-    - Tunable weights
-    - Safe prefix bonus (capped)
+    Lexical scoring that is robust to lists or non-string inputs.
     """
-
-    if not query_words or not text:
+    if not query_words or text is None:
         return 0.0
 
-    # ---- Normalize ----
+    # Ensure text is a string
+    if isinstance(text, list):
+        text = " ".join(map(str, text))
+    else:
+        text = str(text)
+
+    # Normalize case
     if not case_sensitive:
-        query_words = [q.lower() for q in query_words]
+        query_words = [str(q).lower() for q in query_words]
         text = text.lower()
 
     words = TOKENIZER.findall(text)
-
     if not words:
         return 0.0
 
-    # ---- Core overlap ----
+    # Core overlap
     query_set = set(query_words)
     word_set = set(words)
-
     overlap = len(query_set & word_set)
     coverage = overlap / len(query_set)
 
-    # ---- Prefix matching (controlled) ----
+    # Prefix bonus
     prefix_hits = sum(1 for qw in query_words for w in words if w.startswith(qw))
     prefix_hits = min(prefix_hits, prefix_cap)
 
-    # ---- Final score ----
     return coverage * coverage_weight + prefix_hits * prefix_weight
 
 
