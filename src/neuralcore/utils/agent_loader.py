@@ -1,9 +1,9 @@
 from pathlib import Path
-from neuralcore.agents.agent_core import Agent
+from neuralcore.agents.core import Agent
 
 from neuralcore.utils.config import get_loader
 
-from neuralcore.agents.agent_core import get_clients
+from neuralcore.agents.core import get_clients
 
 
 def load_agent_from_config(agent_id: str, app_root: Path, loader=None) -> Agent:
