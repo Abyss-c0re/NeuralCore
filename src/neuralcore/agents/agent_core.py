@@ -3,7 +3,7 @@ import json
 from enum import Enum
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import yaml
 
 
@@ -33,6 +33,9 @@ class AgentState:
     tool_calls: Optional[List[Dict]] = None
     full_reply: str = ""
     is_complete: bool = False
+    last_reflection_decision: Dict = field(default_factory=dict)
+    executed_functions: List[Dict] = field(default_factory=list)
+    iteration_history: List[Dict] = field(default_factory=list)  # new
 
 
 # ---------------------------- AGENT CLASS ----------------------------
@@ -51,7 +54,6 @@ class Agent:
         "execute_tools_if_present",
         "check_if_complete_or_casual_chat",
         "force_reflection_if_stuck",
-        "decide_after_reflection",
         "safety_max_iterations",
     ]
 
@@ -170,6 +172,7 @@ class Agent:
         self.tool_results: List[Dict] = []
         self.messages: List[Dict] = []
         self._stop_event: Optional[asyncio.Event] = None
+        self.iteration_history: List[Dict] = []
 
     # ---------------- HELPER METHODS ----------------
     def _set_phase(self, phase: Phase) -> dict:
@@ -191,6 +194,32 @@ class Agent:
         sig = (name, json.dumps(args, sort_keys=True))
         return name, args, sig
 
+    def _log_iteration_state(self, iteration: int, state: AgentState):
+        # Append iteration snapshot to history
+        state.iteration_history.append(
+            {
+                "iteration": iteration,
+                "tool_calls": state.tool_calls.copy() if state.tool_calls else [],
+                "executed_functions": state.executed_functions.copy(),
+                "workflow_steps_run": self.steps.copy(),
+                "full_reply": state.full_reply,
+            }
+        )
+
+        # Log the current state snapshot
+        snapshot_str = json.dumps(state.iteration_history[-1], indent=2)
+        logger.debug(f"[Iteration {iteration} State] {snapshot_str}")
+
+    def _has_no_tools_recently(self, state: AgentState, lookback: int = 3) -> bool:
+        """
+        Returns True if there were no executed tools in the last `lookback` iterations.
+        """
+        recent = state.iteration_history[-lookback:]
+        for h in recent:
+            if h.get("executed_functions"):
+                return False  # at least one tool was executed recently
+        return True
+
     # ---------------- RUN ORCHESTRATOR ----------------
 
     # ---------------- WORKFLOW STEP HANDLERS ----------------
@@ -199,6 +228,7 @@ class Agent:
     ) -> AsyncIterator[Tuple[str, Any]]:
         async for ev, pl in self._llm_stream_with_tools(iteration):
             yield (ev, pl)
+        self._log_iteration_state(iteration, state)
 
     async def _wf_execute_if_tools(
         self, iteration: int, state: AgentState
@@ -207,6 +237,7 @@ class Agent:
             yield ("tool_calls", state.tool_calls)
             async for ev, pl in self._execute_tools(state.tool_calls, iteration):
                 yield (ev, pl)
+        self._log_iteration_state(iteration, state)
 
     async def _wf_check_complete(
         self, iteration: int, state: AgentState
@@ -223,6 +254,7 @@ class Agent:
                 {"full_reply": state.full_reply, "tool_calls": [], "is_complete": True},
             )
             yield ("finish", {"reason": "casual_complete"})
+            self._log_iteration_state(iteration, state)
             return
 
         if state.is_complete:
@@ -231,59 +263,56 @@ class Agent:
             async for ev, pl in self._generate_final_summary():
                 yield (ev, pl)
             yield ("finish", {"reason": "complete"})
+            self._log_iteration_state(iteration, state)
 
-    async def _wf_reflect_if_stuck(self, iteration, state):
-        if iteration > 3 and not state.tool_calls:
-            async for ev, pl in self._force_reflection(iteration):
-                yield (ev, pl)
+    async def _wf_reflect_if_stuck(self, iteration: int, state: AgentState):
+        """
+        Trigger reflection only if agent has made no tool progress recently.
+        """
+        if iteration <= 10:
+            return  # avoid early reflection
 
-                if ev == "reflection_decision":
-                    next_step = pl.get("next_step")
+        if self._has_no_tools_recently(state, lookback=5):
+            async for ev, decision in self._force_reflection(iteration, state):
+                yield (ev, decision)
 
-                    if next_step == "tool":
-                        tool_name = pl.get("tool_name")
+                if ev != "reflection_decision":
+                    continue
 
-                        if not tool_name:
-                            yield ("warning", "Reflection chose tool but none provided")
-                            return
+                next_step = decision.get("next_step")
+                tool_name = decision.get("tool_name")
+                args = decision.get("arguments", {})
 
-                        args = pl.get("arguments", {})
+                if next_step == "tool" and tool_name:
+                    state.tool_calls = [
+                        {"function": {"name": tool_name, "arguments": json.dumps(args)}}
+                    ]
+                    yield (
+                        "info",
+                        {"message": f"[REFLECTION] Enqueued tool: {tool_name}"},
+                    )
+                    return  # continue workflow with tool
 
-                        state.tool_calls = [
-                            {
-                                "function": {
-                                    "name": tool_name,
-                                    "arguments": json.dumps(args),
-                                }
-                            }
-                        ]
+                elif next_step == "llm":
+                    await self.context_manager.add_message(
+                        "system",
+                        f"[REFLECTION GUIDANCE]\n{json.dumps(decision, indent=2)}",
+                    )
+                    return
 
-                        yield (
-                            "info",
-                            {"message": f"[REFLECTION] Enqueued tool: {tool_name}"},
-                        )
-                        return
+                elif next_step == "finish":
+                    yield (
+                        "finish",
+                        {
+                            "reason": "reflection_finish",
+                            "details": decision.get("reason"),
+                        },
+                    )
+                    return
 
-                    elif next_step == "finish":
-                        yield (
-                            "finish",
-                            {
-                                "reason": "reflection_finish",
-                                "details": pl.get("reason"),
-                            },
-                        )
-                        return
-
-                    elif next_step == "llm":
-                        await self.context_manager.add_message(
-                            "system",
-                            f"[REFLECTION GUIDANCE]\n{json.dumps(pl, indent=2)}",
-                        )
-                        return
-
-                    else:
-                        yield ("warning", f"Unknown reflection step: {next_step}")
-                        return
+                else:
+                    yield ("warning", f"Unknown reflection step: {next_step}")
+                    return
 
     async def _wf_safety_fallback(
         self, iteration: int, state: AgentState
@@ -292,6 +321,7 @@ class Agent:
             async for ev, pl in self._generate_final_summary():
                 yield (ev, pl)
             yield ("finish", {"reason": "max_iterations"})
+            self._log_iteration_state(iteration, state)
 
     # ---------------- STREAMING, TOOLS, REFLECTION, SUMMARY ----------------
     # (Same as your original implementations, can be copied over with small improvements)
@@ -491,10 +521,20 @@ class Agent:
                 yield ("cancelled", f"Stop after {name}")
                 return
 
-    async def _force_reflection(self, iteration: int) -> AsyncIterator[Tuple[str, Any]]:
+    async def _force_reflection(
+        self, iteration: int, state: AgentState
+    ) -> AsyncIterator[Tuple[str, Any]]:
+        """
+        Meta-cognitive reflection step:
+        - Detects being stuck
+        - Suggests next actions (tool / llm / finish)
+        - Suggests workflow adjustments using only existing workflow steps
+        - Logs iteration state automatically
+        """
         self.phase = Phase.REFLECT
         yield ("phase_changed", {"phase": self.phase.value})
 
+        # Gather recent context
         ctx = await self.context_manager.provide_context(
             query="",
             max_input_tokens=self.max_tokens,
@@ -510,8 +550,8 @@ class Agent:
 
         inv_state = getattr(self.context_manager, "investigation_state", {})
 
-        raw_response = await self.client.ask(
-            f"""
+        # Prompt LLM for reflection + workflow adjustment
+        prompt = f"""
     Agent is stuck after {iteration} iterations.
 
     TASK:
@@ -523,35 +563,49 @@ class Agent:
     RECENT CONTEXT:
     {context_text}
 
+    CURRENT WORKFLOW STEPS:
+    {json.dumps(self.workflow_steps, indent=2)}
+
+    You may propose workflow optimizations to improve task completion,
+    but you MUST ONLY use the existing workflow steps listed above.
+    Do not invent any new step names.
+
     You MUST return valid JSON ONLY:
 
     {{
-    "reason": "why stuck",
-    "next_step": "tool" | "llm" | "finish",
-    "tool_name": "optional",
-    "arguments": {{}},
-    "new_subtask": "optional"
+        "reason": "why stuck",
+        "next_step": "tool" | "llm" | "finish",
+        "tool_name": "optional",
+        "arguments": {{}},
+        "new_subtask": "optional",
+        "workflow_adjustments": {{
+            "insert_step": "existing_step_name",
+            "position": optional_integer,
+            "remove_step": "existing_step_name",
+            "reorder_steps": ["existing_step1","existing_step2",...],
+            "max_iterations": optional_integer
+        }}
     }}
-    """
-        )
+        """
+
+        raw_response = await self.client.ask(prompt)
 
         try:
             decision = json.loads(str(raw_response).strip())
+            if not isinstance(decision, dict):
+                decision = {"reason": "invalid_format", "next_step": "llm"}
         except Exception:
             decision = {"reason": "failed_to_parse", "next_step": "llm"}
 
-        yield ("reflection_decision", decision)
-
+        # Log reflection in context manager
         if decision.get("new_subtask"):
             self.context_manager.add_subtask(decision["new_subtask"])
-
         if decision.get("reason"):
             self.context_manager.add_finding(f"Reflection: {decision['reason']}")
 
         await self.context_manager.add_message(
             "system", f"[REFLECTION]\n{json.dumps(decision, indent=2)}"
         )
-
         await self.context_manager.add_external_content(
             source_type="reflection",
             content=json.dumps(decision, indent=2),
@@ -559,11 +613,49 @@ class Agent:
         )
 
         self.reflection_count += 1
-        if self.reflection_count > self.max_reflections:
+        recent_tools = self._has_no_tools_recently(state, lookback=5)
+        if self.reflection_count > self.max_reflections and not recent_tools:
             yield ("warning", f"Stuck after {self.reflection_count} reflections")
             yield ("finish", {"reason": "reflection_stuck"})
+            self._log_iteration_state(iteration, state)
             return
 
+        # Apply workflow adjustments safely
+        adjustments = decision.get("workflow_adjustments", {})
+        if isinstance(adjustments, dict):
+            reorder = adjustments.get("reorder_steps")
+            if isinstance(reorder, list):
+                self.workflow_steps = [s for s in reorder if s in self.workflow_steps]
+
+            insert_step = adjustments.get("insert_step")
+            position = adjustments.get("position")
+            if (
+                isinstance(insert_step, str)
+                and insert_step in self.workflow_steps
+                and isinstance(position, int)
+            ):
+                if insert_step in self.workflow_steps:
+                    self.workflow_steps.remove(insert_step)
+                self.workflow_steps.insert(
+                    min(position, len(self.workflow_steps)), insert_step
+                )
+
+            remove_step = adjustments.get("remove_step")
+            if isinstance(remove_step, str) and remove_step in self.workflow_steps:
+                self.workflow_steps.remove(remove_step)
+
+            max_iters = adjustments.get("max_iterations")
+            if isinstance(max_iters, int) and max_iters > 0:
+                self.max_iterations = max_iters
+
+        # Save decision to state
+        state.last_reflection_decision = decision
+
+        # Log iteration state
+        self._log_iteration_state(iteration, state)
+
+        # Yield the reflection decision once
+        yield ("reflection_decision", decision)
         yield ("reflection_triggered", decision)
 
     async def _generate_final_summary(self) -> AsyncIterator[Tuple[str, Any]]:
