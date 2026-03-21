@@ -165,10 +165,10 @@ class ActionSet:
 
 class SequenceAction(Action):
     """
-    A composite Action that executes an ordered list of other Actions (or functions),
-    optionally propagating context between steps.
+    A composite Action that executes an ordered list of Actions,
+    propagating context between steps.
 
-    Supports pausing for human confirmation / input and later resuming.
+    Supports optional pausing for input (UI or human) and autonomous execution.
     """
 
     def __init__(
@@ -177,11 +177,8 @@ class SequenceAction(Action):
         description: str,
         steps: List[Action],
         propagate_context: bool = True,
-        output_from: Union[
-            int, str, None
-        ] = -1,  # -1 = last step, None = all results list
+        output_from: Union[int, str, None] = -1,
         confirm_predicate: Optional[Callable[[Any], bool]] = None,
-        # Optional: allow naming steps for better debugging / output_from reference
         step_names: Optional[List[str]] = None,
     ):
         super().__init__(
@@ -190,20 +187,25 @@ class SequenceAction(Action):
             parameters={
                 "input": {
                     "type": "any",
-                    "description": "Initial context / input for the sequence",
-                },
-                "resume_token": {
-                    "type": "string",
-                    "description": "(internal) Used by orchestrator to resume a paused sequence",
-                    "default": None,
+                    "description": "Initial context / input for the sequence (dict or string)",
                 },
                 "user_response": {
                     "type": "any",
                     "description": "Human reply when sequence is waiting",
                     "default": None,
                 },
+                "resume_token": {
+                    "type": "string",
+                    "description": "(internal) Used to resume a paused sequence",
+                    "default": None,
+                },
+                "auto_response": {
+                    "type": "any",
+                    "description": "Optional default response for autonomous mode",
+                    "default": None,
+                },
             },
-            executor=self.execute,  # ← public name, more conventional
+            executor=self.execute,
             action_type="tool",
             tags=["composite", "workflow", "multi-step", "agent"],
         )
@@ -212,20 +214,20 @@ class SequenceAction(Action):
         self.output_from = output_from
         self.confirm_predicate = confirm_predicate
         self.step_names = step_names or [f"step_{i}" for i in range(len(steps))]
-
-        # Persistent state for resumable execution
         self._state: Optional[Dict[str, Any]] = None
 
     async def execute(self, **kwargs) -> Dict[str, Any]:
         """
-        Main entry point — called by the agent / orchestrator.
-        Handles both fresh start and resume.
+        Execute the sequence with context propagation, auto-response, and optional pausing.
         """
         input_data = kwargs.get("input")
         user_response = kwargs.get("user_response")
-        resume_token = kwargs.get(
-            "resume_token"
-        )  # usually just self.name when resuming
+        resume_token = kwargs.get("resume_token")
+        auto_response = kwargs.get("auto_response")
+
+        # Ensure context is always a dict
+        if isinstance(input_data, str) or input_data is None:
+            input_data = {"full_reply": input_data or ""}
 
         if self._state is None or resume_token is None:
             # Fresh execution
@@ -233,10 +235,10 @@ class SequenceAction(Action):
                 "step_index": 0,
                 "context": input_data,
                 "results": [],
-                "step_outputs": {},  # name → result (for named output_from)
+                "step_outputs": {},
             }
         else:
-            # Resume — we expect user_response if we were waiting
+            # Resuming a paused sequence
             if user_response is None and self.is_waiting():
                 return {
                     "status": "error",
@@ -253,7 +255,6 @@ class SequenceAction(Action):
             current_action = self.steps[step_index]
             step_name = self.step_names[step_index]
 
-            # Prepare arguments for this step
             step_kwargs = (
                 {"input": context} if self.propagate_context else kwargs.copy()
             )
@@ -269,30 +270,32 @@ class SequenceAction(Action):
                     "context": context,
                 }
 
-            # Check if this step wants to pause for human input
+            # Handle _ask with auto_response
             if isinstance(result, dict) and "_ask" in result:
-                # Save state before pausing
-                state.update(
-                    {
-                        "step_index": step_index + 1,  # resume AFTER this step
-                        "context": context,
-                        "results": results + [result],
+                if auto_response is not None:
+                    context["_last_user_response"] = auto_response
+                    result.pop("_ask")
+                else:
+                    # Pause for human input
+                    state.update(
+                        {
+                            "step_index": step_index + 1,
+                            "context": context,
+                            "results": results + [result],
+                        }
+                    )
+                    self._state = state
+                    return {
+                        "status": "waiting_for_human",
+                        "question": result["_ask"],
+                        "step": step_name,
+                        "step_index": step_index,
+                        "context_preview": str(context)[:400] + "…"
+                        if len(str(context)) > 400
+                        else str(context),
+                        "sequence_name": self.name,
+                        **{k: v for k, v in result.items() if k != "_ask"},
                     }
-                )
-                self._state = state  # persist
-
-                return {
-                    "status": "waiting_for_human",
-                    "question": result["_ask"],
-                    "step": step_name,
-                    "step_index": step_index,
-                    "context_preview": str(context)[:400] + "…"
-                    if len(str(context)) > 400
-                    else str(context),
-                    "sequence_name": self.name,
-                    # Optional: include suggested_files / other metadata from decision step
-                    **{k: v for k, v in result.items() if k != "_ask"},
-                }
 
             # Optional auto-confirmation
             if self.confirm_predicate and self.confirm_predicate(result):
@@ -311,12 +314,15 @@ class SequenceAction(Action):
                     "step_index": step_index,
                 }
 
-            # Normal progress
+            # Normal step completion
             results.append(result)
             state["step_outputs"][step_name] = result
 
             if self.propagate_context:
-                context = result
+                if isinstance(result, dict):
+                    context.update(result)
+                else:
+                    context["_last_result"] = result
 
             state["step_index"] += 1
             step_index += 1
@@ -333,7 +339,6 @@ class SequenceAction(Action):
             "steps_executed": len(self.steps),
         }
 
-        # Clean up after success
         self._state = None
         return completed_response
 
@@ -341,25 +346,21 @@ class SequenceAction(Action):
         if self.output_from is None:
             return results
         if self.output_from == -1:
-            return results[-1] if results else None
+            return named.get(self.step_names[-1], results[-1])
         if isinstance(self.output_from, int):
             return (
                 results[self.output_from]
                 if 0 <= self.output_from < len(results)
-                else None
+                else results[-1]
             )
         if isinstance(self.output_from, str):
-            return named.get(self.output_from)
-        return None
+            return named.get(self.output_from, results[-1])
+        return results[-1]
 
     def is_waiting(self) -> bool:
-        """Quick check if sequence is paused and awaiting human input"""
-        if self._state is None:
-            return False
-        return self._state["step_index"] <= len(self.steps)
+        return self._state is not None and self._state["step_index"] <= len(self.steps)
 
     def reset(self):
-        """Force clear state (useful in error recovery or testing)"""
         self._state = None
 
 

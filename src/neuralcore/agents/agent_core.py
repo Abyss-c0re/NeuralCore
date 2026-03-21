@@ -1,11 +1,14 @@
 import asyncio
 import json
 from enum import Enum
-from typing import List, Dict, Any, Optional, Tuple, AsyncIterator
 from pathlib import Path
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+from dataclasses import dataclass
 import yaml
 
+
 from neuralcore.actions.manager import registry
+from neuralcore.actions.decisions import add_decisions
 from neuralcore.cognition.memory import ContextManager
 from neuralcore.utils.exceptions_handler import ConfirmationRequired
 from neuralcore.utils.logger import Logger
@@ -15,6 +18,7 @@ from neuralcore.core.client_factory import get_clients
 logger = Logger.get_logger()
 
 
+# ---------------------------- ENUMS ----------------------------
 class Phase(str, Enum):
     IDLE = "idle"
     EXECUTE = "execute"
@@ -23,6 +27,15 @@ class Phase(str, Enum):
     DECISION = "decision"
 
 
+# ---------------------------- AGENT STATE ----------------------------
+@dataclass
+class AgentState:
+    tool_calls: Optional[List[Dict]] = None
+    full_reply: str = ""
+    is_complete: bool = False
+
+
+# ---------------------------- AGENT CLASS ----------------------------
 class Agent:
     """
     Production-ready Agent with full workflow engine:
@@ -42,23 +55,16 @@ class Agent:
         "safety_max_iterations",
     ]
 
+    FINAL_ANSWER_MARKER = "[FINAL_ANSWER_COMPLETE]"
+
+    # ---------------- INIT ----------------
     def __init__(
         self, agent_id: str, loader, app_root: Path, config_file: Optional[Path] = None
     ):
         self.agent_id = agent_id
         self.loader = loader
         self.app_root = app_root
-
-        # Load YAML config if provided, fallback to loader
-        if config_file and config_file.exists():
-            with open(config_file, "r") as f:
-                full_cfg = yaml.safe_load(f)
-            self.config = full_cfg.get("agents", {}).get(agent_id, {})
-        else:
-            self.config = loader.config.get("agents", {}).get(agent_id, {})
-
-        if not self.config:
-            raise ValueError(f"Agent '{agent_id}' not found in config")
+        self.config = self._load_agent_config(agent_id, config_file)
 
         # Load client
         client_name = self.config.get("client", "main")
@@ -80,7 +86,34 @@ class Agent:
         self.manager = registry.manager
         self.context_manager = ContextManager()
 
-        # Wrap client methods + run
+        # Register client + run methods as internal tools
+        self._register_internal_tools()
+
+        # Load agent tool sets
+        self._load_agent_tools()
+
+        # Agent state
+        self._reset_state()
+
+        # Load workflow
+        self._load_workflow()
+
+    # ---------------- CONFIG LOADING ----------------
+    def _load_agent_config(self, agent_id: str, config_file: Optional[Path]) -> dict:
+        if config_file and config_file.exists():
+            with open(config_file, "r") as f:
+                full_cfg = yaml.safe_load(f)
+            cfg = full_cfg.get("agents", {}).get(agent_id, {})
+        else:
+            cfg = getattr(self.loader, "config", {}).get("agents", {}).get(agent_id, {})
+        if not cfg:
+            raise ValueError(f"Agent '{agent_id}' not found in config")
+        return cfg
+
+    # ---------------- INTERNAL TOOLS ----------------
+    def _register_internal_tools(self):
+        from neuralcore.utils.llm_tools import InternalTools
+
         methods = [
             getattr(self.client, m)
             for m in dir(self.client)
@@ -88,25 +121,47 @@ class Agent:
         ]
         methods.append(self.run)
 
-        from neuralcore.utils.llm_tools import InternalTools
-
         internal_tools = InternalTools(
             client=self.client,
             description="Agent internal methods + run workflow",
             methods=methods,
         )
         self.registry.register_set("InternalTools", internal_tools.as_action_set())
+        add_decisions(self)
 
-        # Load agent tool sets
+    # ---------------- LOAD TOOLS ----------------
+    def _load_agent_tools(self):
         tool_sets = self.config.get("tool_sets", [])
-        load_tool_sets(loader, app_root=app_root, sets_to_load=tool_sets)
+        load_tool_sets(self.loader, app_root=self.app_root, sets_to_load=tool_sets)
         for action_name in self.registry.all_actions:
             self.registry.manager.load_tools([action_name])
         self.registry.debug_print_all_tools()
 
-        # Agent state
-        self.task: str = ""
-        self.goal: str = ""
+    # ---------------- WORKFLOW ----------------
+    def _load_workflow(self):
+        agents_cfg = getattr(self.loader, "config", {}).get("agents", {})
+
+        wf_config = None
+        for agent_id, agent_cfg in agents_cfg.items():
+            if agent_cfg.get("name") == self.name:
+                wf_config = agent_cfg.get("workflow", {})
+                break
+
+        if wf_config is None:
+            wf_config = self.config.get("workflow", {})
+
+        self.workflow_steps = wf_config.get("steps", self.DEFAULT_WORKFLOW)
+        self.workflow_description = wf_config.get("description", "Default ReAct loop")
+
+        # Map step name to handler if exists
+        self._step_handlers = {
+            name: getattr(self, f"_wf_{name}", None) for name in self.workflow_steps
+        }
+
+    # ---------------- STATE RESET ----------------
+    def _reset_state(self):
+        self.task = ""
+        self.goal = ""
         self.phase: Phase = Phase.IDLE
         self.steps: List[str] = []
         self.current_step: int = 0
@@ -116,63 +171,47 @@ class Agent:
         self.messages: List[Dict] = []
         self._stop_event: Optional[asyncio.Event] = None
 
-        # Load workflow
-        self._load_workflow()
-
-    # ---------------- Human-readable workflow ----------------
-    def _load_workflow(self):
-        # Ensure the workflow comes from the YAML entry matching self.name
-        agents_cfg = getattr(self.loader, "config", {}).get("agents", {})
-
-        # Find agent config by name
-        wf_config = None
-        for agent_id, agent_cfg in agents_cfg.items():
-            if agent_cfg.get("name") == self.name:
-                wf_config = agent_cfg.get("workflow", {})
-                break
-
-        # Fallback if not found (should rarely happen)
-        if wf_config is None:
-            wf_config = self.config.get("workflow", {})
-
-        # Load workflow steps and description
-        self.workflow_steps = wf_config.get("steps", self.DEFAULT_WORKFLOW)
-        self.workflow_description = wf_config.get("description", "Default ReAct loop")
-
-        # Step handlers mapping
-        self._step_handlers = {
-            "llm_stream_with_tools": self._wf_llm_stream,
-            "execute_tools_if_present": self._wf_execute_if_tools,
-            "check_if_complete_or_casual_chat": self._wf_check_complete,
-            "force_reflection_if_stuck": self._wf_reflect_if_stuck,
-            "decide_after_reflection": self._wf_decide_after_reflection,
-            "safety_max_iterations": self._wf_safety_fallback,
-        }
+    # ---------------- HELPER METHODS ----------------
+    def _set_phase(self, phase: Phase) -> dict:
+        self.phase = phase
+        return {"phase": phase.value}
 
     def _build_objective_reminder(self) -> str:
-        return f"OBJECTIVE LOCKED:\nTask: {self.task}\nOnly finish when you can append exactly [FINAL_ANSWER_COMPLETE]."
+        return (
+            f"OBJECTIVE LOCKED:\nTask: {self.task}\n"
+            f"Only finish when you can append exactly {self.FINAL_ANSWER_MARKER}."
+        )
 
-    # ---------------- Step methods ----------------
+    def _prepare_tool_call(self, call: Dict) -> Tuple[str, dict, tuple]:
+        name = call["function"]["name"]
+        try:
+            args = json.loads(call["function"]["arguments"])
+        except Exception:
+            args = {}
+        sig = (name, json.dumps(args, sort_keys=True))
+        return name, args, sig
+
+    # ---------------- RUN ORCHESTRATOR ----------------
+
+    # ---------------- WORKFLOW STEP HANDLERS ----------------
     async def _wf_llm_stream(
-        self, iteration: int, state: dict
+        self, iteration: int, state: AgentState
     ) -> AsyncIterator[Tuple[str, Any]]:
         async for ev, pl in self._llm_stream_with_tools(iteration):
             yield (ev, pl)
-            if ev == "llm_response":
-                yield ("llm_response", pl)
 
     async def _wf_execute_if_tools(
-        self, iteration: int, state: dict
+        self, iteration: int, state: AgentState
     ) -> AsyncIterator[Tuple[str, Any]]:
-        if state.get("tool_calls"):
-            yield ("tool_calls", state["tool_calls"])
-            async for ev, pl in self._execute_tools(state["tool_calls"], iteration):
+        if state.tool_calls:
+            yield ("tool_calls", state.tool_calls)
+            async for ev, pl in self._execute_tools(state.tool_calls, iteration):
                 yield (ev, pl)
 
     async def _wf_check_complete(
-        self, iteration: int, state: dict
+        self, iteration: int, state: AgentState
     ) -> AsyncIterator[Tuple[str, Any]]:
-        if state.get("is_complete") or (iteration == 1 and len(self.tool_results) == 0):
+        if state.is_complete or (iteration == 1 and len(self.tool_results) == 0):
             self.phase = Phase.FINALIZE
             yield ("phase_changed", {"phase": self.phase.value})
             async for ev, pl in self._generate_final_summary():
@@ -180,30 +219,58 @@ class Agent:
             yield ("finish", {"reason": "complete"})
 
     async def _wf_reflect_if_stuck(
-        self, iteration: int, state: dict
+        self, iteration: int, state: AgentState
     ) -> AsyncIterator[Tuple[str, Any]]:
-        if iteration > 1 and not state.get("tool_calls"):
+        if iteration > 1 and not state.tool_calls:
             async for ev, pl in self._force_reflection(iteration):
                 yield (ev, pl)
 
-    async def _wf_decide_after_reflection(
-        self, iteration: int, state: dict
-    ) -> AsyncIterator[Tuple[str, Any]]:
-        if self.reflection_count > self.max_reflections:
-            # Example decision logic: configurable in YAML or prompt
-            # Stop or continue – here we stop by default
-            yield ("decision_point", {"message": "Reflection limit reached, stopping"})
-            yield ("finish", {"reason": "reflection_failed"})
+    async def _wf_decide_after_reflection(self, iteration: int, state: AgentState):
+        """
+        Calls the decision sequence and routes workflow based on its output.
+        """
+        decision_action = self.registry.manager.get_executor("decision_maker")
+        if not decision_action:
+            yield ("warning", "Decision tool not found")
+            return
+
+        result = await decision_action(input=state.full_reply)
+        # Check if waiting for human input
+        if isinstance(result, dict) and result.get("status") == "waiting_for_human":
+            yield (
+                "needs_confirmation",
+                {
+                    "message": result.get("question"),
+                    "step_index": result.get("step_index"),
+                },
+            )
+            return
+
+        # Otherwise, process decision
+        next_step = result.get("next_step")
+        tool_to_run = result.get("tool_to_run")
+        stop = result.get("stop", False)
+
+        if stop:
+            yield ("finish", {"reason": result.get("reason", "decision_stop")})
+        elif tool_to_run:
+            state.tool_calls = state.tool_calls or []
+            state.tool_calls.append(tool_to_run)
+            yield ("info", {"message": f"Tool enqueued by decision: {tool_to_run}"})
+        elif next_step:
+            yield ("info", {"message": f"Next workflow step decided: {next_step}"})
 
     async def _wf_safety_fallback(
-        self, iteration: int, state: dict
+        self, iteration: int, state: AgentState
     ) -> AsyncIterator[Tuple[str, Any]]:
         if iteration >= self.max_iterations:
             async for ev, pl in self._generate_final_summary():
                 yield (ev, pl)
             yield ("finish", {"reason": "max_iterations"})
 
-    # ---------------- Main run orchestrator ----------------
+    # ---------------- STREAMING, TOOLS, REFLECTION, SUMMARY ----------------
+    # (Same as your original implementations, can be copied over with small improvements)
+
     async def run(
         self,
         user_prompt: str,
@@ -212,7 +279,6 @@ class Agent:
         max_tokens: int = 1212,
         stop_event: Optional[asyncio.Event] = None,
     ) -> AsyncIterator[Tuple[str, Any]]:
-
         self._stop_event = stop_event or asyncio.Event()
         self.task = user_prompt
         self.goal = user_prompt
@@ -231,7 +297,7 @@ class Agent:
         self.messages.append({"role": "user", "content": user_prompt})
 
         iteration = 0
-        state = {"tool_calls": None, "full_reply": "", "is_complete": False}
+        state = AgentState()
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -250,19 +316,26 @@ class Agent:
                     yield ("warning", f"Unknown workflow step: {step_name}")
                     continue
 
-                async for event, payload in handler(iteration, state):
-                    yield (event, payload)
-                    if event == "llm_response":
-                        state = payload
-                    if event in ("needs_confirmation", "cancelled", "finish"):
-                        return
+                try:
+                    async for event, payload in handler(iteration, state):
+                        yield (event, payload)
+                        if event == "llm_response":
+                            state.full_reply = payload.get("full_reply", "")
+                            state.tool_calls = payload.get("tool_calls", [])
+                            state.is_complete = payload.get("is_complete", False)
+                        if event in ("needs_confirmation", "cancelled", "finish"):
+                            return
+                except Exception as e:
+                    yield ("error", str(e))
 
         # Final safety net
         async for ev, pl in self._generate_final_summary():
             yield (ev, pl)
 
     # ---------------- Original streaming, tools, reflection, summary ----------------
-    async def _llm_stream_with_tools(self, iteration: int) -> AsyncIterator[Tuple[str, Any]]:
+    async def _llm_stream_with_tools(
+        self, iteration: int
+    ) -> AsyncIterator[Tuple[str, Any]]:
         self.phase = Phase.EXECUTE
         messages = await self.context_manager.provide_context(
             query="",
@@ -313,7 +386,6 @@ class Agent:
         }
 
         yield ("llm_response", state)
-
 
     async def _execute_tools(
         self, tool_calls: List[Dict], iteration: int
