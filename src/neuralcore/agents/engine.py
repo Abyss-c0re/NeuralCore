@@ -281,12 +281,11 @@ class WorkflowEngine:
         temperature: float = 0.7,
         max_tokens: int = 1212,
         stop_event: Optional[asyncio.Event] = None,
-        workflow: Optional[str] = None,  # one-shot override
+        workflow: Optional[str] = None,
     ) -> AsyncIterator[Tuple[str, Any]]:
         if workflow:
             self.switch_workflow(workflow)
 
-        # ... (rest of the original reset logic unchanged) ...
         self.agent._reset_state()
         self.agent.task = user_prompt
         self.agent.goal = user_prompt
@@ -319,7 +318,9 @@ class WorkflowEngine:
             for step_config in self.workflow_steps.copy():
                 if isinstance(step_config, dict):
                     step_name = step_config.get("name", "")
-                    overrides = step_config.get("overrides", {})
+                    overrides = step_config.get(
+                        "overrides", {}
+                    ).copy()  # copy so we can pop safely
                 else:
                     step_name = step_config
                     overrides = {}
@@ -329,7 +330,7 @@ class WorkflowEngine:
                     yield ("warning", f"Unknown step: {step_name}")
                     continue
 
-                # === OPTION 3: STRUCTURED if: CONDITION ===
+                # === OPTION 3: CONDITION ===
                 if isinstance(step_config, dict):
                     condition = step_config.get("if") or step_config.get("when")
                     if condition is not None:
@@ -343,17 +344,37 @@ class WorkflowEngine:
                                 },
                             )
                             continue
-                # =========================================
 
-                # Apply overrides (original logic)
+                # === NEW: DYNAMIC TOOLSET SWITCHING PER STEP ===
+                if "toolset" in overrides:
+                    toolset_value = overrides.pop("toolset")  # consume it
+                    if toolset_value:
+                        # True switch: unload everything dynamic first, then load requested set(s)
+                        self.agent.manager.unload_all()  # keeps browse_tools
+                        loaded_count = self.agent.manager.load_toolsets(toolset_value)
+
+                        yield (
+                            "toolset_switched",
+                            {
+                                "step": step_name,
+                                "toolset": toolset_value,
+                                "loaded_count": loaded_count,
+                                "message": f"Switched tools to {toolset_value}",
+                            },
+                        )
+                # ================================================
+
+                # Apply remaining normal overrides (client, temperature, etc.)
                 original_params = {
                     k: getattr(self.agent, k)
                     for k in ("client", "temperature", "max_tokens", "system_prompt")
                 }
+
                 if "client" in overrides and overrides["client"] in getattr(
                     self.agent, "clients", {}
                 ):
                     self.agent.client = self.agent.clients[overrides["client"]]
+
                 for k in ("temperature", "max_tokens", "system_prompt"):
                     if k in overrides:
                         setattr(self.agent, k, overrides[k])
@@ -362,22 +383,14 @@ class WorkflowEngine:
                     async for event, payload in handler(iteration, state):
                         yield (event, payload)
 
-                        # Runtime workflow switching
-
                         if event == "switch_workflow":
-                            if isinstance(payload, dict):
-                                target = payload.get("name")
-                                if isinstance(target, str):
-                                    self.switch_workflow(target)
-                                else:
-                                    # handle missing / wrong type "name"
-                                    print("Error: 'name' must be a string")
-                                    # or raise ValueError, return, logger.error(...), etc.
-                            elif isinstance(payload, str):
-                                self.switch_workflow(payload)
-                            else:
-                                # unexpected payload type
-                                print(f"Unexpected payload type: {type(payload)}")
+                            target = (
+                                payload.get("name")
+                                if isinstance(payload, dict)
+                                else payload
+                            )
+                            if isinstance(target, str):
+                                self.switch_workflow(target)
 
                         if event in ("needs_confirmation", "cancelled", "finish"):
                             return

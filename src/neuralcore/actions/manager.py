@@ -1,5 +1,5 @@
 import math
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Union
 from neuralcore.utils.search import fuzzy_score, keyword_score
 from neuralcore.actions.actions import Action, ActionSet
 
@@ -43,46 +43,196 @@ def map_type_to_json(param_annotation):
 # ─────────────────────────────────────────────────────────────
 # Dynamic Action Manager
 # ─────────────────────────────────────────────────────────────
+
+
 class DynamicActionManager:
-    """Manages dynamic tools loaded for the session."""
+    """Manages dynamically loaded tools for the current session."""
 
     def __init__(self, registry: "ActionRegistry"):
         self.registry = registry
         self.current_set = ActionSet("DynamicCore")
-        self._loaded = set()
-        logger.debug(" DynamicActionManager initialized")
+        self._loaded_tools: Set[str] = set()  # tool names currently active
+        self._tool_to_set: Dict[str, str] = {}  # tool_name → originating set_name
+        self._set_to_tools: Dict[
+            str, Set[str]
+        ] = {}  # set_name → {tool_names loaded from it}
 
-    def add(self, action: Action):
-        logger.debug(f" Adding action '{action.name}' to DynamicCore")
+        # Always keep browse_tools available
+        self._persistent_tools: Set[str] = {"browse_tools"}
+
+        logger.debug("DynamicActionManager initialized")
+
+    def add(self, action: Action, origin_set: Optional[str] = None):
+        """Add a single action to the current dynamic set."""
+        if action.name in self._loaded_tools:
+            logger.debug(f"Tool '{action.name}' already loaded — skipping")
+            return
+
         self.current_set.add(action)
+        self._loaded_tools.add(action.name)
 
+        if origin_set:
+            self._tool_to_set[action.name] = origin_set
+            self._set_to_tools.setdefault(origin_set, set()).add(action.name)
+
+        logger.debug(
+            f"Added tool '{action.name}' to DynamicCore (origin: {origin_set or 'manual'})"
+        )
+
+    def load_tools(self, tool_names: Union[str, List[str]]):
+        """Load specific tools by name (manual / one-off loading)."""
+        if isinstance(tool_names, str):
+            tool_names = [tool_names]
+
+        loaded = []
+        for name in tool_names:
+            if name in self._loaded_tools:
+                continue
+            if name not in self.registry.all_actions:
+                logger.warning(f"Tool '{name}' not found in registry")
+                continue
+
+            action, origin_set = self.registry.all_actions[name]
+            self.add(action, origin_set=origin_set)
+            loaded.append(name)
+
+        if loaded:
+            logger.info(f"Loaded {len(loaded)} individual tools: {', '.join(loaded)}")
+
+    def load_toolsets(self, toolset_names: Union[str, List[str]]) -> int:
+        """Load all actions from one or more named ActionSets."""
+        if isinstance(toolset_names, str):
+            toolset_names = [n.strip() for n in toolset_names.split(",") if n.strip()]
+
+        loaded_count = 0
+        loaded_tools_list = []
+
+        for set_name in toolset_names:
+            if set_name not in self.registry.sets:
+                logger.warning(f"Toolset '{set_name}' not found in registry")
+                continue
+
+            action_set = self.registry.sets[set_name]
+            newly_loaded = []
+
+            for action in action_set.actions:
+                if action.name in self._loaded_tools:
+                    continue
+                # Skip persistent tools if already loaded
+                if action.name in self._persistent_tools:
+                    continue
+
+                self.add(action, origin_set=set_name)
+                newly_loaded.append(action.name)
+                loaded_count += 1
+                loaded_tools_list.append(action.name)
+
+            if newly_loaded:
+                logger.info(
+                    f"Loaded {len(newly_loaded)} tools from set '{set_name}': {', '.join(newly_loaded)}"
+                )
+
+        if loaded_count > 0:
+            logger.info(f"Total new tools loaded from toolsets: {loaded_count}")
+
+        return loaded_count
+
+    def unload_tools(self, tool_names: Union[str, List[str], None] = None):
+        """Unload specific tools by name."""
+        if tool_names is None:
+            self.unload_all()
+            return
+
+        if isinstance(tool_names, str):
+            tool_names = [tool_names]
+
+        removed = []
+        for name in tool_names:
+            if name in self._persistent_tools:
+                logger.debug(f"Skipping unload of persistent tool: {name}")
+                continue
+            if name not in self._loaded_tools:
+                continue
+
+            self.current_set.remove_by_name(
+                name
+            )  # assumes ActionSet has .remove(name) method
+            self._loaded_tools.remove(name)
+            self._tool_to_set.pop(name, None)
+
+            # Clean up reverse mapping
+            for s, tools in self._set_to_tools.items():
+                if name in tools:
+                    tools.remove(name)
+                    if not tools:
+                        self._set_to_tools.pop(s, None)
+                    break
+
+            removed.append(name)
+
+        if removed:
+            logger.info(f"Unloaded tools: {', '.join(removed)}")
+
+    def unload_toolsets(self, toolset_names: Union[str, List[str], None] = None):
+        """Unload all tools that originated from one or more toolsets."""
+        if toolset_names is None:
+            self.unload_all()
+            return
+
+        if isinstance(toolset_names, str):
+            toolset_names = [n.strip() for n in toolset_names.split(",") if n.strip()]
+
+        to_unload = set()
+        for set_name in toolset_names:
+            if set_name in self._set_to_tools:
+                to_unload.update(self._set_to_tools[set_name])
+
+        if to_unload:
+            self.unload_tools(list(to_unload))
+            logger.info(f"Unloaded all tools from sets: {', '.join(toolset_names)}")
+
+    def unload_all(self):
+        """Unload all non-persistent dynamic tools."""
+        to_remove = self._loaded_tools - self._persistent_tools
+        if not to_remove:
+            return
+
+        for name in list(to_remove):
+            self.current_set.remove_by_name(name)
+            self._loaded_tools.remove(name)
+            self._tool_to_set.pop(name, None)
+
+        self._set_to_tools.clear()  # all dynamic origins gone
+
+        # Re-add persistent tools (e.g. browse_tools)
+        for p_name in self._persistent_tools:
+            if p_name in self.registry.all_actions:
+                action, _ = self.registry.all_actions[p_name]
+                if p_name not in self._loaded_tools:
+                    self.current_set.add(action)
+                    self._loaded_tools.add(p_name)
+
+        logger.info(
+            f"Unloaded all dynamic tools. Retained persistent: {', '.join(self._persistent_tools)}"
+        )
+
+    def is_loaded(self, tool_name: str) -> bool:
+        return tool_name in self._loaded_tools
+
+    def get_loaded_toolsets(self) -> List[str]:
+        """Return list of toolsets that currently have loaded tools."""
+        return list(self._set_to_tools.keys())
+
+    def get_tool_origin(self, tool_name: str) -> Optional[str]:
+        """Return which toolset originally loaded this tool."""
+        return self._tool_to_set.get(tool_name)
+
+    # Existing properties (unchanged)
     def get_llm_tools(self) -> List[Dict[str, Any]]:
-        """Return dynamic tools in a format suitable for the LLM to call."""
         return self.current_set.get_llm_tools()
 
     def get_executor(self, name: str) -> Optional[Action]:
         return self.current_set.by_name.get(name)
-
-    def load_tools(self, tool_names: List[str]):
-        logger.debug(f" Loading tools dynamically: {tool_names}")
-        for name in tool_names:
-            if name in self._loaded:
-                logger.debug(f" Tool '{name}' already loaded, skipping")
-                continue
-            if name not in self.registry.all_actions:
-                print(f"[Warning] Tool '{name}' not found in registry, skipping")
-                continue
-            action, _ = self.registry.all_actions[name]
-            self.add(action)
-            self._loaded.add(name)
-            logger.debug(f" Tool '{name}' loaded into DynamicCore")
-
-    def unload_all(self):
-        browser = self.current_set.by_name.get("browse_tools")
-        self.current_set = ActionSet("DynamicCore")
-        if browser:
-            self.current_set.add(browser)
-        logger.debug(" Unloaded all dynamic tools, retained ToolBrowser")
 
     @property
     def actions(self):
@@ -342,7 +492,9 @@ def tool(set_name: str, **kwargs):
 
         # ---- Immediately add to search index ----
         registry._add_to_index(action, set_name)
-        logger.debug(f"Registered action '{name}' under set '{set_name}' with required args: {required}")
+        logger.debug(
+            f"Registered action '{name}' under set '{set_name}' with required args: {required}"
+        )
 
         return fn
 
