@@ -107,3 +107,5 @@ class Workflow:
         logger.info(
             f"✅ Registered {count} steps from {instance.__class__.__name__} into engine '{workflow_name}'"
         )
+
+workflow = Workflow()

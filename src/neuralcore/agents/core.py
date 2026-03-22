@@ -7,8 +7,7 @@ from neuralcore.actions.manager import registry
 from neuralcore.agents.engine import WorkflowEngine
 from neuralcore.cognition.memory import ContextManager
 from neuralcore.core.client_factory import get_clients
-from neuralcore.utils.tool_loader import load_tool_sets
-from neuralcore.workflows.default_flow import AgentFlow, workflow
+
 
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
@@ -26,9 +25,6 @@ class Agent:
 
         client_name = self.config.get("client", "main")
         clients = get_clients()
-        self.clients = clients
-        if client_name not in clients:
-            raise ValueError(f"Client '{client_name}' not found")
         self.client = clients[client_name]
 
         self.name = self.config.get("name", f"Agent-{agent_id}")
@@ -41,30 +37,52 @@ class Agent:
             "system_prompt",
             self.client.system_prompt if hasattr(self.client, "system_prompt") else "",
         )
+
         self.registry = registry
         self.manager = registry.manager
         self.context_manager = ContextManager()
         self.workflow = WorkflowEngine(self)
-        workflow.register_to(self, AgentFlow(self))
 
-        self._load_agent_tools()
-
-        self._reset_state()
+    def attach_tools(self):
+        """Call after instantiating Agent to load tool sets."""
+        tool_sets = self.config.get("tool_sets", [])
+        if tool_sets:
+            self.loader.load_tool_sets(sets_to_load=tool_sets)
+        # Explicitly register all actions in the registry
+        for action_name in self.registry.all_actions:
+            self.registry.manager.load_tools([action_name])
 
     def _load_agent_config(self, agent_id: str, config_file: Optional[Path]) -> dict:
-        if config_file and config_file.exists():
-            with open(config_file, "r") as f:
-                full_cfg = yaml.safe_load(f)
-            cfg = full_cfg.get("agents", {}).get(agent_id, {})
+        print(f"[DEBUG] Loading config for agent_id='{agent_id}'")
+        if config_file:
+            print(f"[DEBUG] Using config file: {config_file}")
+            if config_file.exists():
+                with open(config_file, "r") as f:
+                    full_cfg = yaml.safe_load(f)
+                print(
+                    f"[DEBUG] Config file loaded, keys at top level: {list(full_cfg.keys())}"
+                )
+                cfg = full_cfg.get("agents", {}).get(agent_id, {})
+            else:
+                print(f"[WARNING] Config file does not exist: {config_file}")
+                cfg = {}
         else:
-            cfg = getattr(self.loader, "config", {}).get("agents", {}).get(agent_id, {})
+            print(f"[DEBUG] Using loader.config")
+            loader_config_agents = getattr(self.loader, "config", {}).get("agents", {})
+            print(
+                f"[DEBUG] Agents in loader.config: {list(loader_config_agents.keys())}"
+            )
+            cfg = loader_config_agents.get(agent_id, {})
+
         if not cfg:
+            print(f"[ERROR] Agent '{agent_id}' not found in config")
             raise ValueError(f"Agent '{agent_id}' not found")
+        print(f"[DEBUG] Loaded config for agent '{agent_id}': {cfg.keys()}")
         return cfg
 
     def _load_agent_tools(self):
         tool_sets = self.config.get("tool_sets", [])
-        load_tool_sets(self.loader, app_root=self.app_root, sets_to_load=tool_sets)
+        self.loader.load_tool_sets(sets_to_load=tool_sets)
         for action_name in self.registry.all_actions:
             self.registry.manager.load_tools([action_name])
 

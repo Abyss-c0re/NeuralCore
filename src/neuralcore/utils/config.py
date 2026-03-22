@@ -1,5 +1,7 @@
 import os
+import sys
 import yaml
+import importlib
 from pathlib import Path
 
 
@@ -7,109 +9,93 @@ class ConfigLoader:
     """
     Loads config from YAML + ENV hybrid with secret resolution.
     Provides defaults if nothing is specified.
+    Also automatically loads tool sets and workflow sets.
     """
 
     DEFAULT_API_KEY = "not-needed"
     DEFAULT_CONFIG_FILE = "config.yaml"
 
-    def __init__(self, cli_path: str | None = None):
+    def __init__(self, cli_path: str | None = None, app_root: Path | None = None):
+        self.app_root = app_root or Path.cwd()
         self.config_path = self._resolve_config_path(cli_path)
         self.config = self._load_yaml(self.config_path)
 
+        # Automatically load tools and workflows
+
+    # --------------------------
+    # Config resolution
+    # --------------------------
     def _resolve_config_path(self, cli_path: str | None) -> Path | None:
-        """Determine the config file path from CLI, ENV, or default locations."""
+        # 1️⃣ CLI argument
         if cli_path:
-            return Path(cli_path)
+            path = Path(cli_path).expanduser().resolve()
+            print(f"[DEBUG] Using CLI config path: {path}")
+            return path
 
+        # 2️⃣ ENV variable
         if env_path := os.getenv("NEURALCORE_CONFIG"):
-            return Path(env_path)
+            path = Path(env_path).expanduser().resolve()
+            print(f"[DEBUG] Using config from NEURALCORE_CONFIG: {path}")
+            return path
 
-        local_path = Path(self.DEFAULT_CONFIG_FILE)
+        # 3️⃣ Project root (use app_root!)
+        local_path = (self.app_root / "config.yaml").resolve()
         if local_path.exists():
+            print(f"[DEBUG] Using project config: {local_path}")
             return local_path
 
-        # Corrected default global path
-        global_path = Path.home() / ".neuralcore" / self.DEFAULT_CONFIG_FILE
+        # 4️⃣ Global fallback
+        global_path = Path.home() / ".neuralcore" / "config.yaml"
         if global_path.exists():
+            print(f"[DEBUG] Using global config: {global_path}")
             return global_path
 
-        # If no config found, return None
+        print("[WARNING] No config file found")
         return None
 
     def _load_yaml(self, path: Path | None) -> dict:
-        """Load YAML config file, or return empty dict if not found."""
         if path is None or not path.exists():
+            print(f"[DEBUG] No YAML found at path: {path}")
             return {}
+        print(f"[DEBUG] Loading YAML from: {path}")
         with open(path, "r") as f:
             data = yaml.safe_load(f) or {}
-            if not isinstance(data, dict):
-                raise ValueError(
-                    f"YAML config must be a dict at top level, got {type(data)}"
-                )
-            return data
+        return data
 
+    # --------------------------
+    # Generic config getters
+    # --------------------------
     def get_client_config(self, client_name: str) -> dict:
-        """Return config dict for a specific client."""
-        clients = self.config.get("clients", {})
-        return clients.get(client_name, {})
+        return self.config.get("clients", {}).get(client_name, {})
 
     def resolve_secret(self, client_name: str) -> str:
-        """
-        Resolve API key for the given client.
-        Priority: ENV > YAML > default ("not-needed")
-        """
         cfg = self.get_client_config(client_name)
-
-        # Check for ENV override first
         if env_key := cfg.get("api_key_env"):
             if val := os.getenv(env_key):
                 return val
-
-        # Then YAML
         if val := cfg.get("api_key"):
             return val
-
-        # Fallback
         return self.DEFAULT_API_KEY
 
     def get_system_prompt(self) -> str:
-        """Return system prompt from config or default."""
         return self.config.get(
             "system_prompt",
             "You are terminal chat assistant, use provided tools if needed",
         )
 
     def get_agent_config(self, agent_name: str) -> dict:
-        """Return config for an agent (like max_iterations)"""
-        agents = self.config.get("agents", {})
-        return agents.get(agent_name, {})
+        return self.config.get("agents", {}).get(agent_name, {})
 
     def get_app_config(self) -> dict:
-        """Return runtime config for the single interactive app"""
         return self.config.get("app", {})
 
     def get_logging_config(self) -> dict:
-        """
-        Return logging-related configuration with defaults.
-        Includes:
-          - logging_enabled
-          - log_level
-          - log_to_file
-          - log_to_ui
-          - log_file
-        """
         app_cfg = self.get_app_config()
         log_dir_default = Path.home() / ".neuralcore"
-
-        # Ensure the default directory exists
         log_dir_default.mkdir(parents=True, exist_ok=True)
-
         log_file = app_cfg.get("log_file", log_dir_default / "neuralcore.log")
-
-        # Expand ~ if user provided path like '~/logs/app.log'
         if isinstance(log_file, str):
             log_file = Path(os.path.expanduser(log_file))
-
         return {
             "logging_enabled": app_cfg.get("logging_enabled", True),
             "log_level": app_cfg.get("log_level", "info"),
@@ -118,6 +104,264 @@ class ConfigLoader:
             "log_file": log_file,
         }
 
+    # --------------------------
+    # Tool & Workflow getters
+    # --------------------------
+    def get_tool_sets(self) -> dict:
+        return self.config.get("tools", {})
+
+    # --------------------------
+    # Loader for tool sets
+    # --------------------------
+    def load_tool_sets(self, sets_to_load: list[str] | None = None):
+        """
+        Load all tool sets from config, supporting:
+        - external folders (`folder` in config)
+        - default internal folders (app_root/tools/<set_name>/)
+        """
+        app_root = self.app_root
+        sets_cfg = self.config.get("tools", {})
+
+        print(f"[DEBUG] App root: {app_root}")
+        print(f"[DEBUG] Sets to load: {sets_to_load or 'ALL'}")
+        print(f"[DEBUG] Found sets in config: {list(sets_cfg.keys())}")
+
+        for set_name, cfg in sets_cfg.items():
+            if sets_to_load and set_name not in sets_to_load:
+                print(f"[DEBUG] Skipping set '{set_name}' (not requested)")
+                continue
+
+            print(f"[DEBUG] Loading tool set '{set_name}'")
+
+            folder = cfg.get("folder")
+            # Determine folder path
+            if folder:
+                folder_path = Path(folder).expanduser().resolve()
+                print(
+                    f"[DEBUG] Using external folder for set '{set_name}': {folder_path}"
+                )
+                if not folder_path.exists() or not folder_path.is_dir():
+                    print(f"[WARNING] Tool folder '{folder_path}' does not exist")
+                    continue
+            else:
+                folder_path = app_root / "tools" / set_name
+                if not folder_path.exists() or not folder_path.is_dir():
+                    fallback_folder = app_root / "tools"
+                    if fallback_folder.exists() and fallback_folder.is_dir():
+                        folder_path = fallback_folder
+                        print(
+                            f"[DEBUG] Fallback folder for set '{set_name}': {folder_path}"
+                        )
+                    else:
+                        print(f"[WARNING] No tools folder found for set '{set_name}'")
+                        continue
+                else:
+                    print(
+                        f"[DEBUG] Using internal folder for set '{set_name}': {folder_path}"
+                    )
+
+            sys.path.insert(0, str(folder_path))
+            imported_any = False
+            for py_file in folder_path.glob("*.py"):
+                if py_file.name == "__init__.py":
+                    continue
+                try:
+                    importlib.import_module(py_file.stem)
+                    print(f"[INFO] Imported '{py_file.name}' for set '{set_name}'")
+                    imported_any = True
+                except Exception as e:
+                    print(f"[ERROR] Failed to import {py_file.name}: {e}")
+            sys.path.pop(0)
+
+            # Registry check
+            try:
+                from neuralcore.actions.manager import registry
+
+                if imported_any:
+                    if getattr(registry, "sets", {}).get(set_name):
+                        print(f"[INFO] Tool set '{set_name}' registered successfully")
+                    else:
+                        print(
+                            f"[WARNING] Tool set '{set_name}' imported but not found in registry"
+                        )
+                else:
+                    print(f"[WARNING] No .py files imported for set '{set_name}'")
+            except ImportError:
+                if not imported_any:
+                    print(f"[WARNING] No .py files imported for set '{set_name}'")
+
+    def load_workflow_sets(self, engine):
+        """
+        Load workflow sets for the agent's workflow engine.
+
+        Features:
+        - Reuse global workflows in agents (by name)
+        - Python modules (*.py) and YAML workflows (*.yml, *.yaml)
+        - Fully resolves steps into engine.workflow_steps
+        - Safe fallback to default workflow
+        """
+        agent_cfg = getattr(engine.agent, "config", {})
+        agent_workflow_cfg = agent_cfg.get("workflow", {})
+        global_workflows = self.config.get("workflows", {})
+
+        # 1️⃣ Resolve agent workflows from global workflows
+        resolved_workflows = {}
+        for wf_key, wf_ref in agent_workflow_cfg.items():
+            if isinstance(wf_ref, dict) and "name" in wf_ref:
+                wf_name = wf_ref["name"]
+                if wf_name in global_workflows:
+                    resolved_workflows[wf_key] = global_workflows[wf_name]
+                else:
+                    resolved_workflows[wf_key] = wf_ref
+            else:
+                resolved_workflows[wf_key] = wf_ref
+
+        engine.agent.config["workflow"] = resolved_workflows
+
+        # 2️⃣ Determine which workflow to use for this agent
+        if resolved_workflows:
+            wf_name, wf_data = next(iter(resolved_workflows.items()))
+
+            # If workflow is only a name reference, fetch full data from global workflows
+            if "steps" not in wf_data and wf_name in global_workflows:
+                wf_data = global_workflows[wf_name]
+
+            # Always resolve steps
+            engine.workflow_steps = engine._resolve_steps(
+                wf_data.get("steps", getattr(engine, "DEFAULT_WORKFLOW", []))
+            )
+            engine.workflow_description = wf_data.get("description", "Custom workflow")
+            engine.current_workflow_name = wf_name
+            print(f"[DEBUG] Using workflow '{wf_name}' for agent '{engine.agent.name}'")
+        else:
+            # fallback to default workflow
+            engine.workflow_steps = engine._resolve_steps(
+                getattr(engine, "DEFAULT_WORKFLOW", [])
+            )
+            engine.workflow_description = "Default workflow"
+            engine.current_workflow_name = "Default workflow"
+            print(
+                f"[DEBUG] No workflow configured, using default for agent '{engine.agent.name}'"
+            )
+
+        # 3️⃣ Optionally load workflow sets from folders (like tools)
+        sets_cfg = getattr(
+            engine, "workflow_sets_config", {}
+        )  # can be loaded from app config
+        app_root = getattr(engine, "app_root", Path.cwd())
+
+        for set_name, cfg in sets_cfg.items():
+            folder = cfg.get("folder")
+            if folder:
+                folder_path = Path(folder).expanduser().resolve()
+            else:
+                folder_path = app_root / "workflows" / set_name
+                if not folder_path.exists():
+                    folder_path = app_root / "workflows"
+
+            if not folder_path.exists() or not folder_path.is_dir():
+                print(
+                    f"[WARNING] Workflow folder not found for set '{set_name}': {folder_path}"
+                )
+                continue
+
+            sys.path.insert(0, str(folder_path))
+            imported_any = False
+
+            # Load Python workflow modules
+            for py_file in folder_path.glob("*.py"):
+                if py_file.name == "__init__.py":
+                    continue
+                try:
+                    importlib.import_module(py_file.stem)
+                    imported_any = True
+                    print(
+                        f"[INFO] Imported Python workflow '{py_file.name}' as set '{set_name}'"
+                    )
+                except Exception as e:
+                    print(f"[ERROR] Failed to import workflow {py_file.name}: {e}")
+
+            # Load YAML workflow files
+            for yaml_file in list(folder_path.glob("*.yml")) + list(
+                folder_path.glob("*.yaml")
+            ):
+                try:
+                    import yaml
+
+                    with open(yaml_file, "r") as f:
+                        wf_data = yaml.safe_load(f)
+                    if not hasattr(engine, "registered_workflows"):
+                        engine.registered_workflows = {}
+                    engine.registered_workflows[set_name] = wf_data
+                    imported_any = True
+                    print(
+                        f"[INFO] Loaded workflow YAML '{yaml_file.name}' as set '{set_name}'"
+                    )
+                except Exception as e:
+                    print(f"[ERROR] Failed to load workflow YAML {yaml_file.name}: {e}")
+
+            sys.path.pop(0)
+
+            if not imported_any:
+                print(f"[WARNING] No workflows loaded for set '{set_name}'")
+
+    # --------------------------
+    # Loader for workflow sets (YAML-based)
+
+    def get_workflow_sets(self, client_name: str | None = None) -> dict:
+        """
+        Return dict of workflow sets for a client.
+        Priority:
+          1. Client config workflows (client.workflow)
+          2. Default workflows in app_root/workflows/
+        """
+        if client_name:
+            client_cfg = self.get_client_config(client_name)
+            return client_cfg.get("workflow_sets", {})
+        return self.config.get("workflows", {})
+
+    # Inside ConfigLoader
+    def load_agent_from_config(self, agent_id: str, loader=None) -> "Agent":
+        from neuralcore.agents.core import Agent, get_clients  # break circular import
+
+        app_root = self.app_root
+
+        # --- Agent config ---
+        agent_cfg = self.get_agent_config(agent_id)
+        if not agent_cfg:
+            raise ValueError(f"No agent config found for '{agent_id}'")
+
+        # --- Client config ---
+        clients = get_clients()
+        client_name = agent_cfg.get("client")
+        if client_name not in clients:
+            raise ValueError(f"Client '{client_name}' not found for agent '{agent_id}'")
+        client = clients[client_name]
+
+        # --- Instantiate Agent ---
+        agent = Agent(
+            agent_id=agent_cfg.get("id", agent_id),
+            loader=self,
+            app_root=app_root,
+        )
+        agent.client = client
+        agent.name = agent_cfg.get("name", f"Agent-{agent_id}")
+        agent.description = agent_cfg.get("description", "")
+        agent.max_iterations = agent_cfg.get("max_iterations", 25)
+        agent.max_reflections = agent_cfg.get("max_reflections", 4)
+        agent.temperature = agent_cfg.get("temperature", 0.3)
+        agent.max_tokens = agent_cfg.get("max_tokens", 12048)
+        agent.system_prompt = agent_cfg.get(
+            "system_prompt", getattr(client, "system_prompt", "")
+        )
+
+        # --- Load tools ---
+        tools_to_load = agent_cfg.get("tool_sets", [])
+        if tools_to_load:
+            self.load_tool_sets(sets_to_load=tools_to_load)
+
+        return agent
+
 
 # --------------------------
 # Singleton instance
@@ -125,8 +369,10 @@ class ConfigLoader:
 loader: ConfigLoader | None = None
 
 
-def get_loader(cli_path: str | None = None) -> ConfigLoader:
+def get_loader(
+    cli_path: str | None = None, app_root: Path | None = None
+) -> ConfigLoader:
     global loader
     if loader is None:
-        loader = ConfigLoader(cli_path)
+        loader = ConfigLoader(cli_path, app_root)
     return loader

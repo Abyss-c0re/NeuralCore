@@ -1,15 +1,14 @@
 import re
-import asyncio
+
 import json
-from typing import Optional
-from neuralcore.workflows.registry import Workflow
+
+from neuralcore.workflows.registry import workflow
 from neuralcore.utils.logger import Logger
 from neuralcore.agents.state import AgentState, Phase
 
 
 logger = Logger.get_logger()
 
-workflow = Workflow()
 logger.debug("Global workflow registry created")
 
 
@@ -20,9 +19,9 @@ class AgentFlow:
     Uses self.engine.xxx to call the executors that stay in WorkflowEngine.
     """
 
-    def __init__(self, agent):
+    def __init__(self, agent,workflow):
         self.agent = agent
-        self.engine = agent.workflow
+        self.engine = workflow
 
     @workflow.set(
         "default",

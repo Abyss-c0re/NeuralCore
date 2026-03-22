@@ -5,6 +5,8 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Callable, Un
 from neuralcore.agents.state import AgentState, Phase
 from neuralcore.utils.logger import Logger
 from neuralcore.utils.exceptions_handler import ConfirmationRequired
+from neuralcore.workflows.default_flow import AgentFlow
+from neuralcore.utils.config import get_loader
 
 
 logger = Logger.get_logger()
@@ -70,6 +72,15 @@ class WorkflowEngine:
             description="Default ReAct loop + persistent goal + efficient ContextManager",
             steps=self.DEFAULT_WORKFLOW,
         )
+        flow = AgentFlow(self.agent, self)
+
+        for attr_name in dir(flow):
+            if attr_name.startswith("_wf_"):
+                step_name = attr_name[4:]
+                method = getattr(flow, attr_name)
+
+                if callable(method):
+                    self._step_handlers[step_name] = method
 
     def _build_objective_reminder(self) -> str:
         return (
@@ -219,21 +230,11 @@ class WorkflowEngine:
         return True
 
     def load_workflow_from_config(self):
-        wf_config = getattr(self.agent, "config", {}).get("workflow", {})
-        if isinstance(wf_config, dict) and "name" in wf_config:
-            name = wf_config["name"]
-            if name in self.registered_workflows:
-                wf = self.registered_workflows[name]
-                self.workflow_steps = self._resolve_steps(wf["steps"])
-                self.workflow_description = wf["description"]
-                self.current_workflow_name = name
-                logger.info(f"Loaded named workflow → {name}")
-                return
 
-        raw_steps = wf_config.get("steps", self.DEFAULT_WORKFLOW)
-        self.workflow_steps = self._resolve_steps(raw_steps)
-        self.workflow_description = wf_config.get("description", "Custom workflow")
-        self.current_workflow_name = "custom"
+        loader = get_loader()
+
+        loader.load_workflow_sets(self)
+
         logger.info(
             f"Workflow loaded: {self.current_workflow_name} — {self.workflow_description}"
         )
@@ -259,6 +260,8 @@ class WorkflowEngine:
         self.agent.system_prompt = system_prompt
         self.agent.temperature = temperature
         self.agent.max_tokens = max_tokens
+        logger.info(f"Starting run with workflow: {self.current_workflow_name}")
+        logger.info(f"Active steps: {self.workflow_steps}")
 
         if hasattr(self.agent, "context_manager"):
             self.agent.context_manager.set_goal(user_prompt)

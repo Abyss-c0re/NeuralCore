@@ -6,6 +6,7 @@ from neuralcore.utils.logger import Logger
 
 logger = Logger.get_logger()
 
+
 def safe_parse_json(raw_text: str):
     """Safely extract and parse JSON from raw LLM output."""
     match = re.search(r"\{.*\}", raw_text, re.DOTALL)
