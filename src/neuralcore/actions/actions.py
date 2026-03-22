@@ -2,6 +2,10 @@ import asyncio
 
 from typing import Any, Callable, Dict, List, Optional, Union, Awaitable
 from neuralcore.utils.exceptions_handler import ConfirmationRequired
+from neuralcore.utils.logger import Logger
+
+
+logger = Logger.get_logger()
 
 
 class Action:
@@ -60,18 +64,53 @@ class Action:
         ).lower()
 
     async def __call__(self, **kwargs) -> Any:
+        logger.info(f"[ACTION START] {self.name}")
+        logger.debug(f"[ACTION INPUT] {self.name} kwargs={kwargs}")
+
         if self.require_confirmation:
             preview = self.confirmation_preview(kwargs)
+            logger.info(f"[ACTION CONFIRMATION REQUIRED] {self.name} preview={preview}")
             raise ConfirmationRequired(self.name, kwargs, preview)
 
-        result = self.executor(**kwargs)
+        try:
+            result = self.executor(**kwargs)
 
-        if asyncio.iscoroutine(result) or isinstance(result, Awaitable):
-            result = await result
+            if asyncio.iscoroutine(result) or isinstance(result, Awaitable):
+                logger.debug(f"[ACTION AWAITING] {self.name} awaiting async result")
+                result = await result
 
-        self.usage_count += 1  # usage learning
+            self.usage_count += 1
 
-        return result
+            logger.debug(
+                f"[ACTION RAW RESULT] {self.name} type={type(result).__name__} result={str(result)[:500]}"
+            )
+
+            if result is None or result == "" or result == {}:
+                normalized = {
+                    "status": "success",
+                    "action": self.name,
+                    "message": f"{self.name} executed successfully",
+                    "args": kwargs,
+                }
+                logger.info(f"[ACTION NORMALIZED EMPTY RESULT] {self.name}")
+                logger.debug(f"[ACTION OUTPUT] {self.name} result={normalized}")
+                return normalized
+
+            logger.info(f"[ACTION SUCCESS] {self.name}")
+            logger.debug(f"[ACTION OUTPUT] {self.name} result={str(result)[:500]}")
+            return result
+
+        except ConfirmationRequired:
+            raise
+
+        except Exception as exc:
+            logger.error(f"[ACTION ERROR] {self.name} error={exc}", exc_info=True)
+            return {
+                "status": "error",
+                "action": self.name,
+                "error": str(exc),
+                "args": kwargs,
+            }
 
 
 class ActionSet:
@@ -96,11 +135,16 @@ class ActionSet:
                 self.add(action)
 
     def add(self, action: Action) -> None:
-        """Add an action. Raises ValueError if name already exists."""
         if action.name in self.by_name:
+            logger.error(f"[ACTIONSET DUPLICATE] {action.name}")
             raise ValueError(f"Action '{action.name}' already exists in this set")
+
         self.actions.append(action)
         self.by_name[action.name] = action
+
+        logger.info(f"[ACTIONSET ADD] {action.name}")
+        logger.debug(f"[ACTIONSET STATE] total_actions={len(self.actions)}")
+
 
     def get_llm_tools(
         self, include_tools: bool = True, include_functions: bool = True
@@ -127,8 +171,13 @@ class ActionSet:
         return tools
 
     def get_executor(self, name: str) -> Optional[Action]:
-        """Return the Action object (not just the raw executor)."""
-        return self.by_name.get(name)
+        action = self.by_name.get(name)
+        if action:
+            logger.debug(f"[ACTIONSET RESOLVE] Found executor for '{name}'")
+        else:
+            logger.warning(f"[ACTIONSET RESOLVE FAIL] No executor for '{name}'")
+        return action
+
 
     def describe(self) -> Dict[str, Any]:  # ← new helper
         """Returns a lightweight metadata dict useful for tool search / routing."""
@@ -219,7 +268,11 @@ class SequenceAction(Action):
     async def execute(self, **kwargs) -> Dict[str, Any]:
         """
         Execute the sequence with context propagation, auto-response, and optional pausing.
+        Logs every key step for observability.
         """
+        logger.info(f"[SEQUENCE START] {self.name}")
+        logger.debug(f"[SEQUENCE INPUT] {self.name} kwargs={kwargs}")
+
         input_data = kwargs.get("input")
         user_response = kwargs.get("user_response")
         resume_token = kwargs.get("resume_token")
@@ -237,9 +290,13 @@ class SequenceAction(Action):
                 "results": [],
                 "step_outputs": {},
             }
+            logger.debug(f"[SEQUENCE STATE INIT] {self.name} state={self._state}")
         else:
             # Resuming a paused sequence
             if user_response is None and self.is_waiting():
+                logger.warning(
+                    f"[SEQUENCE RESUME FAIL] {self.name} waiting for human input but none provided"
+                )
                 return {
                     "status": "error",
                     "message": "Resume requested but no user_response provided",
@@ -254,14 +311,19 @@ class SequenceAction(Action):
         while step_index < len(self.steps):
             current_action = self.steps[step_index]
             step_name = self.step_names[step_index]
+            logger.info(f"[SEQUENCE STEP START] {self.name} → {step_name} (index={step_index})")
+            logger.debug(f"[SEQUENCE CONTEXT BEFORE] {context}")
 
-            step_kwargs = (
-                {"input": context} if self.propagate_context else kwargs.copy()
-            )
+            step_kwargs = {"input": context} if self.propagate_context else kwargs.copy()
 
             try:
                 result = await current_action(**step_kwargs)
+                logger.debug(f"[STEP EXECUTED] {step_name} result_type={type(result).__name__}")
             except Exception as exc:
+                logger.error(
+                    f"[SEQUENCE STEP ERROR] {self.name} step={step_name} index={step_index} error={exc}",
+                    exc_info=True,
+                )
                 return {
                     "status": "failed",
                     "step": step_name,
@@ -272,9 +334,11 @@ class SequenceAction(Action):
 
             # Handle _ask with auto_response
             if isinstance(result, dict) and "_ask" in result:
+                logger.info(f"[SEQUENCE STEP PAUSED] {step_name} awaiting human input")
                 if auto_response is not None:
                     context["_last_user_response"] = auto_response
                     result.pop("_ask")
+                    logger.debug(f"[SEQUENCE AUTO RESPONSE USED] {step_name} response={auto_response}")
                 else:
                     # Pause for human input
                     state.update(
@@ -299,6 +363,7 @@ class SequenceAction(Action):
 
             # Optional auto-confirmation
             if self.confirm_predicate and self.confirm_predicate(result):
+                logger.info(f"[SEQUENCE STEP CONFIRM] {step_name} awaiting confirmation")
                 state.update(
                     {
                         "step_index": step_index + 1,
@@ -317,6 +382,7 @@ class SequenceAction(Action):
             # Normal step completion
             results.append(result)
             state["step_outputs"][step_name] = result
+            logger.debug(f"[SEQUENCE STEP COMPLETE] {step_name} result={str(result)[:500]}")
 
             if self.propagate_context:
                 if isinstance(result, dict):
@@ -329,6 +395,8 @@ class SequenceAction(Action):
 
         # Sequence completed
         final_result = self._select_output(results, state["step_outputs"])
+        logger.info(f"[SEQUENCE COMPLETE] {self.name} steps_executed={len(self.steps)}")
+        logger.debug(f"[SEQUENCE FINAL RESULT] {str(final_result)[:500]}")
 
         completed_response = {
             "status": "completed",
@@ -341,6 +409,7 @@ class SequenceAction(Action):
 
         self._state = None
         return completed_response
+
 
     def _select_output(self, results: list, named: dict) -> Any:
         if self.output_from is None:
