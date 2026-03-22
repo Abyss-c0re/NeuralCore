@@ -8,6 +8,7 @@ from neuralcore.agents.engine import WorkflowEngine
 from neuralcore.cognition.memory import ContextManager
 from neuralcore.core.client_factory import get_clients
 from neuralcore.utils.tool_loader import load_tool_sets
+from neuralcore.workflows.default_flow import AgentFlow, workflow
 
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
@@ -44,6 +45,8 @@ class Agent:
         self.manager = registry.manager
         self.context_manager = ContextManager()
         self.workflow = WorkflowEngine(self)
+        workflow.register_to(self, AgentFlow(self))
+
         self._load_agent_tools()
 
         self._reset_state()

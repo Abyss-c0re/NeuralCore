@@ -344,7 +344,7 @@ class ActionRegistry:
         self._index.append({"action": action, "set": set_name, "text": searchable})
         logger.debug(f" Added action '{action.name}' to index under set '{set_name}'")
 
-    def search(self, query: str, limit: int = 10):
+    def search(self, query: str, limit: int = 20):
         query = query.lower().strip()
         query_words = query.split()
 
@@ -379,7 +379,7 @@ class ActionRegistry:
         results.sort(key=lambda x: x[0], reverse=True)
         return [(a, s) for _, a, s in results[:limit]]
 
-    def list_all_tools(self, limit: int = 8) -> List[Dict]:
+    def list_all_tools(self, limit: int = 100) -> List[Dict]:
         """
         Returns a list of all tools currently in the registry.
         """
