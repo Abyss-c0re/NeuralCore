@@ -478,23 +478,24 @@ class WorkflowEngine:
             yield (ev, pl)
         self._log_iteration_state(iteration, state)
 
-
     async def _wf_plan_tasks(self, iteration: int, state: AgentState):
+        # Mark phase
         state.phase = Phase.PLAN
         yield ("phase_changed", {"phase": state.phase.value})
 
+        # Only plan if we haven't already
         if not state.planned_tasks:
             prompt = f"""
-Agent must plan a sequence of steps to accomplish the task below. Return STRICT JSON:
+    Agent must plan a sequence of steps to accomplish the task below. Return STRICT JSON:
 
-TASK:
-{self.agent.task}
+    TASK:
+    {self.agent.task}
 
-REQUIREMENTS:
-- Provide an ordered list of concise steps.
-- Each step should be actionable by the agent.
-- Only return JSON: {{ "tasks": ["step1", "step2", ...] }}
-"""
+    REQUIREMENTS:
+    - Provide an ordered list of concise steps.
+    - Each step should be actionable by the agent.
+    - Only return JSON: {{ "tasks": ["step1", "step2", ...] }}
+    """
             raw_response = await self.agent.client.ask(prompt)
             try:
                 plan = json.loads(str(raw_response).strip())
@@ -504,18 +505,41 @@ REQUIREMENTS:
                 state.planned_tasks = []
                 yield ("warning", "Failed to parse planning response")
 
+        # Yield next task reminder
         if state.planned_tasks and state.current_task_index < len(state.planned_tasks):
             next_task = state.planned_tasks[state.current_task_index]
             await self.agent.context_manager.add_message(
                 "system", f"[NEXT TASK REMINDER] {next_task}"
             )
+            state.current_task_index += 1  # increment here so it doesn’t repeat
             yield ("planned_task", {"task": next_task})
 
     async def _wf_execute_if_tools(self, iteration: int, state: AgentState):
-        if state.tool_calls:
-            yield ("tool_calls", state.tool_calls)
-            async for ev, pl in self._execute_tools(state.tool_calls, iteration, state):
-                yield (ev, pl)
+        """
+        Executes any queued tool calls, clears them afterward,
+        and switches the agent phase to DECISION.
+        """
+        if not state.tool_calls:
+            return
+
+        yield ("tool_calls", state.tool_calls)
+
+        async for ev, pl in self._execute_tools(state.tool_calls, iteration, state):
+            yield (ev, pl)
+
+        # --- Clear executed tool calls to avoid repeat ---
+        state.tool_calls = []
+        logger.debug(f"Cleared tool_calls after execution at iteration {iteration}")
+
+        # --- Track executed signatures to prevent double execution ---
+        for r in self.agent.tool_results:
+            sig = f"{r['name']}:{json.dumps(r['args'], sort_keys=True)}"
+            self.agent.executed_signatures.add(sig)
+
+        # --- Switch phase automatically ---
+        state.phase = Phase.DECISION
+        yield ("phase_changed", {"phase": state.phase.value})
+
         self._log_iteration_state(iteration, state)
 
     async def _wf_verify_goal_completion(self, iteration: int, state: AgentState):
@@ -637,7 +661,7 @@ Has the agent FULLY completed the goal? Reply STRICT JSON ONLY:
             max_input_tokens=self.agent.max_tokens,
             reserved_for_output=12000,
             system_prompt=self._build_objective_reminder(),
-            include_logs = True,
+            include_logs=True,
         )
 
         queue = await self.agent.client.stream_with_tools(
@@ -680,6 +704,10 @@ Has the agent FULLY completed the goal? Reply STRICT JSON ONLY:
     async def _execute_tools(
         self, tool_calls: List[Dict], iteration: int, state: AgentState
     ) -> AsyncIterator[Tuple[str, Any]]:
+        """
+        Execute each tool call in sequence. Skips already executed tools.
+        Records outcomes and handles confirmations/errors.
+        """
         state.phase = Phase.EXECUTE
         yield ("phase_changed", {"phase": state.phase.value})
 
@@ -690,55 +718,14 @@ Has the agent FULLY completed the goal? Reply STRICT JSON ONLY:
             except Exception:
                 args = {}
 
-            sig = (name, json.dumps(args, sort_keys=True))
+            sig = f"{name}:{json.dumps(args, sort_keys=True)}"
             if sig in self.agent.executed_signatures:
+                logger.debug(f"Skipping already executed tool: {sig}")
                 continue
+
             self.agent.executed_signatures.add(sig)
 
             executor = self.agent.manager.get_executor(name)
-            if not executor and name != "browse_tools":
-                yield ("tool_not_found", {"name": name, "action": "auto_browse"})
-                browse_executor = self.agent.manager.get_executor("browse_tools")
-                if browse_executor:
-                    try:
-                        search_result = await browse_executor(query=name, limit=8)
-                        yield (
-                            "tool_search_result",
-                            {
-                                "query": name,
-                                "result": search_result,
-                                "loaded_tools": search_result.get("loaded_tools", []),
-                            },
-                        )
-                        executor = self.agent.manager.get_executor(name)
-                        if executor:
-                            yield (
-                                "info",
-                                {"message": f"Tool '{name}' auto-loaded and ready"},
-                            )
-                        else:
-                            yield (
-                                "tool_skipped",
-                                {
-                                    "name": name,
-                                    "reason": "still_not_found_after_search",
-                                },
-                            )
-                            continue
-                    except Exception as exc:
-                        yield ("tool_search_failed", {"query": name, "error": str(exc)})
-                        yield (
-                            "tool_skipped",
-                            {"name": name, "reason": "search_failed"},
-                        )
-                        continue
-                else:
-                    yield (
-                        "tool_skipped",
-                        {"name": name, "reason": "no_browser_available"},
-                    )
-                    continue
-
             if not executor:
                 yield ("tool_skipped", {"name": name, "reason": "no_executor"})
                 continue
@@ -760,6 +747,7 @@ Has the agent FULLY completed the goal? Reply STRICT JSON ONLY:
                     maybe = executor(**args)
                     result = await maybe if asyncio.iscoroutine(maybe) else maybe
 
+                # --- Record results ---
                 await self.agent.context_manager.record_tool_outcome(
                     name, str(result), args
                 )
@@ -772,10 +760,12 @@ Has the agent FULLY completed the goal? Reply STRICT JSON ONLY:
                         f"{name} → {str(result)[:200]}"
                     )
 
+                self.agent.tool_results.append(
+                    {"name": name, "result": result, "args": args}
+                )
                 yield ("tool_result", {"name": name, "result": result})
 
             except ConfirmationRequired as exc:
-                logger.info(f"ConfirmationRequired: {name}")
                 yield ("needs_confirmation", {**exc.__dict__, "tool_calls": tool_calls})
                 return
             except Exception as exc:
@@ -787,10 +777,7 @@ Has the agent FULLY completed the goal? Reply STRICT JSON ONLY:
                     )
                 yield ("tool_result", {"name": name, "result": result, "error": True})
 
-            self.agent.tool_results.append(
-                {"name": name, "result": result, "args": args}
-            )
-
+            # Stop if client requested
             stop_event = getattr(self.agent.client, "_current_stop_event", None)
             if stop_event and getattr(stop_event, "is_set", lambda: False)():
                 yield ("cancelled", f"Stop after {name}")
