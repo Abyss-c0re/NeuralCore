@@ -4,7 +4,7 @@ from pathlib import Path
 
 from neuralcore.utils.logger import Logger
 from neuralcore.actions.manager import registry
-from neuralcore.agents.engine import WorkflowEngine
+from neuralcore.workflows.engine import WorkflowEngine
 from neuralcore.cognition.memory import ContextManager
 from neuralcore.core.client_factory import get_clients
 
