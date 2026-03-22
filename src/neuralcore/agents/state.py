@@ -1,6 +1,6 @@
 from enum import Enum
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional
+from typing import Any, List, Dict, Optional
 
 
 class Phase(str, Enum):
@@ -24,3 +24,5 @@ class AgentState:
     reflection_count: int = 0
     planned_tasks: List[str] = field(default_factory=list)
     current_task_index: int = 0
+    last_progress_snapshot: Optional[Dict[str, Any]] = None
+    last_reflection_iteration: int = 0

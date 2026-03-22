@@ -1,4 +1,5 @@
 import asyncio
+import re
 import json
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Callable, Union
 
@@ -479,39 +480,94 @@ class WorkflowEngine:
         self._log_iteration_state(iteration, state)
 
     async def _wf_plan_tasks(self, iteration: int, state: AgentState):
-        # Mark phase
-        state.phase = Phase.PLAN
-        yield ("phase_changed", {"phase": state.phase.value})
-
-        # Only plan if we haven't already
+        # Only plan if not already
         if not state.planned_tasks:
-            prompt = f"""
-    Agent must plan a sequence of steps to accomplish the task below. Return STRICT JSON:
+            state.phase = Phase.PLAN
+            yield ("phase_changed", {"phase": state.phase.value})
+            logger.debug(f"Phase changed to PLAN for iteration {iteration}")
 
-    TASK:
-    {self.agent.task}
+            # --- Stage 1: LLM generates registry queries ---
+            query_prompt = f"""
+            Agent must generate queries to identify tools from the registry
+            that are relevant to accomplishing the following TASK:
 
-    REQUIREMENTS:
-    - Provide an ordered list of concise steps.
-    - Each step should be actionable by the agent.
-    - Only return JSON: {{ "tasks": ["step1", "step2", ...] }}
-    """
-            raw_response = await self.agent.client.ask(prompt)
-            try:
-                plan = json.loads(str(raw_response).strip())
-                state.planned_tasks = plan.get("tasks", [])
-                state.current_task_index = 0
-            except Exception:
+            TASK:
+            {self.agent.task}
+
+            REQUIREMENTS:
+            - Respond ONLY with a JSON array of short search queries.
+            - NO explanation, NO extra text.
+            JSON format: {{ "queries": ["query1", "query2", ...] }}
+            """
+            logger.debug("Sending query generation prompt to LLM")
+            raw_queries = await self.agent.client.ask(query_prompt)
+
+            queries_json = re.search(r"\{.*\}", str(raw_queries), re.DOTALL)
+            queries_list = []
+            if queries_json:
+                try:
+                    queries_list = json.loads(queries_json.group()).get("queries", [])
+                    logger.debug(f"LLM returned queries: {queries_list}")
+                except Exception as e:
+                    yield ("warning", f"Failed to parse queries JSON: {e}")
+                    logger.debug(f"Failed to parse queries JSON: {e}")
+
+            # --- Stage 2: Search registry and load suggested tools ---
+            suggested_tools = []
+            for q in queries_list:
+                results = self.agent.registry.search(q, limit=3)
+                suggested_tools.extend([a.name for a, _ in results])
+            suggested_tools = list(dict.fromkeys(suggested_tools))  # remove duplicates
+            logger.debug(f"Suggested tools after registry search: {suggested_tools}")
+
+            # Load them into DynamicActionManager
+            if suggested_tools:
+                self.agent.registry.manager.load_tools(suggested_tools)
+                logger.debug(
+                    f"Loaded tools into dynamic manager: {', '.join(suggested_tools)}"
+                )
+                yield ("info", f"Loaded tools: {', '.join(suggested_tools)}")
+
+            # --- Stage 3: Ask LLM to generate ordered actionable steps ---
+            plan_prompt = f"""
+            Agent must plan a sequence of actionable steps to accomplish the TASK below.
+            Only use tools available in the agent's dynamic toolset: {", ".join(self.agent.registry.manager._loaded_tools) or "none"}.
+            Respond ONLY with JSON. NO explanations.
+
+            TASK:
+            {self.agent.task}
+
+            REQUIREMENTS:
+            - Ordered list of concise, actionable steps.
+            - Strict JSON format: {{ "tasks": ["step1", "step2", ...] }}
+            """
+            logger.debug("Sending task planning prompt to LLM")
+            raw_plan = await self.agent.client.ask(plan_prompt)
+
+            plan_json = re.search(r"\{.*\}", str(raw_plan), re.DOTALL)
+            if plan_json:
+                try:
+                    plan = json.loads(plan_json.group())
+                    state.planned_tasks = plan.get("tasks", [])
+                    state.current_task_index = 0
+                    logger.debug(f"Planned tasks generated: {state.planned_tasks}")
+                except Exception as e:
+                    state.planned_tasks = []
+                    yield ("warning", f"Failed to parse plan JSON: {e}")
+                    logger.debug(f"Failed to parse plan JSON: {e}")
+            else:
                 state.planned_tasks = []
-                yield ("warning", "Failed to parse planning response")
+                yield ("warning", "No JSON found in planning response")
+                logger.debug("No JSON found in planning response")
 
-        # Yield next task reminder
+        # Yield next task
         if state.planned_tasks and state.current_task_index < len(state.planned_tasks):
             next_task = state.planned_tasks[state.current_task_index]
             await self.agent.context_manager.add_message(
                 "system", f"[NEXT TASK REMINDER] {next_task}"
             )
-            state.current_task_index += 1  # increment here so it doesn’t repeat
+            state.current_task_index += 1
+            logger.debug(f"Yielding next planned task: {next_task}")
             yield ("planned_task", {"task": next_task})
 
     async def _wf_execute_if_tools(self, iteration: int, state: AgentState):
@@ -551,25 +607,25 @@ class WorkflowEngine:
 
         summary = self.agent.context_manager.get_context_summary()
         prompt = f"""
-You are a strict goal auditor.
+            You are a strict goal auditor.
 
-GOAL:
-{self.agent.goal}
+            GOAL:
+            {self.agent.goal}
 
-LIVE CONTEXT SUMMARY:
-{summary}
+            LIVE CONTEXT SUMMARY:
+            {summary}
 
-INVESTIGATION STATE:
-{json.dumps(self.agent.context_manager.investigation_state, indent=2)}
+            INVESTIGATION STATE:
+            {json.dumps(self.agent.context_manager.investigation_state, indent=2)}
 
-Has the agent FULLY completed the goal? Reply STRICT JSON ONLY:
+            Has the agent FULLY completed the goal? Reply STRICT JSON ONLY:
 
-{{
-    "verified": true or false,
-    "reason": "one-sentence explanation",
-    "missing_steps": ["list"] or []
-}}
-"""
+            {{
+                "verified": true or false,
+                "reason": "one-sentence explanation",
+                "missing_steps": ["list"] or []
+            }}
+            """
         try:
             raw = await self.agent.client.ask(prompt)
             verification = json.loads(str(raw).strip())
@@ -592,7 +648,7 @@ Has the agent FULLY completed the goal? Reply STRICT JSON ONLY:
             yield ("info", {"message": "Goal verification PASSED"})
 
     async def _wf_check_complete(self, iteration: int, state: AgentState):
-        if iteration == 1 and not state.tool_calls:
+        if iteration == 1 and not state.tool_calls and not state.planned_tasks:
             state.phase = Phase.FINALIZE
             yield ("phase_changed", {"phase": state.phase.value})
             yield (
@@ -612,8 +668,35 @@ Has the agent FULLY completed the goal? Reply STRICT JSON ONLY:
             self._log_iteration_state(iteration, state)
 
     async def _wf_reflect_if_stuck(self, iteration: int, state: AgentState):
-        if iteration <= 10 or not self._has_no_tools_recently(state, 5):
+        # --- Cooldown: reflect only every 5 iterations ---
+        REFLECT_INTERVAL = 5
+        last_reflect = getattr(state, "last_reflection_iteration", 0)
+        if iteration <= 3 or (iteration - last_reflect) < REFLECT_INTERVAL:
             return
+
+        # --- Check for progress ---
+        # No tool calls and no change in planned tasks/steps
+        last_snapshot = getattr(state, "last_progress_snapshot", None)
+        current_snapshot = {
+            "planned_tasks": state.planned_tasks.copy(),
+            "current_task_index": state.current_task_index,
+            "tool_calls": state.tool_calls.copy() if state.tool_calls else [],
+        }
+
+        if last_snapshot and last_snapshot == current_snapshot:
+            stuck = True
+        else:
+            stuck = False
+
+        # Update last snapshot for next iteration
+        state.last_progress_snapshot = current_snapshot
+
+        if not stuck:
+            return
+
+        # --- Mark reflection iteration ---
+        state.last_reflection_iteration = iteration
+
         async for ev, decision in self._force_reflection(iteration, state):
             yield (ev, decision)
 
@@ -789,45 +872,55 @@ Has the agent FULLY completed the goal? Reply STRICT JSON ONLY:
         state.phase = Phase.REFLECT
         yield ("phase_changed", {"phase": state.phase.value})
 
+        # Lightweight context summary
         summary = self.agent.context_manager.get_context_summary()
-        inv_state = self.agent.context_manager.investigation_state
 
+        # Minimal prompt to reduce LLM load
         prompt = f"""
-Agent is stuck after {iteration} iterations.
+        Agent is stuck after {iteration} iterations.
 
-TASK:
-{self.agent.task}
+        TASK:
+        {self.agent.task}
 
-LIVE CONTEXT SUMMARY:
-{summary}
+        LIVE CONTEXT SUMMARY (truncated):
+        {summary}
 
-INVESTIGATION STATE:
-{json.dumps(inv_state, indent=2)}
+        Return valid JSON ONLY with keys:
+        - reason: why the agent is stuck
+        - next_step: "tool", "llm", or "finish"
+        - optional: tool_name, arguments, new_subtask, workflow_adjustments
+        """
 
-CURRENT WORKFLOW STEPS:
-{json.dumps(self.workflow_steps, indent=2)}
-
-Return valid JSON ONLY:
-{{
-    "reason": "why stuck",
-    "next_step": "tool" | "llm" | "finish",
-    "tool_name": "optional",
-    "arguments": {{}},
-    "new_subtask": "optional",
-    "workflow_adjustments": {{...}}
-}}
-"""
         raw_response = await self.agent.client.ask(prompt)
+
+        # Safe JSON parsing
         try:
             decision = json.loads(str(raw_response).strip())
         except Exception:
             decision = {"reason": "parse failed", "next_step": "llm"}
 
+        # --- Handle new subtask(s) ---
         if decision.get("new_subtask"):
-            self.agent.context_manager.add_subtask(decision["new_subtask"])
+            new_task = decision["new_subtask"]
+
+            # Remove already completed tasks
+            remaining_tasks = state.planned_tasks[state.current_task_index :]
+
+            # Prepend the new subtask
+            state.planned_tasks = [new_task] + remaining_tasks
+            state.current_task_index = 0  # reset index to run new task next
+
+            # Always record in ContextManager
+            self.agent.context_manager.add_subtask(new_task)
+            logger.info(
+                f"[REFLECTION] Removed completed tasks and inserted new subtask: {new_task}"
+            )
+
+        # Record reason in ContextManager
         if decision.get("reason"):
             self.agent.context_manager.add_finding(f"Reflection: {decision['reason']}")
 
+        # Log reflection for history
         await self.agent.context_manager.add_message(
             "system", f"[REFLECTION]\n{json.dumps(decision, indent=2)}"
         )
@@ -837,6 +930,7 @@ Return valid JSON ONLY:
             metadata={"iteration": iteration},
         )
 
+        # Increment reflection count and check for stuck condition
         state.reflection_count += 1
         if state.reflection_count > getattr(
             self.agent, "max_reflections", 5
@@ -846,15 +940,19 @@ Return valid JSON ONLY:
             self._log_iteration_state(iteration, state)
             return
 
+        # Apply optional workflow adjustments
         adjustments = decision.get("workflow_adjustments", {})
-        if isinstance(adjustments, dict):
-            if isinstance(adjustments.get("reorder_steps"), list):
-                self.workflow_steps = [
-                    s for s in adjustments["reorder_steps"] if s in self.workflow_steps
-                ]
+        if isinstance(adjustments, dict) and isinstance(
+            adjustments.get("reorder_steps"), list
+        ):
+            self.workflow_steps = [
+                s for s in adjustments["reorder_steps"] if s in self.workflow_steps
+            ]
 
         state.last_reflection_decision = decision
         self._log_iteration_state(iteration, state)
+
+        # Yield reflection events
         yield ("reflection_decision", decision)
         yield ("reflection_triggered", decision)
 
