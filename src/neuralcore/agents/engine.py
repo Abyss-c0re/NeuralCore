@@ -25,129 +25,60 @@ class WorkflowEngine:
     def __init__(self, agent):
         self.agent = agent
 
-        # === NAMED WORKFLOW REGISTRY (new user-friendly system) ===
+        # === REGISTRIES ===
         self.registered_workflows: Dict[str, Dict[str, Any]] = {}
+        self._step_handlers: Dict[str, Optional[Callable]] = {}
+
         self.current_workflow_name: str = "default"
         self.workflow_steps: List[Union[str, Dict[str, Any]]] = []
         self.workflow_description: str = ""
 
-        self._step_handlers: Dict[str, Optional[Callable]] = {}
-
-        # 1. Separate & auto-load all existing _wf_* methods
+        # Auto-register all built-in _wf_* methods
         self._register_builtin_handlers()
-
-        # 2. Register the default workflow with proper name + description
         self._register_builtin_workflow()
 
-        # 3. Load from agent config (supports both old "steps" style and new "name" style)
+        # Load from config (now supports everything)
         self.load_workflow_from_config()
 
     # ===================================================================
-    # USER-FRIENDLY WORKFLOW REGISTRATION
+    # USER-FRIENDLY REGISTRATION
     # ===================================================================
     def register_workflow(
-        self, name: str, description: str, steps: List[Union[str, Dict[str, Any]]]
+        self,
+        name: str,
+        description: str,
+        steps: List[Union[str, Dict[str, Any]]],
     ):
-        """Recommended way to register any workflow (built-in, plugin, or custom).
-
-        Every workflow now **must** have a clear name and description.
-        """
+        """Register a workflow. Steps can contain 'include', 'if', 'overrides'."""
         self.registered_workflows[name] = {
             "description": description,
             "steps": steps.copy(),
         }
-
-        # Safety check
-        unknown_steps = []
-        for step in steps:
-            step_name = step.get("name") if isinstance(step, dict) else step
-            if step_name not in self._step_handlers:
-                unknown_steps.append(step_name)
-
-        if unknown_steps:
-            logger.warning(
-                f"Workflow '{name}' references unknown steps: {unknown_steps}. "
-                "Register them with register_step() first."
-            )
-
         logger.info(f"✅ Registered workflow '{name}': {description}")
 
     def register_step(self, name: str, handler: Callable):
-        """Register a single external/custom step (for plugins)."""
         self._step_handlers[name] = handler
-        logger.info(f"Registered external workflow step: {name}")
+        logger.info(f"Registered external step: {name}")
 
     # ===================================================================
-    # BUILT-IN REGISTRATION (separation of methods)
+    # BUILT-IN REGISTRATION
     # ===================================================================
     def _register_builtin_handlers(self):
-        """Automatically discover and register every _wf_* method on the engine.
-        This cleanly separates the step logic from the engine core while still
-        making the built-in methods available for any workflow."""
         count = 0
         for attr_name in dir(self):
             if attr_name.startswith("_wf_"):
-                step_name = attr_name[4:]  # _wf_plan_tasks → plan_tasks
-                handler = getattr(self, attr_name)
-                self._step_handlers[step_name] = handler
+                step_name = attr_name[4:]
+                self._step_handlers[step_name] = getattr(self, attr_name)
                 count += 1
-
         logger.info(f"Loaded {count} built-in workflow step handlers")
 
     def _register_builtin_workflow(self):
-        """Load the original default workflow as a named workflow (name + description)."""
         self.register_workflow(
             name="default",
             description="Default ReAct loop + persistent goal + efficient ContextManager",
             steps=self.DEFAULT_WORKFLOW,
         )
 
-    # ===================================================================
-    # CONFIG LOADING (now supports named workflows)
-    # ===================================================================
-    def load_workflow_from_config(self):
-        wf_config = getattr(self.agent, "config", {}).get("workflow", {})
-
-        # NEW: Support named workflow from config (cleanest for plugins)
-        if isinstance(wf_config, dict) and "name" in wf_config:
-            wf_name = wf_config["name"]
-            if wf_name in self.registered_workflows:
-                wf = self.registered_workflows[wf_name]
-                self.workflow_steps = wf["steps"]
-                self.workflow_description = wf["description"]
-                self.current_workflow_name = wf_name
-                logger.info(f"Loaded named workflow from config → {wf_name}")
-                return
-            else:
-                logger.warning(
-                    f"Workflow name '{wf_name}' not found. Falling back to steps."
-                )
-
-        # Backward-compatible fallback (old config style)
-        self.workflow_steps = wf_config.get("steps", self.DEFAULT_WORKFLOW)
-        self.workflow_description = wf_config.get(
-            "description", "Default ReAct loop + persistent goal + efficient CM"
-        )
-        self.current_workflow_name = "custom"
-
-        # Final filtering (only keep steps that actually have handlers)
-        valid = set(self._step_handlers.keys())
-        filtered = []
-        for s in self.workflow_steps:
-            name = s.get("name") if isinstance(s, dict) else s
-            if name in valid:
-                filtered.append(s)
-            else:
-                logger.warning(f"Unknown step '{name}' removed from workflow")
-
-        self.workflow_steps = filtered
-        logger.info(
-            f"Workflow loaded: {self.current_workflow_name} — {self.workflow_description}"
-        )
-
-    # ===================================================================
-    # (rest of the class is unchanged from previous version)
-    # ===================================================================
     def _build_objective_reminder(self) -> str:
         return (
             f"OBJECTIVE LOCKED:\nTask: {self.agent.task}\n"
@@ -174,7 +105,175 @@ class WorkflowEngine:
         recent = state.iteration_history[-lookback:]
         return all(not h.get("executed_functions") for h in recent)
 
-    # ---------------- MAIN RUNNER ----------------
+    # ===================================================================
+    # WORKFLOW RESOLUTION (include support)
+    # ===================================================================
+    def _resolve_steps(self, steps: List, depth: int = 0) -> List:
+        """Recursively resolve 'include' and return a flat list of steps."""
+        if depth > 8:
+            logger.error("Workflow include depth limit reached")
+            return steps
+
+        resolved = []
+        for item in steps:
+            if isinstance(item, str):
+                resolved.append(item)
+            elif isinstance(item, dict):
+                if "include" in item:
+                    name = item["include"]
+                    if name in self.registered_workflows:
+                        included = self.registered_workflows[name]["steps"]
+                        resolved.extend(self._resolve_steps(included, depth + 1))
+                    else:
+                        logger.warning(f"Unknown include '{name}'")
+                else:
+                    resolved.append(item.copy())
+            else:
+                resolved.append(item)
+        return resolved
+
+    # ===================================================================
+    # OPTION 3: STRUCTURED CONDITIONS (if:)
+    # ===================================================================
+    def _get_state_value(self, key: str, state: AgentState) -> Any:
+        key = key.lower().replace(" ", "_").replace("-", "_")
+
+        # Direct state attributes
+        if hasattr(state, key):
+            return getattr(state, key)
+
+        # Computed helpers
+        history = getattr(state, "iteration_history", [])
+        if key == "iteration":
+            return len(history)
+        if key == "has_tools":
+            return bool(getattr(state, "tool_calls", None))
+        if key == "is_complete":
+            return bool(getattr(state, "is_complete", False))
+        if key == "reflection_count":
+            return getattr(state, "reflection_count", 0)
+        if key == "no_tools_recently" or key == "no_tools_last_5":
+            return self._has_no_tools_recently(state, 5)
+        if key == "tool_count":
+            return len(getattr(state, "tool_calls", []))
+
+        # ContextManager helpers
+        if hasattr(self.agent, "context_manager"):
+            cm = self.agent.context_manager
+            if hasattr(cm, key):
+                return getattr(cm, key)
+            if key in ("knowledge_items", "kb_size"):
+                return len(getattr(cm, "knowledge_base", []))
+
+        return None
+
+    def _compare(self, actual: Any, op: str, target: Any) -> bool:
+        op = op.lower().strip()
+        if op in ("eq", "==", "="):
+            return actual == target
+        if op in ("ne", "!=", "<>"):
+            return actual != target
+        if op in ("gt", ">", "greater_than"):
+            return (
+                actual > target if actual is not None and target is not None else False
+            )
+        if op in ("gte", ">=", "ge"):
+            return (
+                actual >= target if actual is not None and target is not None else False
+            )
+        if op in ("lt", "<", "less_than"):
+            return (
+                actual < target if actual is not None and target is not None else False
+            )
+        if op in ("lte", "<=", "le"):
+            return (
+                actual <= target if actual is not None and target is not None else False
+            )
+        if op in ("in", "contains"):
+            return (
+                target in actual
+                if isinstance(actual, (list, tuple, set, str))
+                else False
+            )
+        return False
+
+    def _evaluate_condition(self, cond: Any, state: AgentState) -> bool:
+        """Full Option 3 structured condition evaluator."""
+        if cond is None:
+            return True
+        if isinstance(cond, bool):
+            return cond
+        if not isinstance(cond, dict):
+            return bool(cond)
+
+        # Explicit logical operators (highest priority)
+        if "and" in cond and isinstance(cond["and"], (list, tuple)):
+            return all(self._evaluate_condition(item, state) for item in cond["and"])
+        if "or" in cond and isinstance(cond["or"], (list, tuple)):
+            return any(self._evaluate_condition(item, state) for item in cond["or"])
+        if "not" in cond:
+            return not self._evaluate_condition(cond["not"], state)
+
+        # Implicit AND of all conditions in the dict
+        for key, val in cond.items():
+            actual = self._get_state_value(key, state)
+
+            if isinstance(val, dict):
+                # Operator style: iteration: { gt: 6 }
+                for op_name, target in val.items():
+                    if not self._compare(actual, op_name, target):
+                        return False
+            else:
+                # Direct equality: has_tools: true
+                if actual != val:
+                    return False
+        return True
+
+    # ===================================================================
+    # RUNTIME WORKFLOW SWITCHING
+    # ===================================================================
+    def switch_workflow(self, name: str) -> bool:
+        if name not in self.registered_workflows:
+            logger.warning(f"Workflow '{name}' not found")
+            return False
+
+        wf = self.registered_workflows[name]
+        self.workflow_steps = self._resolve_steps(wf["steps"])
+        self.workflow_description = wf["description"]
+        self.current_workflow_name = name
+        logger.info(f"🔄 Switched to workflow '{name}' → {self.workflow_description}")
+        return True
+
+    # ===================================================================
+    # CONFIG LOADING
+    # ===================================================================
+    def load_workflow_from_config(self):
+        wf_config = getattr(self.agent, "config", {}).get("workflow", {})
+
+        # Named workflow (recommended)
+        if isinstance(wf_config, dict) and "name" in wf_config:
+            name = wf_config["name"]
+            if name in self.registered_workflows:
+                wf = self.registered_workflows[name]
+                self.workflow_steps = self._resolve_steps(wf["steps"])
+                self.workflow_description = wf["description"]
+                self.current_workflow_name = name
+                logger.info(f"Loaded named workflow → {name}")
+                return
+
+        # Fallback to raw steps (still supports if:/include)
+        raw_steps = wf_config.get("steps", self.DEFAULT_WORKFLOW)
+        self.workflow_steps = self._resolve_steps(raw_steps)
+        self.workflow_description = wf_config.get("description", "Custom workflow")
+        self.current_workflow_name = "custom"
+
+        logger.info(
+            f"Workflow loaded: {self.current_workflow_name} — {self.workflow_description}"
+        )
+
+    # ===================================================================
+    # MAIN RUNNER (with full Option 3 + switch support)
+    # ===================================================================
     async def run(
         self,
         user_prompt: str,
@@ -182,8 +281,12 @@ class WorkflowEngine:
         temperature: float = 0.7,
         max_tokens: int = 1212,
         stop_event: Optional[asyncio.Event] = None,
+        workflow: Optional[str] = None,  # one-shot override
     ) -> AsyncIterator[Tuple[str, Any]]:
-        # (exactly the same as previous version — no changes needed)
+        if workflow:
+            self.switch_workflow(workflow)
+
+        # ... (rest of the original reset logic unchanged) ...
         self.agent._reset_state()
         self.agent.task = user_prompt
         self.agent.goal = user_prompt
@@ -213,28 +316,40 @@ class WorkflowEngine:
                 yield ("cancelled", "User stop")
                 return
 
-            workflow_steps = self.workflow_steps.copy()
-            for step_config in workflow_steps:
+            for step_config in self.workflow_steps.copy():
                 if isinstance(step_config, dict):
-                    step_name: str = step_config.get("name", "")
-                    overrides: Dict[str, Any] = step_config.get("overrides", {})
+                    step_name = step_config.get("name", "")
+                    overrides = step_config.get("overrides", {})
                 else:
                     step_name = step_config
                     overrides = {}
 
                 handler = self._step_handlers.get(step_name)
                 if not handler:
-                    yield ("warning", f"Unknown workflow step: {step_name}")
+                    yield ("warning", f"Unknown step: {step_name}")
                     continue
 
-                original_params = {
-                    "client": self.agent.client,
-                    "temperature": self.agent.temperature,
-                    "max_tokens": self.agent.max_tokens,
-                    "system_prompt": self.agent.system_prompt,
-                }
+                # === OPTION 3: STRUCTURED if: CONDITION ===
+                if isinstance(step_config, dict):
+                    condition = step_config.get("if") or step_config.get("when")
+                    if condition is not None:
+                        if not self._evaluate_condition(condition, state):
+                            yield (
+                                "step_skipped",
+                                {
+                                    "step": step_name,
+                                    "reason": "condition_not_met",
+                                    "condition": condition,
+                                },
+                            )
+                            continue
+                # =========================================
 
-                # Apply overrides
+                # Apply overrides (original logic)
+                original_params = {
+                    k: getattr(self.agent, k)
+                    for k in ("client", "temperature", "max_tokens", "system_prompt")
+                }
                 if "client" in overrides and overrides["client"] in getattr(
                     self.agent, "clients", {}
                 ):
@@ -247,14 +362,22 @@ class WorkflowEngine:
                     async for event, payload in handler(iteration, state):
                         yield (event, payload)
 
-                        if event == "llm_response":
-                            state.full_reply = payload.get("full_reply", "")
-                            state.tool_calls = payload.get("tool_calls", [])
-                            state.is_complete = payload.get("is_complete", False)
-                            if state.full_reply.strip():
-                                await self.agent.context_manager.add_message(
-                                    "assistant", state.full_reply
-                                )
+                        # Runtime workflow switching
+
+                        if event == "switch_workflow":
+                            if isinstance(payload, dict):
+                                target = payload.get("name")
+                                if isinstance(target, str):
+                                    self.switch_workflow(target)
+                                else:
+                                    # handle missing / wrong type "name"
+                                    print("Error: 'name' must be a string")
+                                    # or raise ValueError, return, logger.error(...), etc.
+                            elif isinstance(payload, str):
+                                self.switch_workflow(payload)
+                            else:
+                                # unexpected payload type
+                                print(f"Unexpected payload type: {type(payload)}")
 
                         if event in ("needs_confirmation", "cancelled", "finish"):
                             return
@@ -266,7 +389,6 @@ class WorkflowEngine:
 
                 except Exception as e:
                     yield ("error", str(e))
-
                 finally:
                     for k, v in original_params.items():
                         setattr(self.agent, k, v)
