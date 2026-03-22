@@ -471,8 +471,13 @@ class WorkflowEngine:
 
     async def _wf_llm_stream(self, iteration: int, state: AgentState):
         async for ev, pl in self._llm_stream_with_tools(iteration, state):
+            if ev == "llm_response" and isinstance(pl, dict):
+                state.full_reply = pl.get("full_reply", "")
+                state.tool_calls = pl.get("tool_calls", [])
+                state.is_complete = pl.get("is_complete", False)
             yield (ev, pl)
         self._log_iteration_state(iteration, state)
+
 
     async def _wf_plan_tasks(self, iteration: int, state: AgentState):
         state.phase = Phase.PLAN
@@ -630,8 +635,9 @@ Has the agent FULLY completed the goal? Reply STRICT JSON ONLY:
         messages = await self.agent.context_manager.provide_context(
             query="",
             max_input_tokens=self.agent.max_tokens,
-            reserved_for_output=2048,
+            reserved_for_output=12000,
             system_prompt=self._build_objective_reminder(),
+            include_logs = True,
         )
 
         queue = await self.agent.client.stream_with_tools(

@@ -485,39 +485,76 @@ class ContextManager:
         max_input_tokens: int = 22000,
         reserved_for_output: int = 2048,
         system_prompt: str = "You are a helpful Terminal AI agent with full coding and filesystem support.",
+        include_logs: bool = False,
+        min_history_tokens: int = 2000,  # always keep this much history
+        max_kb_tokens: int = 5000,  # cap KB retrieval
     ) -> List[Dict[str, Any]]:
         messages: List[Dict[str, Any]] = []
 
-        # --- SYSTEM PROMPT + LIVE SUMMARY ---
+        # --- SYSTEM PROMPT + SUMMARY ---
         base_system = system_prompt.strip()
         summary = self.get_context_summary()
         full_system = base_system
         if summary:
             full_system += f"\n\n{summary}\n\n→ Use this context to stay aware. Never repeat the summary back to the user."
-        messages.append({"role": "system", "content": full_system})
 
-        # --- KNOWLEDGE BASE ---
-        kb_budget = (max_input_tokens - reserved_for_output) // 3
-        if query.strip() and kb_budget > 500:
-            kb_text = await self._retrieve_relevant_knowledge(query, kb_budget)
+        # --- OPTIONAL LOGS ---
+        if include_logs:
+            try:
+                log_lines = Logger.get_log_data(level="info", max_entries=100)
+                if log_lines:
+                    log_text = "\n".join(log_lines)
+                    full_system += (
+                        f"\n\n=== RECENT LOGS (INFO, last {len(log_lines)} lines) ===\n"
+                        f"{log_text}\n=== END LOGS ==="
+                    )
+            except Exception:
+                pass
+
+        messages.append({"role": "system", "content": full_system})
+        tokens_used = self.count_tokens(messages)
+
+        # --- QUERY TOKEN ESTIMATE ---
+        query_tokens = (
+            self.count_tokens([{"role": "user", "content": query}])
+            if query.strip()
+            else 0
+        )
+
+        # --- CALCULATE AVAILABLE TOKENS ---
+        target_context_tokens = max_input_tokens - reserved_for_output
+        remaining_tokens = target_context_tokens - tokens_used - query_tokens
+        if remaining_tokens < 0:
+            remaining_tokens = 0  # query + system already exceed budget
+
+        # --- ALLOCATE KB / HISTORY DYNAMICALLY ---
+        kb_tokens = min(max_kb_tokens, remaining_tokens // 2)
+        history_tokens_budget = max(remaining_tokens - kb_tokens, min_history_tokens)
+
+        # --- RETRIEVE KB IF QUERY EXISTS ---
+        if query.strip() and kb_tokens > 500:
+            kb_text = await self._retrieve_relevant_knowledge(query, kb_tokens)
             if kb_text:
                 messages.append(
                     {
                         "role": "system",
-                        "content": f"=== RELEVANT EXTERNAL CONTEXT ===\n{kb_text}=== END EXTERNAL CONTEXT ===",
+                        "content": f"=== RELEVANT EXTERNAL CONTEXT ===\n{kb_text}\n=== END EXTERNAL CONTEXT ===",
                     }
                 )
+                tokens_used = self.count_tokens(messages)
+                remaining_tokens = target_context_tokens - tokens_used - query_tokens
+                history_tokens_budget = max(remaining_tokens, min_history_tokens)
 
-        # --- RECENT CONVERSATION (TOKEN-LIMITED) ---
-        tokens_used = self.count_tokens(messages)
+        # --- ADD RECENT HISTORY ---
         recent_msgs: List[Dict[str, str]] = []
         for msg, t in zip(
             reversed(self.current_topic.history),
             reversed(self.current_topic.history_tokens),
         ):
-            if tokens_used + t > max_input_tokens - reserved_for_output:
+            if t > history_tokens_budget:
                 break
             recent_msgs.insert(0, msg)
+            history_tokens_budget -= t
             tokens_used += t
         messages.extend(recent_msgs)
 
@@ -525,8 +562,7 @@ class ContextManager:
         if query.strip():
             messages.append({"role": "user", "content": query})
 
-        # --- PRUNE IF NECESSARY ---
-        target_context_tokens = max_input_tokens - reserved_for_output
+        # --- FINAL PRUNE IF STILL OVER ---
         total_tokens = self.count_tokens(messages)
         if total_tokens > target_context_tokens:
             removed, pruned_turns = self.prune_to_fit_context(
