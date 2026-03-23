@@ -9,7 +9,6 @@ from neuralcore.workflows.default_flow import AgentFlow
 from neuralcore.utils.config import get_loader
 
 
-
 logger = Logger.get_logger()
 
 
@@ -26,6 +25,7 @@ class WorkflowEngine:
         "verify_goal_completion",
         "check_complete",
         "reflect_if_stuck",
+        "replan_if_reflected",
         "safety_fallback",
     ]
 
@@ -182,32 +182,37 @@ class WorkflowEngine:
 
     def _compare(self, actual: Any, op: str, target: Any) -> bool:
         op = op.lower().strip()
+
+        # ─── Automatic type coercion for numeric comparisons ───
+        if isinstance(actual, (int, float)) and isinstance(target, str):
+            try:
+                # Try to convert target to the same type as actual
+                if isinstance(actual, int):
+                    target = int(target)
+                else:
+                    target = float(target)
+            except ValueError:
+                # If conversion fails, treat as mismatch (safe default)
+                logger.debug(f"Cannot compare numeric actual={actual} with non-numeric target={target!r}")
+                return False
+
+        # ─── Normal comparison logic ───
         if op in ("eq", "==", "="):
             return actual == target
         if op in ("ne", "!=", "<>"):
             return actual != target
         if op in ("gt", ">", "greater_than"):
-            return (
-                actual > target if actual is not None and target is not None else False
-            )
+            return actual > target if actual is not None and target is not None else False
         if op in ("gte", ">=", "ge"):
-            return (
-                actual >= target if actual is not None and target is not None else False
-            )
+            return actual >= target if actual is not None and target is not None else False
         if op in ("lt", "<", "less_than"):
-            return (
-                actual < target if actual is not None and target is not None else False
-            )
+            return actual < target if actual is not None and target is not None else False
         if op in ("lte", "<=", "le"):
-            return (
-                actual <= target if actual is not None and target is not None else False
-            )
+            return actual <= target if actual is not None and target is not None else False
         if op in ("in", "contains"):
-            return (
-                target in actual
-                if isinstance(actual, (list, tuple, set, str))
-                else False
-            )
+            return target in actual if isinstance(actual, (list, tuple, set, str)) else False
+
+        logger.warning(f"Unknown comparison operator: {op}")
         return False
 
     def _evaluate_condition(self, cond: Any, state: AgentState) -> bool:
@@ -358,8 +363,7 @@ class WorkflowEngine:
                 if "toolset" in overrides:
                     toolset_value = overrides.pop("toolset")  # consume it
                     if toolset_value:
-                        # True switch: unload everything dynamic first, then load requested set(s)
-                        self.agent.manager.unload_all()  # keeps browse_tools
+                        # keeps browse_tools
                         loaded_count = self.agent.manager.load_toolsets(toolset_value)
 
                         yield (
@@ -428,7 +432,7 @@ class WorkflowEngine:
     ) -> AsyncIterator[Tuple[str, Any]]:
         state.phase = Phase.EXECUTE
         messages = await self.agent.context_manager.provide_context(
-            query="",
+            query=state.current_task or "Continue",
             max_input_tokens=self.agent.max_tokens,
             reserved_for_output=12000,
             system_prompt=self._build_objective_reminder(),
@@ -444,30 +448,41 @@ class WorkflowEngine:
         )
 
         text_buffer = ""
-        completed_tool_calls = []
+        all_tool_calls: List[Dict] = []
 
         try:
             async for kind, payload in self.agent.client._drain_queue(queue):
                 if kind == "content":
                     text_buffer += payload
                     yield ("content_delta", payload)
+
                 elif kind == "tool_delta":
                     yield ("tool_delta", payload)
+
                 elif kind == "tool_complete":
-                    completed_tool_calls.append(payload)
+                    # Only append new calls not already in all_tool_calls
+                    sig = f"{payload['function']['name']}:{payload['function']['arguments']}"
+                    if not any(
+                        f"{c['function']['name']}:{c['function']['arguments']}" == sig
+                        for c in all_tool_calls
+                    ):
+                        all_tool_calls.append(payload)
                     yield ("tool_complete", payload)
+
                 elif kind == "finish":
                     break
+
                 elif kind == "error":
                     yield ("error", payload)
                     return
+
         except asyncio.CancelledError:
             yield ("cancelled", "Task cancelled")
             return
 
         response_state = {
             "full_reply": text_buffer.strip(),
-            "tool_calls": completed_tool_calls,
+            "tool_calls": all_tool_calls,
             "is_complete": self.FINAL_ANSWER_MARKER in text_buffer,
         }
         yield ("llm_response", response_state)
@@ -486,6 +501,7 @@ class WorkflowEngine:
                 args = {}
 
             sig = f"{name}:{json.dumps(args, sort_keys=True)}"
+            # Skip if already executed
             if sig in self.agent.executed_signatures:
                 logger.debug(f"Skipping already executed tool: {sig}")
                 continue
@@ -504,6 +520,7 @@ class WorkflowEngine:
                 self.agent.context_manager.add_subtask(task_id)
 
             try:
+                # prevent recursion
                 if name in ("run", "self_run"):
                     result = "Self-run tool skipped"
                     yield (
@@ -514,6 +531,7 @@ class WorkflowEngine:
                     maybe = executor(**args)
                     result = await maybe if asyncio.iscoroutine(maybe) else maybe
 
+                # record outcome
                 await self.agent.context_manager.record_tool_outcome(
                     name, str(result), args
                 )
@@ -565,6 +583,11 @@ class WorkflowEngine:
         LIVE CONTEXT SUMMARY (truncated):
         {summary}
 
+        CRITICAL: If the agent appears unable to make progress despite the context, 
+        choose next_step: "finish" to avoid infinite loops. 
+        Only choose "llm" if a clear next reasoning step will unstick it.
+        Prefer suggesting a concrete tool or new_subtask when possible.
+
         Return valid JSON ONLY with keys:
         - reason: why the agent is stuck
         - next_step: "tool", "llm", or "finish"
@@ -573,10 +596,25 @@ class WorkflowEngine:
 
         raw_response = await self.agent.client.ask(prompt)
 
+        # Robust JSON parsing with fallback to prevent stuck loops on malformed LLM output
+        raw_str = str(raw_response).strip()
         try:
-            decision = json.loads(str(raw_response).strip())
+            # Strip common markdown wrappers
+            if raw_str.startswith("```json"):
+                raw_str = raw_str[7:].split("```")[0].strip()
+            elif raw_str.startswith("```"):
+                raw_str = raw_str[3:].split("```")[0].strip()
+            decision = json.loads(raw_str)
         except Exception:
-            decision = {"reason": "parse failed", "next_step": "llm"}
+            decision = {"reason": "parse failed", "next_step": "finish"}
+
+        # Safety: force valid next_step
+        if not isinstance(decision, dict) or decision.get("next_step") not in (
+            "tool",
+            "llm",
+            "finish",
+        ):
+            decision = {"reason": "invalid decision", "next_step": "finish"}
 
         if decision.get("new_subtask"):
             new_task = decision["new_subtask"]
@@ -592,21 +630,8 @@ class WorkflowEngine:
         await self.agent.context_manager.add_message(
             "system", f"[REFLECTION]\n{json.dumps(decision, indent=2)}"
         )
-        await self.agent.context_manager.add_external_content(
-            source_type="reflection",
-            content=json.dumps(decision, indent=2),
-            metadata={"iteration": iteration},
-        )
 
-        state.reflection_count += 1
-        if state.reflection_count > getattr(
-            self.agent, "max_reflections", 5
-        ) and self._has_no_tools_recently(state, 5):
-            yield ("warning", f"Stuck after {state.reflection_count} reflections")
-            yield ("finish", {"reason": "reflection_stuck"})
-            self._log_iteration_state(iteration, state)
-            return
-
+        # Removed internal max-reflection check and count increment (now handled in caller)
         adjustments = decision.get("workflow_adjustments", {})
         if isinstance(adjustments, dict) and isinstance(
             adjustments.get("reorder_steps"), list

@@ -26,3 +26,10 @@ class AgentState:
     current_task_index: int = 0
     last_progress_snapshot: Optional[Dict[str, Any]] = None
     last_reflection_iteration: int = 0
+    last_replan_iteration: int = 0 
+
+    @property
+    def current_task(self) -> Optional[str]:
+        if 0 <= self.current_task_index < len(self.planned_tasks):
+            return self.planned_tasks[self.current_task_index]
+        return None

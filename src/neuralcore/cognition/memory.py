@@ -160,7 +160,6 @@ class ContextManager:
     # FETCH EMBEDDING
     # ─────────────────────────────────────────────────────────────
 
-
     async def fetch_embedding(
         self, text: str, size: int = 500, prefix: str | None = None
     ) -> np.ndarray:
@@ -175,10 +174,9 @@ class ContextManager:
 
         logger.debug(f"Embedding request | prefix={prefix_str} | text_len={len(text)}")
 
-        async with asyncio.Lock():
-            if cache_key in self.embedding_cache:
-                logger.info(f"Cache hit | prefix={prefix_str} | text_len={len(text)}")
-                return self.embedding_cache[cache_key]
+        if cache_key in self.embedding_cache:
+            logger.info(f"Cache hit | prefix={prefix_str} | text_len={len(text)}")
+            return self.embedding_cache[cache_key]
 
         logger.info(
             f"Cache miss | prefix={prefix_str} | using={'fastembed' if self.fast_embedder else 'fallback'}"
@@ -275,33 +273,75 @@ class ContextManager:
                 return msg.get("content", "").strip()
         return None
 
-    def get_context_summary(self) -> str:
+    def get_context_summary(self, max_messages: int = 10, max_chars: int = 1000) -> str:
+        """
+        Fish memory-style context summary:
+        - Full list of files and tools used
+        - KB items and messages in topic
+        - Token usage warning
+        - Only include up to `max_messages` recent messages
+        - Truncates to max_chars if necessary
+        """
+        # Full files and tools
+        files = sorted(list(self.files_checked))
+        tools = self.tools_executed
 
-        files = sorted(list(self.files_checked))[-6:]
-        tools = self.tools_executed[-5:]
+        # Messages in topic (most recent up to max_messages)
+        recent_messages = self.current_topic.history[-max_messages:]
+        message_summaries = [
+            f"[{msg['role'].upper()}] {msg['content'][:200]}{'...' if len(msg['content']) > 200 else ''}"
+            for msg in recent_messages
+        ]
+
+        # Token usage estimate
+        total_tokens = (
+            sum(self.current_topic.history_tokens)
+            if self.current_topic.history_tokens
+            else 0
+        )
+        token_warning = ""
+        if total_tokens > self.max_tokens * 0.8:
+            token_warning = (
+                "⚠️ Approaching context window limit, consider pruning old messages."
+            )
+
+        # Build summary lines
         lines = [
             "📋 LIVE CONTEXT SUMMARY",
             f"• Files checked: {', '.join(files) if files else '—'}",
             f"• Tools used: {', '.join(tools) if tools else '—'}",
-            f"• KB items: {len(self.knowledge_base)} | Messages in topic: {len(self.current_topic.history)}",
+            f"• KB items: {len(self.knowledge_base)} | Messages in topic: {len(self.current_topic.history)} (showing last {len(recent_messages)})",
+            f"• Estimated tokens used: {total_tokens} / {self.max_tokens} {token_warning}",
             f"• Active topic: {self.current_topic.name}",
             f"• Archived: {len(self.current_topic.archived_history)} | Prunes: {self.context_stats['prunes']}",
             f"• Recent action: {self.action_log[-1]['desc'] if self.action_log else '—'}",
+            "",
+            "📝 LAST MESSAGES",
+            *message_summaries,
         ]
-        inv = self.investigation_state
 
-        investigation_block = [
+        # Investigation state
+        inv = self.investigation_state
+        inv_block = [
             "",
             "🧠 INVESTIGATION STATE",
             f"• Goal: {inv['goal'] or '—'}",
-            f"• Pending: {inv['pending'][:5]}",
-            f"• Completed: {inv['completed'][-5:]}",
-            f"• Findings: {inv['findings'][-3:]}",
-            f"• Unknowns: {inv['unknowns'][-3:]}",
+            f"• Pending: {', '.join(inv['pending'][:5]) if inv['pending'] else '—'}",
+            f"• Completed: {', '.join(inv['completed'][-5:]) if inv['completed'] else '—'}",
+            f"• Findings: {', '.join(inv['findings'][-3:]) if inv['findings'] else '—'}",
+            f"• Unknowns: {', '.join(inv['unknowns'][-3:]) if inv['unknowns'] else '—'}",
         ]
-        lines.extend(investigation_block)
+        lines.extend(inv_block)
 
-        return "\n".join(lines)[:650]
+        # Join and truncate if over max_chars
+        full_summary = "\n".join(lines)
+        if len(full_summary) > max_chars:
+            cutoff = max_chars - 50
+            summary_lines = full_summary[:cutoff].rsplit("\n", 1)[0]
+            summary_lines += "\n…(truncated)"
+            return summary_lines
+
+        return full_summary
 
     def set_goal(self, goal: str):
         self.investigation_state["goal"] = goal
@@ -325,33 +365,54 @@ class ContextManager:
     # ─────────────────────────────────────────────────────────────
     # ADD EXTERNAL CONTENT
     # ─────────────────────────────────────────────────────────────
+    def truncate_to_tokens(self, text: str, max_tokens: int) -> str:
+        """Return text truncated to approximately max_tokens using the tokenizer."""
+        if not self.tokenizer:
+            return text[: max_tokens * 4]  # fallback heuristic
+        tokens_counted = 0
+        words = text.split()
+        result_words = []
+        for word in words:
+            word_tokens = self.tokenizer.count_tokens(word)
+            if tokens_counted + word_tokens > max_tokens:
+                break
+            result_words.append(word)
+            tokens_counted += word_tokens
+        return " ".join(result_words)
+
     async def add_external_content(
         self, source_type: str, content: str, metadata: Dict[str, Any] | None = None
     ) -> str | None:
         if not content or not content.strip():
             return None
-        metadata = metadata or {}
-        key = (
-            metadata.get("path")
-            or metadata.get("filename")
-            or f"{source_type}_{hash(content[:200])}"
-        )
 
+        metadata = metadata or {}
+        path_key = metadata.get("path") or metadata.get("filename")
+
+        # Skip if file already exists in KB
+        if path_key and path_key in self.files_checked:
+            logger.info(f"Skipped adding external content; already exists: {path_key}")
+            return path_key  # optionally return existing key
+
+        # Generate key (fallback to content hash)
+        key = path_key or f"{source_type}_{hash(content)}"
+
+        # Avoid overwriting if key already exists
         if key in self.knowledge_base:
-            item = self.knowledge_base[key]
-            item.content = content
-            if item.embedding.size == 0:
-                item.embedding = await self.fetch_embedding(content, prefix="passage")
+            logger.info(f"Skipped adding KB item; key already exists: {key}")
             return key
 
+        # Create new knowledge item with full content
         embedding = await self.fetch_embedding(content, prefix="passage")
         item = KnowledgeItem(key, source_type, content, metadata)
         item.embedding = embedding
         self.knowledge_base[key] = item
-        logger.info(f"Added/updated KB item: {key}")
+        logger.info(f"Added KB item: {key}")
 
-        if metadata and metadata.get("path"):
-            self.files_checked.add(str(metadata["path"]))
+        # Track known files
+        if path_key:
+            self.files_checked.add(str(path_key))
+
         self._log_action("add_knowledge", f"Added {source_type} → {key}", metadata)
         self.context_stats["kb_added"] += 1
         return key
@@ -378,7 +439,7 @@ class ContextManager:
             preview = (
                 " ".join(str(v) for v in item.metadata.values())
                 + " "
-                + item.content[:400]
+                + item.content[:400]  # keep preview small for keyword scoring
             )
             kw = keyword_score(query_words, preview)
             hybrid = 0.65 * emb_sim + 0.35 * kw
@@ -387,24 +448,33 @@ class ContextManager:
         scored.sort(key=lambda x: x[0], reverse=True)
         parts: List[str] = []
         used = 0
+
         for _, item in scored[:40]:
             meta_str = ", ".join(f"{k}={v}" for k, v in item.metadata.items() if v)
             header = f"[{item.source_type.upper()}] {item.key}\nMetadata: {meta_str}\n"
-            max_chars = 3500
-            body = item.content[:max_chars] + (
-                "..." if len(item.content) > max_chars else ""
-            )
-            block = f"{header}{body}\n{'─' * 50}\n"
+            block = f"{header}{item.content}\n{'─' * 50}\n"
 
+            # calculate tokens dynamically
             block_tokens = (
                 self.tokenizer.count_tokens(block)
                 if hasattr(self.tokenizer, "count_tokens")
                 else len(block) // 4
             )
             if used + block_tokens > max_kb_tokens:
+                # optional: include partial block if it fits
+                remaining_tokens = max_kb_tokens - used
+                if remaining_tokens > 0 and hasattr(self.tokenizer, "truncate_text"):
+                    truncated_content = self.truncate_to_tokens(
+                        item.content, remaining_tokens
+                    )
+                    block = f"{header}{truncated_content}\n{'─' * 50}\n"
+                    parts.append(block)
+
                 break
+
             parts.append(block)
             used += block_tokens
+
         return "".join(parts)
 
     # ─────────────────────────────────────────────────────────────
@@ -558,6 +628,12 @@ class ContextManager:
         logger.info(
             f"Off-topic segment moved → {target_topic.name} | {len(segment)} messages"
         )
+        await self.current_topic.add_message(
+            role="system",
+            content=f"⚠️ {len(off_topic_indices)} off-topic messages detected. Consider pruning or archiving these to stay within the {self.max_tokens}-token context window.",
+            embedding=np.array([]),
+            token_count=0,
+        )
 
     # ========================================================================
     # TOPIC EXTRACTION & OFF-TOPIC
@@ -673,8 +749,10 @@ class ContextManager:
         messages.extend(recent_msgs)
 
         # --- ADD USER QUERY ---
-        if query.strip():
-            messages.append({"role": "user", "content": query})
+        messages.append({
+            "role": "user",
+            "content": query if query.strip() else "[AUTONOMOUS CONTINUATION]"
+        })
 
         # --- FINAL PRUNE IF STILL OVER ---
         total_tokens = self.count_tokens(messages)
@@ -690,6 +768,17 @@ class ContextManager:
             )
             if pruned_turns:
                 self.current_topic.archived_history.extend(pruned_turns)
+        # Inside provide_context(), after building full_system
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    f"⚠️ CONTEXT WINDOW STATUS: max tokens = {self.max_tokens}, "
+                    f"current estimated usage = {tokens_used}. "
+                    "If you detect the context is too long, summarize or prune older content."
+                ),
+            }
+        )
 
         return messages
 

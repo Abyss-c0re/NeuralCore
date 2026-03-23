@@ -14,12 +14,11 @@ logger.debug("Global workflow registry created")
 
 class AgentFlow:
     """
-    AgentFlow — Pure collection of all _wf_* step handlers (MOVED HERE as requested).
-    Registers itself into WorkflowEngine.
+    AgentFlow — Pure collection of all _wf_* step handlers
     Uses self.engine.xxx to call the executors that stay in WorkflowEngine.
     """
 
-    def __init__(self, agent,workflow):
+    def __init__(self, agent, workflow):
         self.agent = agent
         self.engine = workflow
 
@@ -225,62 +224,146 @@ class AgentFlow:
     @workflow.set(
         "default",
         name="reflect_if_stuck",
-        description="Triggers reflection when stuck.",
+        description="Triggers reflection when no progress is detected.",
     )
     async def _wf_reflect_if_stuck(self, iteration: int, state: AgentState):
+        """
+        Detect lack of progress via snapshot comparison.
+        Apply hard limit on reflection count to break potential loops.
+        Calls engine._force_reflection when appropriate.
+        """
         REFLECT_INTERVAL = 5
-        last_reflect = getattr(state, "last_reflection_iteration", 0)
-        if iteration <= 3 or (iteration - last_reflect) < REFLECT_INTERVAL:
+        last_reflect_iter = getattr(state, "last_reflection_iteration", 0)
+
+        # Don't reflect too early or too frequently
+        if iteration <= 3 or (iteration - last_reflect_iter) < REFLECT_INTERVAL:
             return
 
-        last_snapshot = getattr(state, "last_progress_snapshot", None)
+        # Minimal progress snapshot
         current_snapshot = {
             "planned_tasks": state.planned_tasks.copy(),
             "current_task_index": state.current_task_index,
-            "tool_calls": state.tool_calls.copy() if state.tool_calls else [],
+            "tool_calls": (state.tool_calls or []).copy(),
         }
 
-        if last_snapshot and last_snapshot == current_snapshot:
-            stuck = True
-        else:
-            stuck = False
+        last_snapshot = getattr(state, "last_progress_snapshot", None)
+        no_progress = last_snapshot is not None and last_snapshot == current_snapshot
 
         state.last_progress_snapshot = current_snapshot
 
-        if not stuck:
+        if not no_progress:
             return
 
+        # Count how many times we've entered reflection
+        state.reflection_count = getattr(state, "reflection_count", 0) + 1
+        max_reflections = getattr(self.agent, "max_reflections", 6)  # 6 is common
+
+        # Safety escape hatch
+        if state.reflection_count >= max_reflections:
+            msg = (
+                f"Hard reflection limit reached ({state.reflection_count}/{max_reflections}) "
+                f"at iteration {iteration} — terminating to prevent loop"
+            )
+            logger.warning(msg)
+            yield ("warning", msg)
+            yield (
+                "finish",
+                {
+                    "reason": "max_reflection_limit_reached",
+                    "reflection_count": state.reflection_count,
+                    "iteration": iteration,
+                },
+            )
+            return
+
+        # Record that we attempted reflection
         state.last_reflection_iteration = iteration
 
-        async for ev, decision in self.engine._force_reflection(iteration, state):
-            yield (ev, decision)
+        # ─── Call reflection (lives in WorkflowEngine) ───
+        async for event, payload in self.engine._force_reflection(iteration, state):
+            yield (event, payload)
 
-            if ev != "reflection_decision":
+            if event != "reflection_decision":
                 continue
 
+            decision = payload
             next_step = decision.get("next_step")
-            tool_name = decision.get("tool_name")
-            args = decision.get("arguments", {})
 
-            if next_step == "tool" and tool_name:
+            if next_step == "tool" and decision.get("tool_name"):
+                tool_name = decision["tool_name"]
+                args = decision.get("arguments", {})
                 state.tool_calls = [
                     {"function": {"name": tool_name, "arguments": json.dumps(args)}}
                 ]
-                yield ("info", {"message": f"[REFLECTION] Enqueued tool: {tool_name}"})
+                yield (
+                    "info",
+                    {
+                        "message": f"[REFLECTION] Enqueued tool call: {tool_name}",
+                        "tool_name": tool_name,
+                    },
+                )
                 return
+
             elif next_step == "llm":
                 await self.agent.context_manager.add_message(
-                    "system", f"[REFLECTION GUIDANCE]\n{json.dumps(decision, indent=2)}"
+                    "system",
+                    f"[REFLECTION GUIDANCE at iter {iteration}]\n"
+                    f"{json.dumps(decision, indent=2)}",
+                )
+                yield (
+                    "info",
+                    "Reflection added guidance message — continuing with LLM",
                 )
                 return
+
             elif next_step == "finish":
+                reason = decision.get("reason", "reflection requested termination")
                 yield (
                     "finish",
-                    {"reason": "reflection_finish", "details": decision.get("reason")},
+                    {
+                        "reason": "reflection_requested_finish",
+                        "details": reason,
+                        "iteration": iteration,
+                    },
                 )
                 return
+
             else:
-                yield ("warning", f"Unknown reflection step: {next_step}")
+                yield ("warning", f"Reflection returned invalid next_step: {next_step}")
+                return
+
+
+    @workflow.set(
+        "default",
+        name="replan_if_reflected",
+        description="Resets task list after a reflection so plan_tasks can generate a better plan with new context.",
+    )
+    async def _wf_replan_if_reflected(self, iteration: int, state: AgentState):
+        last_reflect = getattr(state, "last_reflection_iteration", 0)
+        last_replan = getattr(state, "last_replan_iteration", 0)
+
+        # Only trigger once per reflection and after the reflection step has completed
+        if last_reflect == 0 or iteration <= last_reflect + 1 or last_replan == iteration:
+            return
+
+        # Reset planning state
+        state.planned_tasks = []
+        state.current_task_index = 0
+        state.last_replan_iteration = iteration   # dynamic flag (safe on dataclass)
+
+        yield (
+            "replan_triggered",
+            {
+                "reason": "post_reflection",
+                "original_reflection_iter": last_reflect,
+                "new_iteration": iteration,
+            },
+        )
+        yield (
+            "info",
+            f"[REPLAN] Task list cleared after reflection at iter {last_reflect}. "
+            f"plan_tasks will run again on next cycle.",
+        )
 
     @workflow.set(
         "default",

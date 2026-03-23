@@ -365,13 +365,7 @@ class ActionRegistry:
             # 2. Weighted Total (Increased weights to ensure matches)
             total = k_score * 5 + f_score * 3 + usage_bonus * 0.4 + set_bonus
 
-            # 3. Debug Output (Optional: Remove if you want cleaner logs)
-            if "ls" in action.name or "list" in query:
-                print(
-                    f"[SCORE] {action.name:12} | f={f_score:.2f} k={k_score:.2f} tot={total:.2f}"
-                )
-
-            # 4. Lower Threshold (0.10 is safe; 0.4 was too strict)
+            # 3. Lower Threshold (0.10 is safe; 0.4 was too strict)
             if total > 0.10:
                 results.append((total, action, set_name))
 
