@@ -5,6 +5,7 @@ import importlib
 from pathlib import Path
 
 
+
 class ConfigLoader:
     """
     Loads config from YAML + ENV hybrid with secret resolution.
@@ -197,12 +198,14 @@ class ConfigLoader:
         Features:
         - Reuse global workflows in agents (by name)
         - Python modules (*.py) and YAML workflows (*.yml, *.yaml)
+        - Automatically registers decorator-based custom conditions
         - Fully resolves steps into engine.workflow_steps
         - Safe fallback to default workflow
         """
+
         agent_cfg = getattr(engine.agent, "config", {})
         agent_workflow_cfg = agent_cfg.get("workflow", {})
-        global_workflows = self.config.get("workflows", {})
+        global_workflows = getattr(self, "config", {}).get("workflows", {})
 
         # 1️⃣ Resolve agent workflows from global workflows
         resolved_workflows = {}
@@ -222,11 +225,9 @@ class ConfigLoader:
         if resolved_workflows:
             wf_name, wf_data = next(iter(resolved_workflows.items()))
 
-            # If workflow is only a name reference, fetch full data from global workflows
             if "steps" not in wf_data and wf_name in global_workflows:
                 wf_data = global_workflows[wf_name]
 
-            # Always resolve steps
             engine.workflow_steps = engine._resolve_steps(
                 wf_data.get("steps", getattr(engine, "DEFAULT_WORKFLOW", []))
             )
@@ -234,7 +235,6 @@ class ConfigLoader:
             engine.current_workflow_name = wf_name
             print(f"[DEBUG] Using workflow '{wf_name}' for agent '{engine.agent.name}'")
         else:
-            # fallback to default workflow
             engine.workflow_steps = engine._resolve_steps(
                 getattr(engine, "DEFAULT_WORKFLOW", [])
             )
@@ -244,20 +244,19 @@ class ConfigLoader:
                 f"[DEBUG] No workflow configured, using default for agent '{engine.agent.name}'"
             )
 
-        # 3️⃣ Optionally load workflow sets from folders (like tools)
-        sets_cfg = getattr(
-            engine, "workflow_sets_config", {}
-        )  # can be loaded from app config
+        # 3️⃣ Optionally load workflow sets from folders (Python + YAML)
+        sets_cfg = getattr(engine, "workflow_sets_config", {})
         app_root = getattr(engine, "app_root", Path.cwd())
 
         for set_name, cfg in sets_cfg.items():
             folder = cfg.get("folder")
-            if folder:
-                folder_path = Path(folder).expanduser().resolve()
-            else:
-                folder_path = app_root / "workflows" / set_name
-                if not folder_path.exists():
-                    folder_path = app_root / "workflows"
+            folder_path = (
+                Path(folder).expanduser().resolve()
+                if folder
+                else app_root / "workflows" / set_name
+            )
+            if not folder_path.exists():
+                folder_path = app_root / "workflows"
 
             if not folder_path.exists() or not folder_path.is_dir():
                 print(
@@ -278,6 +277,17 @@ class ConfigLoader:
                     print(
                         f"[INFO] Imported Python workflow '{py_file.name}' as set '{set_name}'"
                     )
+
+                    # Automatically register decorator-based conditions if available
+                    try:
+                        from neuralcore.workflows.registry import condition
+
+                        condition.register_to_engine(engine)
+                    except Exception as e:
+                        print(
+                            f"[WARNING] Failed to register conditions from '{py_file.name}': {e}"
+                        )
+
                 except Exception as e:
                     print(f"[ERROR] Failed to import workflow {py_file.name}: {e}")
 
@@ -286,12 +296,8 @@ class ConfigLoader:
                 folder_path.glob("*.yaml")
             ):
                 try:
-                    import yaml
-
                     with open(yaml_file, "r") as f:
                         wf_data = yaml.safe_load(f)
-                    if not hasattr(engine, "registered_workflows"):
-                        engine.registered_workflows = {}
                     engine.registered_workflows[set_name] = wf_data
                     imported_any = True
                     print(
@@ -321,8 +327,7 @@ class ConfigLoader:
         return self.config.get("workflows", {})
 
     # Inside ConfigLoader
-    def load_agent_from_config(self, agent_id: str, loader=None) -> "Agent":
-        from neuralcore.agents.core import Agent, get_clients  # break circular import
+    def load_agent_from_config(self, agent_id: str):
 
         app_root = self.app_root
 
@@ -332,11 +337,14 @@ class ConfigLoader:
             raise ValueError(f"No agent config found for '{agent_id}'")
 
         # --- Client config ---
+        from neuralcore.core.client_factory import get_clients
         clients = get_clients()
         client_name = agent_cfg.get("client")
         if client_name not in clients:
             raise ValueError(f"Client '{client_name}' not found for agent '{agent_id}'")
         client = clients[client_name]
+
+        from neuralcore.agents.core import Agent
 
         # --- Instantiate Agent ---
         agent = Agent(

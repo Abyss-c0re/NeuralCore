@@ -9,6 +9,7 @@ from neuralcore.workflows.default_flow import AgentFlow
 from neuralcore.utils.config import get_loader
 
 
+
 logger = Logger.get_logger()
 
 
@@ -40,6 +41,9 @@ class WorkflowEngine:
         self.current_workflow_name: str = "default"
         self.workflow_steps: List[Union[str, Dict[str, Any]]] = []
         self.workflow_description: str = ""
+        self._custom_conditions: Dict[
+            str, Callable[[AgentState, Optional[Dict]], bool]
+        ] = {}
 
         # === LOAD AgentFlow (now contains all _wf_* methods) ===
 
@@ -65,6 +69,20 @@ class WorkflowEngine:
     def register_step(self, name: str, handler: Callable):
         self._step_handlers[name] = handler
         logger.info(f"Registered external step: {name}")
+
+    def register_custom_condition(
+        self,
+        name: str,
+        handler: Callable[[AgentState, Optional[Dict[str, Any]]], bool],
+        description: str = "",
+    ):
+        """Register a fully custom Python condition.
+        handler(state, args_dict) -> bool
+        """
+        self._custom_conditions[name] = handler
+        logger.info(
+            f"✅ Registered custom condition '{name}': {description or 'no desc'}"
+        )
 
     def _register_builtin_workflow(self):
         self.register_workflow(
@@ -199,6 +217,27 @@ class WorkflowEngine:
             return cond
         if not isinstance(cond, dict):
             return bool(cond)
+
+        if "custom" in cond:
+            custom = cond["custom"]
+            if isinstance(custom, str):
+                handler = self._custom_conditions.get(custom)
+                if handler is not None:
+                    return handler(state, None)
+                return False
+
+            if isinstance(custom, dict):
+                name = custom.get("name")
+                args = custom.get("args", {})
+                if not isinstance(name, str):
+                    return False
+
+                handler = self._custom_conditions.get(name)
+                if handler is not None:
+                    return handler(state, args)
+                return False
+
+            return False
 
         if "and" in cond and isinstance(cond["and"], (list, tuple)):
             return all(self._evaluate_condition(item, state) for item in cond["and"])

@@ -1,4 +1,4 @@
-from typing import Any, Dict, Callable, Type, Union
+from typing import Any, Dict, Callable, Type, Union, Optional
 
 
 from neuralcore.utils.logger import Logger
@@ -107,5 +107,46 @@ class Workflow:
         logger.info(
             f"✅ Registered {count} steps from {instance.__class__.__name__} into engine '{workflow_name}'"
         )
+
+
+class Condition:
+    """
+    Global condition registry.
+    Decorator: @condition.add("condition_name", description="...")
+    """
+
+    def __init__(self):
+        # name -> handler(state, args_dict) -> bool
+        self.handlers: Dict[str, Callable[[Any, Optional[dict]], bool]] = {}
+
+    def add(self, name: str, description: str = ""):
+        """
+        Decorator to register a condition.
+        Usage:
+            @condition.add("has_tools_recently", description="True if agent used tools recently")
+            def has_tools(state, args=None):
+                return bool(state.tool_calls)
+        """
+
+        def decorator(fn: Callable[[Any, Optional[dict]], bool]):
+            self.handlers[name] = fn
+            logger.info(
+                f"✅ Registered condition '{name}' → {description or fn.__doc__}"
+            )
+            return fn
+
+        return decorator
+
+    def register_to_engine(self, engine):
+        """
+        Push all registered conditions to a WorkflowEngine instance.
+        """
+        for name, handler in self.handlers.items():
+            engine.register_custom_condition(name, handler)
+            logger.info(f"✅ Condition '{name}' registered in engine")
+
+
+# Singleton instance
+condition = Condition()
 
 workflow = Workflow()
