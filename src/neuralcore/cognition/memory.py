@@ -161,85 +161,86 @@ class ContextManager:
     # ─────────────────────────────────────────────────────────────
 
 
-async def fetch_embedding(
-    self, text: str, size: int = 500, prefix: str | None = None
-) -> np.ndarray:
-    """Unified embedding fetch with detailed logging."""
+    async def fetch_embedding(
+        self, text: str, size: int = 500, prefix: str | None = None
+    ) -> np.ndarray:
+        """Unified embedding fetch with detailed logging."""
 
-    if not text.strip():
-        logger.info("Embedding skipped: empty input text")
-        return np.array([])
-
-    prefix_str = prefix or "default"
-    cache_key = f"{prefix_str}:{text}"
-
-    logger.debug(f"Embedding request | prefix={prefix_str} | text_len={len(text)}")
-
-    async with asyncio.Lock():
-        if cache_key in self.embedding_cache:
-            logger.info(f"Cache hit | prefix={prefix_str} | text_len={len(text)}")
-            return self.embedding_cache[cache_key]
-
-    logger.info(
-        f"Cache miss | prefix={prefix_str} | using={'fastembed' if self.fast_embedder else 'fallback'}"
-    )
-
-    # ── FastEmbed path ──
-    if self.fast_embedder:
-        input_text = f"{prefix}: {text}" if prefix else text
-
-        logger.debug(
-            f"FastEmbed input prepared | prefix_applied={bool(prefix)} | input_len={len(input_text)}"
-        )
-
-        def _embed_sync():
-            try:
-                logger.debug("FastEmbed inference started")
-
-                emb_list = list(self.fast_embedder.embed([input_text]))
-                emb = np.asarray(emb_list[0], dtype=np.float32)
-
-                logger.info(
-                    f"FastEmbed success | dim={emb.shape[0]} | dtype={emb.dtype}"
-                )
-
-                return emb
-
-            except Exception:
-                logger.error(
-                    f"FastEmbed failed | prefix={prefix_str} | text_sample={text[:100]}",
-                    exc_info=True,
-                )
-                return np.array([])
-
-        emb = await asyncio.to_thread(_embed_sync)
-
-    # ── Fallback path ──
-    elif self.embeddings:
-        logger.info("Using fallback embedding provider (llama.cpp / OpenAI-style)")
-        emb = await self.embeddings.fetch_embedding(text, size)
-
-    else:
-        logger.warning("No embedding provider available")
-        emb = np.array([])
-
-    # ── Validation ──
-    if emb is not None and emb.size > 0:
-        if not np.isfinite(emb).all():
-            logger.warning("Embedding contains non-finite values (NaN/Inf)")
+        if not text.strip():
+            logger.info("Embedding skipped: empty input text")
             return np.array([])
 
-        self.embedding_cache[cache_key] = emb
+        prefix_str = prefix or "default"
+        cache_key = f"{prefix_str}:{text}"
 
-        logger.info(f"Embedding cached | prefix={prefix_str} | dim={emb.shape[0]}")
+        logger.debug(f"Embedding request | prefix={prefix_str} | text_len={len(text)}")
 
-        return emb
+        async with asyncio.Lock():
+            if cache_key in self.embedding_cache:
+                logger.info(f"Cache hit | prefix={prefix_str} | text_len={len(text)}")
+                return self.embedding_cache[cache_key]
 
-    logger.warning(
-        f"Embedding failed validation | prefix={prefix_str} | text_len={len(text)}"
-    )
+        logger.info(
+            f"Cache miss | prefix={prefix_str} | using={'fastembed' if self.fast_embedder else 'fallback'}"
+        )
 
-    return np.array([])
+        # ── FastEmbed path ──
+        if self.fast_embedder:
+            input_text = f"{prefix}: {text}" if prefix else text
+
+            logger.debug(
+                f"FastEmbed input prepared | prefix_applied={bool(prefix)} | input_len={len(input_text)}"
+            )
+
+            def _embed_sync():
+                if self.fast_embedder:
+                    try:
+                        logger.debug("FastEmbed inference started")
+
+                        emb_list = list(self.fast_embedder.embed([input_text]))
+                        emb = np.asarray(emb_list[0], dtype=np.float32)
+
+                        logger.info(
+                            f"FastEmbed success | dim={emb.shape[0]} | dtype={emb.dtype}"
+                        )
+
+                        return emb
+
+                    except Exception:
+                        logger.error(
+                            f"FastEmbed failed | prefix={prefix_str} | text_sample={text[:100]}",
+                            exc_info=True,
+                        )
+                        return np.array([])
+
+            emb = await asyncio.to_thread(_embed_sync)
+
+        # ── Fallback path ──
+        elif self.embeddings:
+            logger.info("Using fallback embedding provider (llama.cpp / OpenAI-style)")
+            emb = await self.embeddings.fetch_embedding(text, size)
+
+        else:
+            logger.warning("No embedding provider available")
+            emb = np.array([])
+
+        # ── Validation ──
+        if emb is not None and emb.size > 0:
+            if not np.isfinite(emb).all():
+                logger.warning("Embedding contains non-finite values (NaN/Inf)")
+                return np.array([])
+
+            self.embedding_cache[cache_key] = emb
+
+            logger.info(f"Embedding cached | prefix={prefix_str} | dim={emb.shape[0]}")
+
+            return emb
+
+        logger.warning(
+            f"Embedding failed validation | prefix={prefix_str} | text_len={len(text)}"
+        )
+
+        return np.array([])
 
     # ─────────────────────────────────────────────────────────────
     # LOGGING
