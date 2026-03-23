@@ -9,6 +9,7 @@ from neuralcore.actions.manager import (
     DynamicActionManager,
     registry,
 )
+
 from neuralcore.workflows.engine import WorkflowEngine
 from neuralcore.cognition.memory import ContextManager
 from neuralcore.core.client_factory import get_clients
@@ -41,13 +42,13 @@ class Agent:
             self.client.system_prompt if hasattr(self.client, "system_prompt") else "",
         )
 
-        self.registry = registry
+        self.registry = registry #Global tool registry
 
         self.manager = DynamicActionManager(registry)
         self.context_manager = ContextManager()
 
-        self.tools = AgentActionHelper(self)
-        self.workflow = WorkflowEngine(self)
+        self.agent_tools = AgentActionHelper(self) #Register tools that need access to the agent
+        self.workflow = WorkflowEngine(self) 
         ToolBrowser(registry, self.manager)
         logger.debug(" ToolBrowser registered")
 

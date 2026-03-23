@@ -6,6 +6,7 @@ from neuralcore.agents.state import AgentState, Phase
 from neuralcore.utils.logger import Logger
 from neuralcore.utils.exceptions_handler import ConfirmationRequired
 from neuralcore.workflows.default_flow import AgentFlow
+from neuralcore.actions.sequence import SequenceRegistry
 from neuralcore.utils.config import get_loader
 
 
@@ -46,7 +47,8 @@ class WorkflowEngine:
         ] = {}
 
         # === LOAD AgentFlow (now contains all _wf_* methods) ===
-
+        self.sequence_registry = SequenceRegistry(self) #Register sequence as step for workflow
+ 
         self._register_builtin_workflow()
         self.load_workflow_from_config()
 
