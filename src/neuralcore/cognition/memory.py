@@ -8,7 +8,15 @@ from neuralcore.utils.prompt_builder import PromptBuilder as PromptHelper
 from neuralcore.utils.config import get_loader
 from neuralcore.core.client_factory import get_clients
 from neuralcore.utils.text_tokenizer import TextTokenizer
-from neuralcore.utils.search import keyword_score, safe_cosine
+from neuralcore.utils.search import keyword_score, cosine_sim
+
+try:
+    from fastembed import TextEmbedding
+
+    FASTEMBED_AVAILABLE = True
+except ImportError:
+    TextEmbedding = None
+    FASTEMBED_AVAILABLE = False
 
 # ─────────────────────────────────────────────────────────────
 # CONSTANTS
@@ -70,9 +78,42 @@ class ContextManager:
         self.max_tokens = max_tokens
         clients = get_clients()
         self.client = clients.get("main")
-        self.embeddings = clients.get("embeddings")
-        self.tokenizer = None
+        self.embeddings = clients.get(
+            "embeddings"
+        )  # OG llama.cpp client (kept for fallback)
 
+        # ── FastEmbed config (configurable + fully backward-compatible) ──
+        loader = get_loader()
+        embed_config = loader.get_client_config("embeddings") or {}
+        self.use_fastembed = embed_config.get(
+            "use_fastembed", True
+        )  # ← default = new lightweight path
+        self.fast_embedder = None
+        self.fastembed_model = None
+
+        if self.use_fastembed and TextEmbedding:
+            try:
+                model_name = embed_config.get(
+                    "fastembed_model", "BAAI/bge-small-en-v1.5"
+                )
+                self.fast_embedder = TextEmbedding(model_name=model_name)
+                self.fastembed_model = model_name
+                logger.info(
+                    f"✅ FastEmbed ready (model: {model_name}) – lightweight alternative to llama.cpp"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ FastEmbed init failed, falling back to OG embeddings: {e}"
+                )
+                self.fast_embedder = None
+        else:
+            if not self.use_fastembed:
+                logger.info(
+                    "Using original llama.cpp / OpenAI-style embeddings (use_fastembed=false)"
+                )
+
+        # Tokenizer setup (unchanged)
+        self.tokenizer = None
         try:
             self.tokenizer = TextTokenizer.get_instance()
         except ValueError:
@@ -118,17 +159,87 @@ class ContextManager:
     # ─────────────────────────────────────────────────────────────
     # FETCH EMBEDDING
     # ─────────────────────────────────────────────────────────────
-    async def fetch_embedding(self, text: str, size: int = 500) -> np.ndarray:
-        if not text.strip() or not self.embeddings:
-            return np.array([])
-        async with asyncio.Lock():
-            if text in self.embedding_cache:
-                return self.embedding_cache[text]
-        emb = await self.embeddings.fetch_embedding(text, size)
-        if emb is not None and emb.size > 0 and np.isfinite(emb).all():
-            self.embedding_cache[text] = emb
-            return emb
+
+
+async def fetch_embedding(
+    self, text: str, size: int = 500, prefix: str | None = None
+) -> np.ndarray:
+    """Unified embedding fetch with detailed logging."""
+
+    if not text.strip():
+        logger.info("Embedding skipped: empty input text")
         return np.array([])
+
+    prefix_str = prefix or "default"
+    cache_key = f"{prefix_str}:{text}"
+
+    logger.debug(f"Embedding request | prefix={prefix_str} | text_len={len(text)}")
+
+    async with asyncio.Lock():
+        if cache_key in self.embedding_cache:
+            logger.info(f"Cache hit | prefix={prefix_str} | text_len={len(text)}")
+            return self.embedding_cache[cache_key]
+
+    logger.info(
+        f"Cache miss | prefix={prefix_str} | using={'fastembed' if self.fast_embedder else 'fallback'}"
+    )
+
+    # ── FastEmbed path ──
+    if self.fast_embedder:
+        input_text = f"{prefix}: {text}" if prefix else text
+
+        logger.debug(
+            f"FastEmbed input prepared | prefix_applied={bool(prefix)} | input_len={len(input_text)}"
+        )
+
+        def _embed_sync():
+            try:
+                logger.debug("FastEmbed inference started")
+
+                emb_list = list(self.fast_embedder.embed([input_text]))
+                emb = np.asarray(emb_list[0], dtype=np.float32)
+
+                logger.info(
+                    f"FastEmbed success | dim={emb.shape[0]} | dtype={emb.dtype}"
+                )
+
+                return emb
+
+            except Exception:
+                logger.error(
+                    f"FastEmbed failed | prefix={prefix_str} | text_sample={text[:100]}",
+                    exc_info=True,
+                )
+                return np.array([])
+
+        emb = await asyncio.to_thread(_embed_sync)
+
+    # ── Fallback path ──
+    elif self.embeddings:
+        logger.info("Using fallback embedding provider (llama.cpp / OpenAI-style)")
+        emb = await self.embeddings.fetch_embedding(text, size)
+
+    else:
+        logger.warning("No embedding provider available")
+        emb = np.array([])
+
+    # ── Validation ──
+    if emb is not None and emb.size > 0:
+        if not np.isfinite(emb).all():
+            logger.warning("Embedding contains non-finite values (NaN/Inf)")
+            return np.array([])
+
+        self.embedding_cache[cache_key] = emb
+
+        logger.info(f"Embedding cached | prefix={prefix_str} | dim={emb.shape[0]}")
+
+        return emb
+
+    logger.warning(
+        f"Embedding failed validation | prefix={prefix_str} | text_len={len(text)}"
+    )
+
+    return np.array([])
 
     # ─────────────────────────────────────────────────────────────
     # LOGGING
@@ -229,10 +340,10 @@ class ContextManager:
             item = self.knowledge_base[key]
             item.content = content
             if item.embedding.size == 0:
-                item.embedding = await self.fetch_embedding(content)
+                item.embedding = await self.fetch_embedding(content, prefix="passage")
             return key
 
-        embedding = await self.fetch_embedding(content)
+        embedding = await self.fetch_embedding(content, prefix="passage")
         item = KnowledgeItem(key, source_type, content, metadata)
         item.embedding = embedding
         self.knowledge_base[key] = item
@@ -253,7 +364,7 @@ class ContextManager:
         if not self.tokenizer:
             raise RuntimeError("Tokenizer not loaded...")
 
-        query_emb = await self.fetch_embedding(query)
+        query_emb = await self.fetch_embedding(query, prefix="query")
         if len(query_emb) == 0:
             return ""
         query_words = re.findall(r"\b\w+\b", query.lower())
@@ -262,7 +373,7 @@ class ContextManager:
         for item in self.knowledge_base.values():
             if item.embedding.size == 0:
                 continue
-            emb_sim = safe_cosine(query_emb, item.embedding)
+            emb_sim = cosine_sim(query_emb, item.embedding)
             preview = (
                 " ".join(str(v) for v in item.metadata.values())
                 + " "
@@ -302,7 +413,7 @@ class ContextManager:
         self, role: str, message: str, embedding: np.ndarray | None = None
     ) -> None:
         if embedding is None or embedding.size == 0:
-            embedding = await self.fetch_embedding(message)
+            embedding = await self.fetch_embedding(message, prefix="passage")
         token_count = (
             self.tokenizer.count_tokens(message)
             if self.tokenizer
@@ -345,7 +456,7 @@ class ContextManager:
         async def compute(topic: Topic) -> Tuple[float, Topic]:
             if len(topic.embedded_description) == 0 or len(embedding) == 0:
                 return 0.0, topic
-            return safe_cosine(embedding, topic.embedded_description), topic
+            return cosine_sim(embedding, topic.embedded_description), topic
 
         results = await asyncio.gather(
             *[compute(t) for t in self.topics if t is not exclude_topic]
@@ -369,8 +480,8 @@ class ContextManager:
         """Compute (score, message, embedding) tuples for relevance-aware pruning."""
         scored = []
         for msg in messages:
-            emb = await self.fetch_embedding(msg["content"])
-            score = safe_cosine(emb, ref_emb) if len(emb) > 0 else 0.0
+            emb = await self.fetch_embedding(msg["content"], prefix="passage")
+            score = cosine_sim(emb, ref_emb) if len(emb) > 0 else 0.0
             scored.append((score, msg, emb))
         return scored
 
@@ -381,7 +492,9 @@ class ContextManager:
 
         # Ensure topic embedding
         if topic.embedded_description.size == 0 and topic.description.strip():
-            topic.embedded_description = await self.fetch_embedding(topic.description)
+            topic.embedded_description = await self.fetch_embedding(
+                topic.description, prefix="passage"
+            )
 
         # Sliding window to detect off-topic segments
         window_size = min(len(topic.history), SLICE_SIZE * 3)
@@ -692,16 +805,18 @@ class ContextManager:
         if not self.tokenizer:
             raise RuntimeError("Tokenizer is not loaded...")
 
-        query_emb = await self.fetch_embedding(query)
+        query_emb = await self.fetch_embedding(query, prefix="query")
         query_words = re.findall(r"\b\w+\b", query.lower())
 
         scored = []
         for msg in self.current_topic.archived_history:
             text = msg["content"]
-            emb = await self.fetch_embedding(text)  # always safe + cached
+            emb = await self.fetch_embedding(
+                text, prefix="passage"
+            )  # always safe + cached
             if len(emb) == 0:  # ← FIXED: no more str/None
                 continue
-            sim = safe_cosine(query_emb, emb)
+            sim = cosine_sim(query_emb, emb)
             kw = keyword_score(query_words, text[:400])
             scored.append((0.65 * sim + 0.35 * kw, msg))
 

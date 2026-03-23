@@ -1,5 +1,6 @@
 import re
 import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
 from rapidfuzz import fuzz
 
 
@@ -53,7 +54,7 @@ def fuzzy_score(query, text):
     return fuzz.partial_ratio(query, text) / 100
 
 
-def cosine_similarity(vec1: np.ndarray, vec2: np.ndarray) -> float:
+def cosine_sim(vec1: np.ndarray, vec2: np.ndarray) -> float:
     if vec1 is None or vec2 is None:
         return 0.0
 
@@ -69,30 +70,29 @@ def cosine_similarity(vec1: np.ndarray, vec2: np.ndarray) -> float:
     if not np.isfinite(vec1).all() or not np.isfinite(vec2).all():
         return 0.0
 
-    norm1 = np.linalg.norm(vec1)
-    norm2 = np.linalg.norm(vec2)
-
-    if norm1 == 0.0 or norm2 == 0.0:
+    try:
+        # sklearn expects 2D arrays
+        sim = cosine_similarity(vec1.reshape(1, -1), vec2.reshape(1, -1))
+        return float(sim[0][0])
+    except Exception:
         return 0.0
-
-    return float(np.dot(vec1, vec2) / (norm1 * norm2))
 
     # ─────────────────────────────────────────────────────────────
 
 
 # SAFE COSINE SIMILARITY
 # ─────────────────────────────────────────────────────────────
-def safe_cosine(vec1: np.ndarray, vec2: np.ndarray) -> float:
-    if vec1 is None or vec2 is None:
-        return 0.0
-    vec1 = np.asarray(vec1, dtype=np.float32)
-    vec2 = np.asarray(vec2, dtype=np.float32)
-    if vec1.size == 0 or vec2.size == 0:
-        return 0.0
-    if vec1.shape != vec2.shape:
-        return 0.0
-    norm1 = np.linalg.norm(vec1)
-    norm2 = np.linalg.norm(vec2)
-    if norm1 == 0.0 or norm2 == 0.0:
-        return 0.0
-    return float(np.dot(vec1, vec2) / (norm1 * norm2))
+# def safe_cosine(vec1: np.ndarray, vec2: np.ndarray) -> float:
+#     if vec1 is None or vec2 is None:
+#         return 0.0
+#     vec1 = np.asarray(vec1, dtype=np.float32)
+#     vec2 = np.asarray(vec2, dtype=np.float32)
+#     if vec1.size == 0 or vec2.size == 0:
+#         return 0.0
+#     if vec1.shape != vec2.shape:
+#         return 0.0
+#     norm1 = np.linalg.norm(vec1)
+#     norm2 = np.linalg.norm(vec2)
+#     if norm1 == 0.0 or norm2 == 0.0:
+#         return 0.0
+#     return float(np.dot(vec1, vec2) / (norm1 * norm2))
