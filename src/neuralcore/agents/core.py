@@ -3,7 +3,12 @@ import asyncio
 from pathlib import Path
 
 from neuralcore.utils.logger import Logger
-from neuralcore.actions.manager import registry
+from neuralcore.actions.manager import (
+    AgentActionHelper,
+    ToolBrowser,
+    DynamicActionManager,
+    registry,
+)
 from neuralcore.workflows.engine import WorkflowEngine
 from neuralcore.cognition.memory import ContextManager
 from neuralcore.core.client_factory import get_clients
@@ -22,10 +27,8 @@ class Agent:
         self.loader = loader
         self.app_root = app_root
         self.config = self._load_agent_config(agent_id, config_file)
-
-        client_name = self.config.get("client", "main")
         clients = get_clients()
-        self.client = clients[client_name]
+        self.client = clients[self.config.get("client", "main")]
 
         self.name = self.config.get("name", f"Agent-{agent_id}")
         self.description = self.config.get("description", "")
@@ -39,9 +42,14 @@ class Agent:
         )
 
         self.registry = registry
-        self.manager = registry.manager
+
+        self.manager = DynamicActionManager(registry)
         self.context_manager = ContextManager()
+
+        self.tools = AgentActionHelper(self)
         self.workflow = WorkflowEngine(self)
+        ToolBrowser(registry, self.manager)
+        logger.debug(" ToolBrowser registered")
 
     def attach_tools(self):
         """Call after instantiating Agent to load tool sets."""
@@ -50,7 +58,7 @@ class Agent:
             self.loader.load_tool_sets(sets_to_load=tool_sets)
         # Explicitly register all actions in the registry
         for action_name in self.registry.all_actions:
-            self.registry.manager.load_tools([action_name])
+            self.manager.load_tools([action_name])
 
     def _load_agent_config(self, agent_id: str, config_file: Optional[Path]) -> dict:
         print(f"[DEBUG] Loading config for agent_id='{agent_id}'")
@@ -84,7 +92,7 @@ class Agent:
         tool_sets = self.config.get("tool_sets", [])
         self.loader.load_tool_sets(sets_to_load=tool_sets)
         for action_name in self.registry.all_actions:
-            self.registry.manager.load_tools([action_name])
+            self.manager.load_tools([action_name])
 
     def _reset_state(self):
         self.task = ""

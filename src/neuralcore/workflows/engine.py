@@ -90,7 +90,7 @@ class WorkflowEngine:
             description="Default ReAct loop + persistent goal + efficient ContextManager",
             steps=self.DEFAULT_WORKFLOW,
         )
-        flow = AgentFlow(self.agent, self)
+        flow = AgentFlow(self)
 
         for attr_name in dir(flow):
             if attr_name.startswith("_wf_"):
@@ -193,7 +193,9 @@ class WorkflowEngine:
                     target = float(target)
             except ValueError:
                 # If conversion fails, treat as mismatch (safe default)
-                logger.debug(f"Cannot compare numeric actual={actual} with non-numeric target={target!r}")
+                logger.debug(
+                    f"Cannot compare numeric actual={actual} with non-numeric target={target!r}"
+                )
                 return False
 
         # ─── Normal comparison logic ───
@@ -202,15 +204,27 @@ class WorkflowEngine:
         if op in ("ne", "!=", "<>"):
             return actual != target
         if op in ("gt", ">", "greater_than"):
-            return actual > target if actual is not None and target is not None else False
+            return (
+                actual > target if actual is not None and target is not None else False
+            )
         if op in ("gte", ">=", "ge"):
-            return actual >= target if actual is not None and target is not None else False
+            return (
+                actual >= target if actual is not None and target is not None else False
+            )
         if op in ("lt", "<", "less_than"):
-            return actual < target if actual is not None and target is not None else False
+            return (
+                actual < target if actual is not None and target is not None else False
+            )
         if op in ("lte", "<=", "le"):
-            return actual <= target if actual is not None and target is not None else False
+            return (
+                actual <= target if actual is not None and target is not None else False
+            )
         if op in ("in", "contains"):
-            return target in actual if isinstance(actual, (list, tuple, set, str)) else False
+            return (
+                target in actual
+                if isinstance(actual, (list, tuple, set, str))
+                else False
+            )
 
         logger.warning(f"Unknown comparison operator: {op}")
         return False

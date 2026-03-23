@@ -1,5 +1,8 @@
 import math
-from typing import Any, Dict, List, Optional, Set, Union
+import inspect
+
+from functools import wraps
+from typing import Any, Dict, List, Optional, Set, Union, Callable
 from neuralcore.utils.search import fuzzy_score, keyword_score
 from neuralcore.actions.actions import Action, ActionSet
 
@@ -308,13 +311,12 @@ class ActionRegistry:
         self._index = []
 
         # Dynamic manager
-        self.manager = DynamicActionManager(self)
+        
 
         logger.debug(" ActionRegistry initialized")
 
         # Load ToolBrowser
-        ToolBrowser(self, self.manager)
-        logger.debug(" ToolBrowser registered")
+        
 
     def register_set(self, name: str, action_set: ActionSet):
         logger.debug(f"Registering set '{name}' with {len(action_set.actions)} actions")
@@ -430,6 +432,153 @@ class ActionRegistry:
 # ─────────────────────────────────────────────────────────────
 registry = ActionRegistry()
 logger.debug(f" Global registry created with sets: {list(registry.sets.keys())}")
+
+
+
+class AgentActionHelper:
+    """
+    Helper to register actions bound to a specific Agent instance.
+
+    - Automatically injects `agent` into executors when required
+    - Builds clean JSON schema (hides internal args like `agent`)
+    - Supports both sync and async functions
+    """
+
+    def __init__(self, agent):
+        self.agent = agent
+        self.registry = agent.registry
+        self.manager = self.agent.manager
+
+    # ─────────────────────────────────────────────
+    # Public API
+    # ─────────────────────────────────────────────
+
+    def register_action(self, action: Action, set_name: Optional[str] = None):
+        """Register an already created Action."""
+        self._ensure_set(set_name)
+
+        self.manager.add(action, origin_set=set_name)
+        self.registry._add_to_index(action, set_name or "manual")
+
+        logger.debug(f"Agent '{self.agent.agent_id}' registered action: {action.name}")
+
+    def register_action_from_function(
+        self,
+        func: Callable,
+        set_name: str,
+        **kwargs,
+    ) -> Action:
+        """
+        Wrap a function into an Action and register it.
+
+        Supports:
+        - def tool(agent, ...)
+        - def tool(...)
+        - async def tool(...)
+        """
+
+        name = kwargs.get("name", func.__name__)
+        description = kwargs.get("description", func.__doc__ or "")
+        tags = kwargs.get("tags", [])
+        aliases = kwargs.get("aliases", [])
+
+        parameters = dict(kwargs.get("parameters", {}))  # copy!
+        required = list(kwargs.get("required", []))  # copy!
+
+        sig = signature(func)
+
+        # Build schema (skip internal params like 'agent')
+        for param_name, param in sig.parameters.items():
+            if param_name == "agent":
+                continue
+
+            if param_name not in parameters:
+                param_type = map_type_to_json(param.annotation)
+                parameters[param_name] = {
+                    "type": param_type,
+                    "description": f"Parameter '{param_name}'",
+                }
+
+            if param.default is _empty and param_name not in required:
+                required.append(param_name)
+
+        # Bind agent if needed
+        executor = self._bind_executor(func)
+
+        action = Action(
+            name=name,
+            description=description,
+            tags=tags,
+            parameters=parameters,
+            required=required,
+            executor=executor,
+        )
+
+        action.aliases = aliases
+        action.usage_count = 0
+
+        self.register_action(action, set_name=set_name)
+        return action
+
+    def register_agent_method(
+        self,
+        method_name: str,
+        set_name: str,
+        **kwargs,
+    ) -> Action:
+        """
+        Register a method directly from the agent.
+        """
+        method = getattr(self.agent, method_name)
+
+        return self.register_action_from_function(
+            method,
+            set_name=set_name,
+            name=kwargs.get("name", method_name),
+            description=kwargs.get("description", method.__doc__ or ""),
+            **kwargs,
+        )
+
+    def get_agent_tools(self) -> List[Dict[str, Any]]:
+        """Return currently available LLM tools."""
+        return self.manager.get_llm_tools()
+
+    # ─────────────────────────────────────────────
+    # Internal helpers
+    # ─────────────────────────────────────────────
+
+    def _ensure_set(self, set_name: Optional[str]):
+        if not set_name:
+            return
+
+        if set_name not in self.registry.sets:
+            aset = ActionSet(name=set_name, description=f"{set_name} tools")
+            self.registry.register_set(set_name, aset)
+
+    def _needs_agent_arg(self, func: Callable) -> bool:
+        sig = signature(func)
+        params = list(sig.parameters.values())
+
+        return len(params) > 0 and params[0].name == "agent"
+
+    def _bind_executor(self, func: Callable) -> Callable:
+        if not self._needs_agent_arg(func):
+            return func
+
+        if inspect.iscoroutinefunction(func):
+
+            @wraps(func)
+            async def async_wrapper(*args, **kwargs):
+                return await func(self.agent, *args, **kwargs)
+
+            return async_wrapper
+        else:
+
+            @wraps(func)
+            def sync_wrapper(*args, **kwargs):
+                return func(self.agent, *args, **kwargs)
+
+            return sync_wrapper
 
 
 def tool(set_name: str, **kwargs):

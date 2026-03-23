@@ -18,9 +18,9 @@ class AgentFlow:
     Uses self.engine.xxx to call the executors that stay in WorkflowEngine.
     """
 
-    def __init__(self, agent, workflow):
-        self.agent = agent
-        self.engine = workflow
+    def __init__(self, engine):
+        self.agent = engine.agent
+        self.engine = engine
 
     @workflow.set(
         "default",
@@ -61,12 +61,12 @@ class AgentFlow:
             suggested_tools = list(dict.fromkeys(suggested_tools))
 
             if suggested_tools:
-                self.agent.registry.manager.load_tools(suggested_tools)
+                self.agent.manager.load_tools(suggested_tools)
                 yield ("info", f"Loaded tools: {', '.join(suggested_tools)}")
 
             plan_prompt = f"""
             Agent must plan a sequence of actionable steps to accomplish the TASK below.
-            Only use tools available in the agent's dynamic toolset: {", ".join(self.agent.registry.manager._loaded_tools) or "none"}.
+            Only use tools available in the agent's dynamic toolset: {", ".join(self.agent.manager._loaded_tools) or "none"}.
             Respond ONLY with JSON. NO explanations.
 
             TASK:
