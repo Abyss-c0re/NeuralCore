@@ -48,6 +48,139 @@ def map_type_to_json(param_annotation):
 # ─────────────────────────────────────────────────────────────
 
 
+# ─────────────────────────────────────────────────────────────
+# Main Action Registry
+# ─────────────────────────────────────────────────────────────
+class ActionRegistry:
+    """Central searchable registry of all tools."""
+
+    def __init__(self):
+        self.sets: Dict[str, ActionSet] = {}
+        self.all_actions: Dict[str, tuple[Action, str]] = {}
+        self._index = []
+
+        # Dynamic manager
+
+        logger.debug(" ActionRegistry initialized")
+
+        # Load ToolBrowser
+
+    def register_set(self, name: str, action_set: ActionSet):
+        logger.debug(f"Registering set '{name}' with {len(action_set.actions)} actions")
+        if name in self.sets:
+            raise ValueError(f"Set {name} already exists")
+        self.sets[name] = action_set
+
+        for action in action_set.actions:
+            self._add_to_index(action, name)
+
+    def register_action(self, action: Action, set_name: str):
+        if set_name in self.sets:
+            self.sets[set_name].add(action)
+        else:
+            aset = ActionSet(name=set_name)
+            aset.add(action)
+            self.register_set(set_name, aset)
+        self._add_to_index(action, set_name)
+
+    def _add_to_index(self, action: Action, set_name: str):
+        self.all_actions[action.name] = (action, set_name)
+        searchable = " ".join(
+            [action.name, action.description]
+            + getattr(action, "tags", [])
+            + getattr(action, "aliases", [])
+        ).lower()
+        self._index.append({"action": action, "set": set_name, "text": searchable})
+        logger.debug(f" Added action '{action.name}' to index under set '{set_name}'")
+
+    def search(self, query: str, limit: int = 20):
+        query = query.lower().strip()
+        query_words = query.split()
+
+        results = []
+
+        for entry in self._index:
+            action = entry["action"]
+            text = entry["text"]
+            set_name = entry["set"]
+
+            # 1. Scoring
+            k_score = keyword_score(query_words, text.split())
+            f_score = fuzzy_score(query, text)
+
+            usage_bonus = math.log1p(action.usage_count)
+            set_bonus = 1.5 if query in set_name.lower() else 0
+
+            # 2. Weighted Total (Increased weights to ensure matches)
+            total = k_score * 5 + f_score * 3 + usage_bonus * 0.4 + set_bonus
+
+            # 3. Lower Threshold (0.10 is safe; 0.4 was too strict)
+            if total > 0.10:
+                results.append((total, action, set_name))
+
+        # Sort by score (highest first)
+        results.sort(key=lambda x: x[0], reverse=True)
+        return [(a, s) for _, a, s in results[:limit]]
+
+    def list_all_tools(self, limit: int = 100) -> List[Dict]:
+        """
+        Returns a list of all tools currently in the registry.
+        """
+        tools = []
+
+        # Correct Unpacking:
+        # 1. key (name_string)
+        # 2. value (tuple containing Action and set_name)
+        for name, (action, set_name) in self.all_actions.items():
+            tools.append(
+                {
+                    "name": action.name,
+                    "description": action.description,
+                    "set_name": set_name,
+                    "tags": getattr(action, "tags", []),
+                }
+            )
+
+        # Sort by name for readability
+        tools.sort(key=lambda x: x["name"])
+
+        if limit:
+            return tools[:limit]
+
+        return tools
+
+    # Optional: Quick debug print version
+    def debug_print_all_tools(self, limit: int = 8):
+        tools = self.list_all_tools(limit)
+        print("\n" + "=" * 80)
+        print("📂 GLOBAL TOOL REGISTRY CONTENTS")
+        print("=" * 80)
+        for tool in tools:
+            print(f"  🛠️  [ {tool['name']:30} ] @ {tool['set_name']}")
+            print(f"     📖 {tool['description']}")
+            if tool.get("tags"):
+                print(f"     🏷️  Tags: {', '.join(tool['tags'])}")
+            print("-" * 80)
+        print(f"✅ Total Tools: {len(tools)}")
+        print("=" * 80 + "\n")
+
+    def execute(self, name: str, **kwargs):
+        if name not in self.all_actions:
+            raise ValueError(f"Action '{name}' not found")
+        action, _ = self.all_actions[name]
+        logger.debug(f" Executing action '{name}' with args: {kwargs}")
+        result = action.executor(**kwargs)
+        action.usage_count = getattr(action, "usage_count", 0) + 1
+        return result
+
+
+# ─────────────────────────────────────────────────────────────
+# Create global singleton
+# ─────────────────────────────────────────────────────────────
+registry = ActionRegistry()
+logger.debug(f" Global registry created with sets: {list(registry.sets.keys())}")
+
+
 class DynamicActionManager:
     """Manages dynamically loaded tools for the current session."""
 
@@ -297,142 +430,6 @@ class ToolBrowser(Action):
             ],
             "message": f"{len(best)} tools loaded and ready.",
         }
-
-
-# ─────────────────────────────────────────────────────────────
-# Main Action Registry
-# ─────────────────────────────────────────────────────────────
-class ActionRegistry:
-    """Central searchable registry of all tools."""
-
-    def __init__(self):
-        self.sets: Dict[str, ActionSet] = {}
-        self.all_actions: Dict[str, tuple[Action, str]] = {}
-        self._index = []
-
-        # Dynamic manager
-        
-
-        logger.debug(" ActionRegistry initialized")
-
-        # Load ToolBrowser
-        
-
-    def register_set(self, name: str, action_set: ActionSet):
-        logger.debug(f"Registering set '{name}' with {len(action_set.actions)} actions")
-        if name in self.sets:
-            raise ValueError(f"Set {name} already exists")
-        self.sets[name] = action_set
-
-        for action in action_set.actions:
-            self._add_to_index(action, name)
-
-    def register_action(self, action: Action, set_name: str):
-        if set_name in self.sets:
-            self.sets[set_name].add(action)
-        else:
-            aset = ActionSet(name=set_name)
-            aset.add(action)
-            self.register_set(set_name, aset)
-        self._add_to_index(action, set_name)
-
-    def _add_to_index(self, action: Action, set_name: str):
-        self.all_actions[action.name] = (action, set_name)
-        searchable = " ".join(
-            [action.name, action.description]
-            + getattr(action, "tags", [])
-            + getattr(action, "aliases", [])
-        ).lower()
-        self._index.append({"action": action, "set": set_name, "text": searchable})
-        logger.debug(f" Added action '{action.name}' to index under set '{set_name}'")
-
-    def search(self, query: str, limit: int = 20):
-        query = query.lower().strip()
-        query_words = query.split()
-
-        results = []
-
-        for entry in self._index:
-            action = entry["action"]
-            text = entry["text"]
-            set_name = entry["set"]
-
-            # 1. Scoring
-            k_score = keyword_score(query_words, text.split())
-            f_score = fuzzy_score(query, text)
-
-            usage_bonus = math.log1p(action.usage_count)
-            set_bonus = 1.5 if query in set_name.lower() else 0
-
-            # 2. Weighted Total (Increased weights to ensure matches)
-            total = k_score * 5 + f_score * 3 + usage_bonus * 0.4 + set_bonus
-
-            # 3. Lower Threshold (0.10 is safe; 0.4 was too strict)
-            if total > 0.10:
-                results.append((total, action, set_name))
-
-        # Sort by score (highest first)
-        results.sort(key=lambda x: x[0], reverse=True)
-        return [(a, s) for _, a, s in results[:limit]]
-
-    def list_all_tools(self, limit: int = 100) -> List[Dict]:
-        """
-        Returns a list of all tools currently in the registry.
-        """
-        tools = []
-
-        # Correct Unpacking:
-        # 1. key (name_string)
-        # 2. value (tuple containing Action and set_name)
-        for name, (action, set_name) in self.all_actions.items():
-            tools.append(
-                {
-                    "name": action.name,
-                    "description": action.description,
-                    "set_name": set_name,
-                    "tags": getattr(action, "tags", []),
-                }
-            )
-
-        # Sort by name for readability
-        tools.sort(key=lambda x: x["name"])
-
-        if limit:
-            return tools[:limit]
-
-        return tools
-
-    # Optional: Quick debug print version
-    def debug_print_all_tools(self, limit: int = 8):
-        tools = self.list_all_tools(limit)
-        print("\n" + "=" * 80)
-        print("📂 GLOBAL TOOL REGISTRY CONTENTS")
-        print("=" * 80)
-        for tool in tools:
-            print(f"  🛠️  [ {tool['name']:30} ] @ {tool['set_name']}")
-            print(f"     📖 {tool['description']}")
-            if tool.get("tags"):
-                print(f"     🏷️  Tags: {', '.join(tool['tags'])}")
-            print("-" * 80)
-        print(f"✅ Total Tools: {len(tools)}")
-        print("=" * 80 + "\n")
-
-    def execute(self, name: str, **kwargs):
-        if name not in self.all_actions:
-            raise ValueError(f"Action '{name}' not found")
-        action, _ = self.all_actions[name]
-        logger.debug(f" Executing action '{name}' with args: {kwargs}")
-        result = action.executor(**kwargs)
-        action.usage_count = getattr(action, "usage_count", 0) + 1
-        return result
-
-
-# ─────────────────────────────────────────────────────────────
-# Create global singleton
-# ─────────────────────────────────────────────────────────────
-registry = ActionRegistry()
-logger.debug(f" Global registry created with sets: {list(registry.sets.keys())}")
-
 
 
 class AgentActionHelper:

@@ -1,4 +1,5 @@
-from neuralcore.actions.actions import Action, ActionSet, sequence, ActionFromSequence
+from neuralcore.actions.actions import Action, ActionSet
+from neuralcore.actions.sequence import sequence, ActionFromSequence
 
 
 async def check_goal_action(agent, **kwargs):
