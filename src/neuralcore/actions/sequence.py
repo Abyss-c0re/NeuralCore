@@ -448,3 +448,29 @@ class SequenceRegistry:
                 return
 
         self.engine.register_step(step_name, handler)
+
+# Usage 
+
+# engine = WorkflowEngine(agent)
+
+# from neuralcore.workflows.sequence_registry import SequenceRegistry
+# seq_registry = SequenceRegistry(engine)
+
+# seq = sequence(
+#     name="process_text",
+#     description="Uppercase → wrap → finalize",
+#     steps=[act_a, act_b, act_c],
+# )
+
+# seq_registry.register(seq)
+
+# engine.register_workflow(
+#     name="my_flow",
+#     description="test",
+#     steps=[
+#         "plan_tasks",
+#         "process_text",   # 👈 THIS NOW WORKS
+#         "llm_stream",
+#     ]
+# )
+
