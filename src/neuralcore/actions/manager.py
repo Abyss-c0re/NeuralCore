@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Set, Union, Callable
 from neuralcore.utils.search import fuzzy_score, keyword_score
 from neuralcore.actions.actions import Action, ActionSet
 
-from inspect import signature, _empty
+from inspect import signature, _empty, iscoroutinefunction
 from typing import get_origin
 
 from neuralcore.utils.logger import Logger
@@ -367,8 +367,8 @@ class DynamicActionManager:
     def get_llm_tools(self) -> List[Dict[str, Any]]:
         return self.current_set.get_llm_tools()
 
-    def get_executor(self, name: str) -> Optional[Action]:
-        return self.current_set.by_name.get(name)
+    def get_executor(self, agent, name: str) -> Optional[Action]:
+        return self.current_set.get_executor(agent, name)
 
     @property
     def actions(self):
@@ -581,60 +581,81 @@ class AgentActionHelper:
 def tool(set_name: str, **kwargs):
     """
     Wrap a function as an Action and auto-add it to a set.
-    Converts all Python type annotations to JSON Schema types.
+    - First argument can be 'agent' (or 'self') and will be injected automatically
+    - Sync or async functions supported
+    - 'agent' is hidden from the final parameters schema
     """
 
-    def wrapper(fn):
+    def wrapper(fn: Callable):
         name = kwargs.get("name", fn.__name__)
         description = kwargs.get("description", fn.__doc__ or "")
         tags = kwargs.get("tags", [])
         aliases = kwargs.get("aliases", [])
 
-        # ---- Infer parameters from signature if not explicitly provided ----
         sig = signature(fn)
-        parameters = kwargs.get("parameters", {})
-        required = kwargs.get("required", [])
+        parameters = dict(kwargs.get("parameters", {}))
+        required = list(kwargs.get("required", []))
 
-        for param_name, param in sig.parameters.items():
+        # Skip first argument if it's 'agent' or 'self' (hide from schema)
+        param_list = list(sig.parameters.items())
+        skip_first = bool(param_list and param_list[0][0] in ("agent", "self"))
+
+        for i, (param_name, param) in enumerate(param_list):
+            if skip_first and i == 0:
+                continue
             if param_name not in parameters:
                 param_type = map_type_to_json(param.annotation)
                 parameters[param_name] = {
                     "type": param_type,
                     "description": f"Parameter '{param_name}'",
                 }
-
-            # Determine if required
             if param.default is _empty and param_name not in required:
                 required.append(param_name)
 
-        # ---- Create the Action ----
+        # Wrap executor to inject agent automatically if first param is agent/self
+        if iscoroutinefunction(fn):
+
+            @wraps(fn)
+            async def async_wrapper(*args, **kwargs):
+                if skip_first and args and hasattr(args[0], "context_manager"):
+                    return await fn(args[0], *args[1:], **kwargs)
+                else:
+                    return await fn(*args, **kwargs)
+
+            executor = async_wrapper
+        else:
+
+            @wraps(fn)
+            def sync_wrapper(*args, **kwargs):
+                if skip_first and args and hasattr(args[0], "context_manager"):
+                    return fn(args[0], *args[1:], **kwargs)
+                else:
+                    return fn(*args, **kwargs)
+
+            executor = sync_wrapper
+
+        # Create Action (agent is hidden from schema)
         action = Action(
             name=name,
             description=description,
-            tags=tags,
             parameters=parameters,
             required=required,
-            executor=fn,
+            executor=executor,
+            tags=tags,
+            aliases=aliases,
         )
-        action.aliases = aliases
-        action.usage_count = 0
 
-        # ---- Add to or create ActionSet ----
+        # Add to registry
         if set_name in registry.sets:
             aset = registry.sets[set_name]
         else:
             aset = ActionSet(name=set_name, description=f"{set_name} tools")
             registry.register_set(set_name, aset)
-            logger.debug(f" Created new ActionSet '{set_name}' for decorator")
+            logger.debug(f"Created new ActionSet '{set_name}' for decorator")
 
-        # Add action to the set
         aset.add(action)
-
-        # ---- Immediately add to search index ----
         registry._add_to_index(action, set_name)
-        logger.debug(
-            f"Registered action '{name}' under set '{set_name}' with required args: {required}"
-        )
+        logger.debug(f"Registered action '{name}' under set '{set_name}'")
 
         return fn
 

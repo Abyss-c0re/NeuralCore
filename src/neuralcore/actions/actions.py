@@ -1,6 +1,7 @@
 import asyncio
 
 from typing import Any, Callable, Dict, List, Optional, Awaitable
+from inspect import signature
 
 from neuralcore.utils.exceptions_handler import ConfirmationRequired
 from neuralcore.utils.logger import Logger
@@ -21,8 +22,8 @@ class Action:
         strict: bool = False,
         require_confirmation: bool = False,
         confirmation_preview: Optional[Callable[[dict], str]] = None,
-        tags: Optional[List[str]] = None,  # NEW
-        aliases: Optional[List[str]] = None,  # NEW
+        tags: Optional[List[str]] = None,
+        aliases: Optional[List[str]] = None,
     ):
         if action_type not in {"tool", "function"}:
             raise ValueError("action_type must be 'tool' or 'function'")
@@ -34,20 +35,24 @@ class Action:
         self.strict = strict
         self.tags = tags or []
         self.usage_count = 0
-
-        self.aliases = aliases or []  # NEW
+        self.aliases = aliases or []
 
         self.require_confirmation = require_confirmation
         self.confirmation_preview = confirmation_preview or (
             lambda kwargs: f"Executing {name} with {kwargs}"
         )
 
+        self._agent = None  # hidden runtime binding
+
         params_schema: Dict[str, Any] = {
             "type": "object",
-            "properties": parameters,
+            "properties": {
+                k: v for k, v in parameters.items() if k not in ("agent", "self")
+            },
         }
 
         if required:
+            required = [r for r in required if r not in ("agent", "self")]
             params_schema["required"] = required
 
         if strict:
@@ -59,10 +64,17 @@ class Action:
             "parameters": params_schema,
         }
 
-        # PRECOMPUTED SEARCH TEXT
         self._search_text = " ".join(
             [self.name, self.description, " ".join(self.tags)]
         ).lower()
+
+        sig = signature(executor)
+        params = list(sig.parameters.values())
+        self._needs_agent = bool(params and params[0].name in ("self", "agent"))
+
+    def bind_agent(self, agent):
+        self._agent = agent
+        return self
 
     async def __call__(self, **kwargs) -> Any:
         logger.info(f"[ACTION START] {self.name}")
@@ -74,7 +86,16 @@ class Action:
             raise ConfirmationRequired(self.name, kwargs, preview)
 
         try:
-            result = self.executor(**kwargs)
+            call_args = []
+
+            if self._needs_agent:
+                if self._agent is None:
+                    raise RuntimeError(
+                        f"Action '{self.name}' expects agent/self, but no agent is bound"
+                    )
+                call_args.append(self._agent)
+
+            result = self.executor(*call_args, **kwargs)
 
             if asyncio.iscoroutine(result) or isinstance(result, Awaitable):
                 logger.debug(f"[ACTION AWAITING] {self.name} awaiting async result")
@@ -112,6 +133,8 @@ class Action:
                 "error": str(exc),
                 "args": kwargs,
             }
+        finally:
+            self._agent = None
 
 
 class ActionSet:
@@ -170,12 +193,17 @@ class ActionSet:
                 tools.append(tool_spec)
         return tools
 
-    def get_executor(self, name: str) -> Optional[Action]:
+    def get_executor(self, name: str, agent=None) -> Optional[Action]:
         action = self.by_name.get(name)
-        if action:
-            logger.debug(f"[ACTIONSET RESOLVE] Found executor for '{name}'")
-        else:
+        if not action:
             logger.warning(f"[ACTIONSET RESOLVE FAIL] No executor for '{name}'")
+            return None
+
+        logger.debug(f"[ACTIONSET RESOLVE] Found executor for '{name}'")
+
+        if agent is not None:
+            action.bind_agent(agent)
+
         return action
 
     def describe(self) -> Dict[str, Any]:  # ← new helper

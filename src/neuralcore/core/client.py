@@ -13,8 +13,6 @@ import numpy as np
 
 from neuralcore.utils.logger import Logger
 
-import json
-import time
 
 EMIT_INTERVAL = 0.05  # seconds (throttle)
 MIN_CHARS_DELTA = 3  # don't spam tiny updates
@@ -640,7 +638,7 @@ class LLMClient:
 
         # ── State ───────────────────────────────────────
         tool_call_buffer: Dict[int, Dict] = {}  # index → current tool state
-        tool_meta: Dict[int, Dict] = {}         # index → phase, last_len, completed
+        tool_meta: Dict[int, Dict] = {}  # index → phase, last_len, completed
         last_chunk = None
 
         def is_valid_json(s: str) -> bool:
@@ -666,7 +664,8 @@ class LLMClient:
                         continue
 
                     # ── CONTENT ──────────────────────────────
-                    if delta.content is not None and not tool_call_buffer:
+                    #if delta.content is not None and not tool_call_buffer:
+                    if delta.content is not None:  # ← remove the "and not tool_call_buffer"
                         await queue.put(("content", delta.content))
 
                     # ── TOOL CALLS ──────────────────────────
@@ -697,7 +696,9 @@ class LLMClient:
                             if tc_delta.function.name:
                                 tc["function"]["name"] = tc_delta.function.name
                             if tc_delta.function.arguments:
-                                tc["function"]["arguments"] += tc_delta.function.arguments
+                                tc["function"]["arguments"] += (
+                                    tc_delta.function.arguments
+                                )
 
                             # skip if name missing or already completed
                             if not tc["function"]["name"] or meta["completed"]:
@@ -707,7 +708,7 @@ class LLMClient:
                             args = tc["function"]["arguments"]
                             new_len = len(args)
                             if new_len > meta["last_len"]:
-                                chunk_delta = args[meta["last_len"]:new_len]
+                                chunk_delta = args[meta["last_len"] : new_len]
                                 meta["last_len"] = new_len
                                 await queue.put(
                                     (

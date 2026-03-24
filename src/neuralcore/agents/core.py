@@ -42,13 +42,15 @@ class Agent:
             self.client.system_prompt if hasattr(self.client, "system_prompt") else "",
         )
 
-        self.registry = registry #Global tool registry
+        self.registry = registry  # Global tool registry
 
         self.manager = DynamicActionManager(registry)
         self.context_manager = ContextManager()
 
-        self.agent_tools = AgentActionHelper(self) #Register tools that need access to the agent
-        self.workflow = WorkflowEngine(self) 
+        self.agent_tools = AgentActionHelper(
+            self
+        )  # Register tools that need access to the agent
+        self.workflow = WorkflowEngine(self)
         ToolBrowser(registry, self.manager)
         logger.debug(" ToolBrowser registered")
 
@@ -104,14 +106,28 @@ class Agent:
         self._stop_event: Optional[asyncio.Event] = None
 
     # ---------------- PUBLIC API (signature unchanged) ----------------
+
     async def run(
         self,
         user_prompt: str,
-        system_prompt: str = "",
-        temperature: float = 0.7,
-        max_tokens: int = 1212,
+        system_prompt: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
         stop_event: Optional[asyncio.Event] = None,
     ) -> AsyncIterator[Tuple[str, Any]]:
+        """
+        Run the agent workflow with defaults safely pulled from config.
+        Type-safe: ensures all values passed to workflow.run are correct types.
+        """
+        # Use config defaults if None
+        system_prompt = (
+            system_prompt if system_prompt is not None else self.system_prompt
+        )
+        temperature = (
+            float(temperature) if temperature is not None else float(self.temperature)
+        )
+        max_tokens = int(max_tokens) if max_tokens is not None else int(self.max_tokens)
+
         async for event, payload in self.workflow.run(
             user_prompt, system_prompt, temperature, max_tokens, stop_event
         ):
