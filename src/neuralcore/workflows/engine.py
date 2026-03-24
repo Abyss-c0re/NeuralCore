@@ -47,8 +47,10 @@ class WorkflowEngine:
         ] = {}
 
         # === LOAD AgentFlow (now contains all _wf_* methods) ===
-        self.sequence_registry = SequenceRegistry(self) #Register sequence as step for workflow
- 
+        self.sequence_registry = SequenceRegistry(
+            self
+        )  # Register sequence as step for workflow
+
         self._register_builtin_workflow()
         self.load_workflow_from_config()
 
@@ -476,10 +478,16 @@ class WorkflowEngine:
                     yield ("tool_delta", payload)
 
                 elif kind == "tool_complete":
-                    # Only append new calls not already in all_tool_calls
-                    sig = f"{payload['function']['name']}:{payload['function']['arguments']}"
+                    # Use canonical signature for deduplication (same as execution layer)
+                    try:
+                        args_dict = json.loads(payload["function"]["arguments"])
+                        sig = f"{payload['function']['name']}:{json.dumps(args_dict, sort_keys=True)}"
+                    except (json.JSONDecodeError, TypeError, KeyError):
+                        sig = f"{payload.get('function', {}).get('name')}:{payload.get('function', {}).get('arguments', '')}"
+
                     if not any(
-                        f"{c['function']['name']}:{c['function']['arguments']}" == sig
+                        f"{c.get('function', {}).get('name')}:{json.dumps(c.get('function', {}).get('arguments', ''), sort_keys=True) if isinstance(c.get('function', {}).get('arguments'), (dict, str)) else c.get('function', {}).get('arguments', '')}"
+                        == sig
                         for c in all_tool_calls
                     ):
                         all_tool_calls.append(payload)
@@ -524,7 +532,7 @@ class WorkflowEngine:
 
             self.agent.executed_signatures.add(sig)
 
-            executor = self.agent.manager.get_executor(name)
+            executor = self.agent.manager.get_executor(name, self.agent)
             if not executor:
                 yield ("tool_skipped", {"name": name, "reason": "no_executor"})
                 continue

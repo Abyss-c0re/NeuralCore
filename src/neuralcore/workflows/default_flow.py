@@ -1,10 +1,12 @@
 import re
+import asyncio
 
 import json
 
 from neuralcore.workflows.registry import workflow
 from neuralcore.utils.logger import Logger
 from neuralcore.agents.state import AgentState, Phase
+from typing import AsyncIterator, Dict, Any
 
 
 logger = Logger.get_logger()
@@ -27,11 +29,18 @@ class AgentFlow:
         name="plan_tasks",
         description="Generates tool queries and task plan.",
     )
-    async def _wf_plan_tasks(self, iteration: int, state: AgentState):
+    async def _wf_plan_tasks(
+        self, iteration: int, state: "AgentState"
+    ) -> AsyncIterator:
+        """
+        Faster, fully async + parallel task planning.
+        Streams progress while doing registry lookups and LLM calls in parallel.
+        """
         if not state.planned_tasks:
             state.phase = Phase.PLAN
             yield ("phase_changed", {"phase": state.phase.value})
 
+            # ── Step 1: Generate queries (async streaming)
             query_prompt = f"""
             Agent must generate queries to identify tools from the registry
             that are relevant to accomplishing the following TASK:
@@ -44,29 +53,49 @@ class AgentFlow:
             - NO explanation, NO extra text.
             JSON format: {{ "queries": ["query1", "query2", ...] }}
             """
-            raw_queries = await self.agent.client.ask(query_prompt)
+            raw_queries = await self.agent.client.chat(
+                [{"role": "user", "content": query_prompt}]
+            )
 
-            queries_json = re.search(r"\{.*\}", str(raw_queries), re.DOTALL)
-            queries_list = []
-            if queries_json:
-                try:
-                    queries_list = json.loads(queries_json.group()).get("queries", [])
-                except Exception as e:
-                    yield ("warning", f"Failed to parse queries JSON: {e}")
+            # Try JSON parsing directly
+            try:
+                queries_list = json.loads(raw_queries).get("queries", [])
+            except Exception:
+                # Fallback: regex non-greedy
+                match = re.search(r"\{.*?\}", raw_queries, re.DOTALL)
+                queries_list = []
+                if match:
+                    try:
+                        queries_list = json.loads(match.group()).get("queries", [])
+                    except Exception as e:
+                        yield ("warning", f"Failed to parse queries JSON: {e}")
 
-            suggested_tools = []
-            for q in queries_list:
-                results = self.agent.registry.search(q, limit=3)
-                suggested_tools.extend([a.name for a, _ in results])
-            suggested_tools = list(dict.fromkeys(suggested_tools))
+            if not queries_list:
+                yield ("warning", "No queries generated; cannot plan tasks.")
+                return
+
+            # ── Step 2: Parallel registry search for suggested tools
+            async def search_registry(query: str):
+                # Wrap synchronous registry search in thread
+                return await asyncio.to_thread(self.agent.registry.search, query, 3)
+
+            registry_tasks = [search_registry(q) for q in queries_list]
+            search_results = await asyncio.gather(*registry_tasks)
+
+            # Flatten and deduplicate
+            suggested_tools = list(
+                dict.fromkeys(a.name for results in search_results for a, _ in results)
+            )
 
             if suggested_tools:
                 self.agent.manager.load_tools(suggested_tools)
                 yield ("info", f"Loaded tools: {', '.join(suggested_tools)}")
 
+            # ── Step 3: Generate plan using available tools
+            tools_str = ", ".join(self.agent.manager._loaded_tools) or "none"
             plan_prompt = f"""
             Agent must plan a sequence of actionable steps to accomplish the TASK below.
-            Only use tools available in the agent's dynamic toolset: {", ".join(self.agent.manager._loaded_tools) or "none"}.
+            Only use tools available in the agent's dynamic toolset: {tools_str}.
             Respond ONLY with JSON. NO explanations.
 
             TASK:
@@ -76,22 +105,35 @@ class AgentFlow:
             - Ordered list of concise, actionable steps.
             - Strict JSON format: {{ "tasks": ["step1", "step2", ...] }}
             """
-            raw_plan = await self.agent.client.ask(plan_prompt)
 
-            plan_json = re.search(r"\{.*\}", str(raw_plan), re.DOTALL)
-            if plan_json:
-                try:
-                    plan = json.loads(plan_json.group())
-                    state.planned_tasks = plan.get("tasks", [])
-                    state.current_task_index = 0
-                except Exception as e:
+            raw_plan = await self.agent.client.chat(
+                [{"role": "user", "content": plan_prompt}]
+            )
+
+            # Try JSON parsing directly first
+            try:
+                plan_json = json.loads(raw_plan)
+                state.planned_tasks = plan_json.get("tasks", [])
+            except Exception:
+                # fallback: regex
+                match = re.search(r"\{.*?\}", raw_plan, re.DOTALL)
+                if match:
+                    try:
+                        plan_json = json.loads(match.group())
+                        state.planned_tasks = plan_json.get("tasks", [])
+                    except Exception as e:
+                        state.planned_tasks = []
+                        yield ("warning", f"Failed to parse plan JSON: {e}")
+                else:
                     state.planned_tasks = []
-                    yield ("warning", f"Failed to parse plan JSON: {e}")
-            else:
-                state.planned_tasks = []
-                yield ("warning", "No JSON found in planning response")
+                    yield ("warning", "No JSON found in planning response")
 
-        if state.planned_tasks and state.current_task_index < len(state.planned_tasks):
+            state.current_task_index = 0
+
+        # ── Step 4: Yield next task if available
+        while state.planned_tasks and state.current_task_index < len(
+            state.planned_tasks
+        ):
             next_task = state.planned_tasks[state.current_task_index]
             await self.agent.context_manager.add_message(
                 "system", f"[NEXT TASK REMINDER] {next_task}"
@@ -146,47 +188,77 @@ class AgentFlow:
         name="verify_goal_completion",
         description="Verifies goal completion.",
     )
-    async def _wf_verify_goal_completion(self, iteration: int, state: AgentState):
+    async def _wf_verify_goal_completion(
+        self, iteration: int, state: "AgentState"
+    ) -> AsyncIterator:
+        """
+        Streaming-friendly, fast goal verification.
+        Parses JSON safely and yields progress incrementally.
+        """
+
         if not state.is_complete:
             return
 
+        # ── Step 1: Update phase
         state.phase = Phase.DECISION
         yield ("phase_changed", {"phase": state.phase.value})
         yield ("goal_verification_start", {"iteration": iteration})
 
+        # ── Step 2: Prepare context-aware prompt
         summary = self.agent.context_manager.get_context_summary()
+        investigation_state = self.agent.context_manager.investigation_state
         prompt = f"""
-            You are a strict goal auditor.
+    You are a strict goal auditor.
 
-            GOAL:
-            {self.agent.goal}
+    GOAL:
+    {self.agent.goal}
 
-            LIVE CONTEXT SUMMARY:
-            {summary}
+    LIVE CONTEXT SUMMARY:
+    {summary}
 
-            INVESTIGATION STATE:
-            {json.dumps(self.agent.context_manager.investigation_state, indent=2)}
+    INVESTIGATION STATE:
+    {json.dumps(investigation_state, indent=2)}
 
-            Has the agent FULLY completed the goal? Reply STRICT JSON ONLY:
+    Has the agent FULLY completed the goal? Reply STRICT JSON ONLY:
 
-            {{
-                "verified": true or false,
-                "reason": "one-sentence explanation",
-                "missing_steps": ["list"] or []
-            }}
-            """
+    {{
+        "verified": true or false,
+        "reason": "one-sentence explanation",
+        "missing_steps": ["list"] or []
+    }}
+    """
+
+        # ── Step 3: Ask LLM (non-blocking streaming)
+        raw_verification = await self.agent.client.chat(
+            [{"role": "user", "content": prompt}]
+        )
+
+        # ── Step 4: Attempt fast JSON parse
+        verification: Dict[str, Any] = {}
         try:
-            raw = await self.agent.client.ask(prompt)
-            verification = json.loads(str(raw).strip())
+            verification = json.loads(raw_verification.strip())
         except Exception:
-            verification = {
-                "verified": False,
-                "reason": "parse failed",
-                "missing_steps": [],
-            }
+            # fallback: non-greedy regex
+            import re
 
+            match = re.search(r"\{.*?\}", str(raw_verification), re.DOTALL)
+            if match:
+                try:
+                    verification = json.loads(match.group())
+                except Exception:
+                    verification = {}
+            else:
+                verification = {}
+
+        # ── Step 5: Ensure defaults
+        verification.setdefault("verified", False)
+        verification.setdefault("reason", "parse failed" if not verification else "")
+        verification.setdefault("missing_steps", [])
+
+        # ── Step 6: Yield verification result
         yield ("goal_verification_result", verification)
 
+        # ── Step 7: Update state & context based on result
         if not verification.get("verified", False):
             state.is_complete = False
             await self.agent.context_manager.add_message(
@@ -226,7 +298,7 @@ class AgentFlow:
         name="reflect_if_stuck",
         description="Triggers reflection when no progress is detected.",
     )
-    async def _wf_reflect_if_stuck(self, iteration: int, state: AgentState):
+    async def _wf_reflect_if_stuck(self, iteration: int, state: "AgentState"):
         """
         Detect lack of progress via snapshot comparison.
         Apply hard limit on reflection count to break potential loops.
@@ -235,30 +307,28 @@ class AgentFlow:
         REFLECT_INTERVAL = 5
         last_reflect_iter = getattr(state, "last_reflection_iteration", 0)
 
-        # Don't reflect too early or too frequently
+        # ── Skip if too early or too soon
         if iteration <= 3 or (iteration - last_reflect_iter) < REFLECT_INTERVAL:
             return
 
-        # Minimal progress snapshot
+        # ── Minimal progress snapshot
         current_snapshot = {
-            "planned_tasks": state.planned_tasks.copy(),
+            "planned_tasks": list(state.planned_tasks) if state.planned_tasks else [],
             "current_task_index": state.current_task_index,
-            "tool_calls": (state.tool_calls or []).copy(),
+            "tool_calls": list(state.tool_calls) if state.tool_calls else [],
         }
 
         last_snapshot = getattr(state, "last_progress_snapshot", None)
         no_progress = last_snapshot is not None and last_snapshot == current_snapshot
-
         state.last_progress_snapshot = current_snapshot
 
         if not no_progress:
             return
 
-        # Count how many times we've entered reflection
+        # ── Increment reflection counter
         state.reflection_count = getattr(state, "reflection_count", 0) + 1
-        max_reflections = getattr(self.agent, "max_reflections", 6)  # 6 is common
+        max_reflections = getattr(self.agent, "max_reflections", 6)
 
-        # Safety escape hatch
         if state.reflection_count >= max_reflections:
             msg = (
                 f"Hard reflection limit reached ({state.reflection_count}/{max_reflections}) "
@@ -276,10 +346,10 @@ class AgentFlow:
             )
             return
 
-        # Record that we attempted reflection
+        # ── Record reflection iteration
         state.last_reflection_iteration = iteration
 
-        # ─── Call reflection (lives in WorkflowEngine) ───
+        # ── Invoke workflow engine reflection
         async for event, payload in self.engine._force_reflection(iteration, state):
             yield (event, payload)
 
@@ -332,7 +402,6 @@ class AgentFlow:
                 yield ("warning", f"Reflection returned invalid next_step: {next_step}")
                 return
 
-
     @workflow.set(
         "default",
         name="replan_if_reflected",
@@ -343,13 +412,17 @@ class AgentFlow:
         last_replan = getattr(state, "last_replan_iteration", 0)
 
         # Only trigger once per reflection and after the reflection step has completed
-        if last_reflect == 0 or iteration <= last_reflect + 1 or last_replan == iteration:
+        if (
+            last_reflect == 0
+            or iteration <= last_reflect + 1
+            or last_replan == iteration
+        ):
             return
 
         # Reset planning state
         state.planned_tasks = []
         state.current_task_index = 0
-        state.last_replan_iteration = iteration   # dynamic flag (safe on dataclass)
+        state.last_replan_iteration = iteration  # dynamic flag (safe on dataclass)
 
         yield (
             "replan_triggered",
