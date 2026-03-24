@@ -347,7 +347,12 @@ class WorkflowEngine:
                 yield ("cancelled", "User stop")
                 return
 
-            for step_config in self.workflow_steps.copy():
+            # === CHANGED: Use while + index instead of for loop so we can support "go_to" jumps ===
+            steps = self.workflow_steps.copy()  # snapshot (same behaviour as before)
+            step_index = 0
+            while step_index < len(steps):
+                step_config = steps[step_index]
+
                 if isinstance(step_config, dict):
                     step_name = step_config.get("name", "")
                     overrides = step_config.get(
@@ -360,6 +365,7 @@ class WorkflowEngine:
                 handler = self._step_handlers.get(step_name)
                 if not handler:
                     yield ("warning", f"Unknown step: {step_name}")
+                    step_index += 1
                     continue
 
                 # === OPTION 3: CONDITION ===
@@ -375,6 +381,7 @@ class WorkflowEngine:
                                     "condition": condition,
                                 },
                             )
+                            step_index += 1
                             continue
 
                 # === NEW: DYNAMIC TOOLSET SWITCHING PER STEP ===
@@ -410,6 +417,9 @@ class WorkflowEngine:
                     if k in overrides:
                         setattr(self.agent, k, overrides[k])
 
+                # === NEW: Support for manual "go_to" inside the step handler ===
+                go_to_target = None
+
                 try:
                     async for event, payload in handler(iteration, state):
                         yield (event, payload)
@@ -422,6 +432,18 @@ class WorkflowEngine:
                             )
                             if isinstance(target, str):
                                 self.switch_workflow(target)
+
+                        # NEW EVENT: step can now yield ("go_to", "step_name") or
+                        # ("go_to", {"name": "step_name"}) to jump to any other step
+                        # (works even if the target is before or after the current step)
+                        elif event == "go_to":
+                            target = (
+                                payload.get("name")
+                                if isinstance(payload, dict)
+                                else payload
+                            )
+                            if isinstance(target, str):
+                                go_to_target = target
 
                         if event in ("needs_confirmation", "cancelled", "finish"):
                             return
@@ -436,6 +458,35 @@ class WorkflowEngine:
                 finally:
                     for k, v in original_params.items():
                         setattr(self.agent, k, v)
+
+                # === NEW: Apply go_to after the step has finished ===
+                next_step_index = step_index + 1
+                if go_to_target is not None:
+                    target_index = None
+                    for i, cfg in enumerate(steps):
+                        name = cfg.get("name", "") if isinstance(cfg, dict) else cfg
+                        if name == go_to_target:
+                            target_index = i
+                            break
+                    if target_index is not None:
+                        next_step_index = target_index
+                        yield (
+                            "step_go_to",
+                            {
+                                "from_step": step_name,
+                                "to_step": go_to_target,
+                                "iteration": iteration,
+                            },
+                        )
+                    else:
+                        yield (
+                            "warning",
+                            f"Unknown go_to target '{go_to_target}' from step '{step_name}'",
+                        )
+                        # fall back to normal next step
+
+                step_index = next_step_index
+            # === end of per-iteration step loop ===
 
             self._log_iteration_state(iteration, state)
 
@@ -482,7 +533,7 @@ class WorkflowEngine:
                     try:
                         args_dict = json.loads(payload["function"]["arguments"])
                         sig = f"{payload['function']['name']}:{json.dumps(args_dict, sort_keys=True)}"
-                    except (json.JSONDecodeError, TypeError, KeyError):
+                    except json.JSONDecodeError, TypeError, KeyError:
                         sig = f"{payload.get('function', {}).get('name')}:{payload.get('function', {}).get('arguments', '')}"
 
                     if not any(
