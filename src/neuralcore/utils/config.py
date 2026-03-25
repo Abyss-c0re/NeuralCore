@@ -5,7 +5,6 @@ import importlib
 from pathlib import Path
 
 
-
 class ConfigLoader:
     """
     Loads config from YAML + ENV hybrid with secret resolution.
@@ -195,56 +194,81 @@ class ConfigLoader:
         """
         Load workflow sets for the agent's workflow engine.
 
-        Features:
-        - Reuse global workflows in agents (by name)
-        - Python modules (*.py) and YAML workflows (*.yml, *.yaml)
-        - Automatically registers decorator-based custom conditions
-        - Fully resolves steps into engine.workflow_steps
-        - Safe fallback to default workflow
+        Supports:
+        - Simple string: workflow: deploy_chat
+        - Old dict style (backward compatibility)
+        - Global workflows defined at top level
+        - Python modules and YAML workflows from folders
         """
 
         agent_cfg = getattr(engine.agent, "config", {})
-        agent_workflow_cfg = agent_cfg.get("workflow", {})
+        agent_workflow_cfg = agent_cfg.get("workflow")
         global_workflows = getattr(self, "config", {}).get("workflows", {})
 
-        # 1️⃣ Resolve agent workflows from global workflows
-        resolved_workflows = {}
-        for wf_key, wf_ref in agent_workflow_cfg.items():
-            if isinstance(wf_ref, dict) and "name" in wf_ref:
-                wf_name = wf_ref["name"]
-                if wf_name in global_workflows:
-                    resolved_workflows[wf_key] = global_workflows[wf_name]
-                else:
-                    resolved_workflows[wf_key] = wf_ref
+        # ── 1. Resolve the workflow (support string OR dict) ─────────────────────
+        resolved = {}
+        primary_workflow_name = None
+
+        if isinstance(agent_workflow_cfg, str):
+            # New clean format: workflow: deploy_chat
+            workflow_name = agent_workflow_cfg.strip()
+            primary_workflow_name = workflow_name
+
+            if workflow_name in global_workflows:
+                resolved[workflow_name] = global_workflows[workflow_name]
+                print(f"[DEBUG] Using global workflow '{workflow_name}' for agent")
             else:
-                resolved_workflows[wf_key] = wf_ref
+                resolved[workflow_name] = {"name": workflow_name}
+                print(
+                    f"[WARNING] Workflow '{workflow_name}' not found in global workflows"
+                )
 
-        engine.agent.config["workflow"] = resolved_workflows
+        elif isinstance(agent_workflow_cfg, dict):
+            # Old dict format (backward compatibility)
+            for wf_key, wf_ref in agent_workflow_cfg.items():
+                if isinstance(wf_ref, dict) and "name" in wf_ref:
+                    wf_name = wf_ref["name"]
+                    if wf_name in global_workflows:
+                        resolved[wf_key] = global_workflows[wf_name]
+                    else:
+                        resolved[wf_key] = wf_ref
+                else:
+                    resolved[wf_key] = wf_ref
+            if resolved:
+                primary_workflow_name = next(iter(resolved.keys()))
 
-        # 2️⃣ Determine which workflow to use for this agent
-        if resolved_workflows:
-            wf_name, wf_data = next(iter(resolved_workflows.items()))
-
-            if "steps" not in wf_data and wf_name in global_workflows:
-                wf_data = global_workflows[wf_name]
-
-            engine.workflow_steps = engine._resolve_steps(
-                wf_data.get("steps", getattr(engine, "DEFAULT_WORKFLOW", []))
-            )
-            engine.workflow_description = wf_data.get("description", "Custom workflow")
-            engine.current_workflow_name = wf_name
-            print(f"[DEBUG] Using workflow '{wf_name}' for agent '{engine.agent.name}'")
         else:
+            # Fallback
+            primary_workflow_name = "default"
+            resolved["default"] = global_workflows.get("default", {})
+
+        # Store resolved workflows back into agent config
+        engine.agent.config["workflow"] = resolved
+
+        # ── 2. Apply the primary workflow to the engine ─────────────────────────
+        if primary_workflow_name and primary_workflow_name in global_workflows:
+            wf_data = global_workflows[primary_workflow_name]
+            engine.current_workflow_name = primary_workflow_name
+            engine.workflow_description = wf_data.get("description", "No description")
+
+            steps = wf_data.get("steps", getattr(engine, "DEFAULT_WORKFLOW", []))
+            engine.workflow_steps = engine._resolve_steps(steps)
+
+            print(
+                f"[DEBUG] Using workflow '{primary_workflow_name}' for agent '{engine.agent.name}'"
+            )
+        else:
+            # Ultimate fallback
+            engine.current_workflow_name = "default"
+            engine.workflow_description = "Default workflow"
             engine.workflow_steps = engine._resolve_steps(
                 getattr(engine, "DEFAULT_WORKFLOW", [])
             )
-            engine.workflow_description = "Default workflow"
-            engine.current_workflow_name = "Default workflow"
             print(
-                f"[DEBUG] No workflow configured, using default for agent '{engine.agent.name}'"
+                f"[DEBUG] No valid workflow found, falling back to default for agent '{engine.agent.name}'"
             )
 
-        # 3️⃣ Optionally load workflow sets from folders (Python + YAML)
+        # ── 3. Optionally load workflow sets from folders (Python + YAML) ───────
         sets_cfg = getattr(engine, "workflow_sets_config", {})
         app_root = getattr(engine, "app_root", Path.cwd())
 
@@ -255,7 +279,7 @@ class ConfigLoader:
                 if folder
                 else app_root / "workflows" / set_name
             )
-            if not folder_path.exists():
+            if not folder_path.exists() or not folder_path.is_dir():
                 folder_path = app_root / "workflows"
 
             if not folder_path.exists() or not folder_path.is_dir():
@@ -278,7 +302,6 @@ class ConfigLoader:
                         f"[INFO] Imported Python workflow '{py_file.name}' as set '{set_name}'"
                     )
 
-                    # Automatically register decorator-based conditions if available
                     try:
                         from neuralcore.workflows.registry import condition
 
@@ -338,6 +361,7 @@ class ConfigLoader:
 
         # --- Client config ---
         from neuralcore.core.client_factory import get_clients
+
         clients = get_clients()
         client_name = agent_cfg.get("client")
         if client_name not in clients:

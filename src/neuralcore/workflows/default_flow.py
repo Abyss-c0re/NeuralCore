@@ -3,56 +3,92 @@ import asyncio
 import json
 from enum import Enum
 from neuralcore.agents.state import AgentState
+from neuralcore.actions.actions import ActionSet
 from neuralcore.actions.manager import tool
 from neuralcore.workflows.registry import workflow
 from neuralcore.utils.logger import Logger
 
-from typing import AsyncIterator, Dict, Any, List, Tuple
+from typing import AsyncIterator, Dict, Any, List, Optional, Tuple
 
 logger = Logger.get_logger()
 
 
-class AgentFlow:
-    """
-    AgentFlow — Pure collection of ALL _wf_* step handlers + executors.
-    WorkflowEngine now only orchestrates; execution logic lives here.
-    """
+@tool(
+    "DeployControls",
+    name="RequestComplexAction",
+    description="Use when user request requires planning, tools, multiple steps, research or code changes.",
+)
+async def request_complex_action(agent, reason: str):
+    """Switch from chat mode to full planning workflow"""
+    await agent.post_control(
+        {"event": "switch_workflow", "name": "default", "reason": reason}
+    )
+    logger.info(f"[Deploy Agent] Switching to full planning mode → Reason: {reason}")
+    return f"✅ Switching to planning + execution mode for: {reason}"
 
+    # ==================== TOOLS ====================
+
+
+@tool("ContextManager", name="GetContext", description="Search your own memory")
+async def provide_context(agent, query: str):
+    return await agent.context_manager.provide_context(query)
+
+
+@tool(
+    "DeployControls",
+    name="ExitDeployMode",
+    description="Call when the deployment task is fully completed.",
+)
+async def exit_deploy_mode(agent, reason: str = "Task completed"):
+    await agent.post_control(
+        {"event": "finish", "reason": "deploy_mode_exit", "details": reason}
+    )
+    return f"✅ Deploy session ended: {reason}"
+
+
+class AgentFlow:
     FINAL_ANSWER_MARKER = "[FINAL_ANSWER_COMPLETE]"
 
     class Phase(str, Enum):
         IDLE = "idle"
+        CHAT = "chat"
         PLAN = "plan"
         EXECUTE = "execute"
         REFLECT = "reflect"
         DECISION = "decision"
         FINALIZE = "finalize"
 
-    DEFAULT_WORKFLOW = [
-        "plan_tasks",
-        "llm_stream",
-        "execute_if_tools",
-        "verify_goal_completion",
-        "check_complete",
-        "reflect_if_stuck",
-        "replan_if_reflected",
-        "safety_fallback",
-    ]
-
+    # ── Two separate workflows ─────────────────────────────────────
     def __init__(self, engine):
         self.engine = engine
         self.agent = engine.agent
-        self._register_builtin_workflow()
+        self._register_workflows()
 
-    def _register_builtin_workflow(self):
-        # Register default workflow in engine
+    def _register_workflows(self):
+        # 1. Default = Full ReAct agentic workflow (planning + tools)
         self.engine.register_workflow(
             name="default",
-            description="Default ReAct loop + persistent goal + efficient ContextManager",
-            steps=self.DEFAULT_WORKFLOW,
+            description="Full ReAct planning + execution",
+            steps=[
+                "plan_tasks",
+                "llm_stream",
+                "execute_if_tools",
+                "verify_goal_completion",
+                "check_complete",
+                "reflect_if_stuck",
+                "replan_if_reflected",
+                "safety_fallback",
+            ],
         )
 
-        # Register all _wf_* methods from this class into engine
+        # 2. Deploy Chat = Persistent conversation mode (this is what we want by default)
+        self.engine.register_workflow(
+            name="deploy_chat",
+            description="Persistent natural chat mode. Switches to full planning on complex requests.",
+            steps=["deploy_chat_loop"],  # ← only this step, loops via queue
+        )
+
+        # Register all _wf_* handlers
         for attr_name in dir(self):
             if attr_name.startswith("_wf_"):
                 step_name = attr_name[4:]
@@ -60,17 +96,45 @@ class AgentFlow:
                 if callable(method):
                     self.engine._step_handlers[step_name] = method
 
-    @tool(
-        "ContextManager",
-        name="GetContext",
-        description="use this tool to search your own memory",
-    )
-    async def provide_context(self, query):
-        return await self.agent.context_manager.provide_context(query)
+    # ==================== SYSTEM PROMPTS ====================
+    def _build_chat_system_prompt(self) -> str:
+        return f"""You are a helpful Deploy Agent.
 
-    # ===================================================================
-    # STEP HANDLERS (unchanged except internal calls)
-    # ===================================================================
+Speak naturally, concisely and friendly.
+Help the user with deployment, infrastructure, code, or operational tasks.
+
+Rules:
+- For simple questions or conversation → just reply normally.
+- If the request needs planning, multiple steps, tools, research, or code changes → 
+  call the tool `RequestComplexAction` with a short clear reason.
+- Only call `ExitDeployMode` when the entire task is truly finished and user is done.
+
+Current goal: {self.agent.goal or "General assistance"}
+"""
+
+    # ==================== CHAT LOOP STEP ====================
+    @workflow.set("deploy_chat", name="deploy_chat_loop")
+    async def _wf_deploy_chat_loop(self, iteration: int, state: AgentState):
+        state.phase = self.Phase.CHAT
+        yield ("phase_changed", {"phase": state.phase.value})
+
+        # Only wait for user input starting from the second iteration
+        if iteration > 0:
+            logger.debug(
+                f"Chat loop (iter {iteration}): waiting for next user message..."
+            )
+            # Waiting happens inside _llm_stream_with_tools
+        self.agent.manager.load_toolsets("DeployControls")
+
+        async for ev, pl in self._llm_stream_with_tools(
+            iteration=iteration,
+            state=state,
+            tools=self.agent.manager.get_action_set("DeployControls"),
+            is_chat_mode=True,
+        ):
+            yield (ev, pl)
+
+        self.engine._log_iteration_state(iteration, state)
 
     @workflow.set(
         "default",
@@ -475,23 +539,71 @@ class AgentFlow:
     # ===================================================================
 
     async def _llm_stream_with_tools(
-        self, iteration: int, state: AgentState
+        self,
+        iteration: int,
+        state: AgentState,
+        tools: Optional[ActionSet] = None,
+        is_chat_mode: bool = False,
     ) -> AsyncIterator[Tuple[str, Any]]:
-        """
-        Streams LLM responses and tool events using the client.
-        Redundant JSON parsing and duplicate detection removed.
-        """
-        state.phase = self.Phase.EXECUTE
+        if is_chat_mode:
+            state.phase = self.Phase.CHAT
+        else:
+            state.phase = self.Phase.EXECUTE
+        yield ("phase_changed", {"phase": state.phase.value})
 
-        messages = await self.agent.context_manager.provide_context(
-            query=state.current_task or "Continue",
-            max_input_tokens=self.agent.max_tokens,
-            reserved_for_output=12000,
-            system_prompt=self._build_objective_reminder(),
-            include_logs=True,
-        )
+        if is_chat_mode:
+            # === CHAT MODE ===
+            if iteration > 0:
+                # Wait for a new user message (subsequent turns)
+                try:
+                    user_msg = await asyncio.wait_for(
+                        self.agent.message_queue.get(),
+                        timeout=300.0,  # 5 minutes — adjust as needed
+                    )
+                except asyncio.TimeoutError:
+                    yield ("error", "Timeout waiting for user message in chat mode")
+                    return
+            else:
+                # FIRST iteration: Do NOT wait. Use message if already in queue, else start empty
+                try:
+                    user_msg = self.agent.message_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    user_msg = ""  # or "Hello" or any gentle starter
 
-        # pass the executor callback to the client for proper tool execution
+            # Extract query safely
+            if isinstance(user_msg, dict):
+                query = user_msg.get("content", "") or str(user_msg)
+            else:
+                query = str(user_msg).strip()
+
+            if not query:
+                query = "Start the conversation naturally."  # fallback for first turn
+
+            logger.debug(
+                f"Agent '{self.agent.name}' [iter {iteration}] processing: {query[:100]}..."
+            )
+
+            # Build clean chat context
+            messages = await self.agent.context_manager.provide_context(
+                query=query,
+                max_input_tokens=self.agent.max_tokens,
+                reserved_for_output=8000,
+                system_prompt=self._build_chat_system_prompt(),
+                include_logs=False,
+                chat=True,
+            )
+
+        else:
+            # Normal EXECUTE mode (unchanged)
+            messages = await self.agent.context_manager.provide_context(
+                query=state.current_task or "Continue",
+                max_input_tokens=self.agent.max_tokens,
+                reserved_for_output=12000,
+                system_prompt=self._build_objective_reminder(),
+                include_logs=True,
+            )
+
+        # === The rest of your function stays exactly the same ===
         async def executor_callback(name: str, args: dict):
             executor = self.agent.manager.get_executor(name, self.agent)
             if not executor:
@@ -501,7 +613,7 @@ class AgentFlow:
 
         queue = await self.agent.client.stream_with_tools(
             messages=messages,
-            tools=self.agent.manager.get_llm_tools(),
+            tools=tools or self.agent.manager.get_llm_tools(),
             temperature=self.agent.temperature,
             max_tokens=self.agent.max_tokens,
             tool_choice="auto",
@@ -509,56 +621,76 @@ class AgentFlow:
         )
 
         text_buffer = ""
+        tool_calls = []
 
         try:
-            async for kind, payload in self.agent.client._drain_queue(queue):
+            async for item in self.agent.client._drain_queue(queue):
+                if item is None:
+                    continue
+                if not isinstance(item, tuple) or len(item) != 2:
+                    continue
+                kind, payload = item
+
                 if kind == "content":
                     text_buffer += payload
                     yield ("content_delta", payload)
-
                 elif kind in ("tool_delta", "tool_complete", "needs_confirmation"):
-                    # forward tool events directly
+                    if kind in ("tool_complete", "needs_confirmation"):
+                        tool_calls.append(payload)
                     yield (kind, payload)
-
                 elif kind == "finish":
                     break
-
                 elif kind == "error":
                     yield ("error", payload)
+                    return
+                elif kind == "cancelled":
+                    yield ("cancelled", payload)
                     return
 
         except asyncio.CancelledError:
             yield ("cancelled", "Task cancelled")
             return
 
-        # emit final llm_response summary
-        response_state = {
-            "full_reply": text_buffer.strip(),
-            "tool_calls": [
-                payload
-                for kind, payload in queue._queue
-                if kind in ("tool_complete", "needs_confirmation")
-            ],
-            "is_complete": self.FINAL_ANSWER_MARKER in text_buffer,
-        }
-        yield ("llm_response", response_state)
+        yield (
+            "llm_response",
+            {
+                "full_reply": text_buffer.strip(),
+                "tool_calls": tool_calls,
+                "is_complete": self.FINAL_ANSWER_MARKER in text_buffer,
+            },
+        )
 
     async def _execute_tools(
         self, tool_calls: List[Dict], iteration: int, state: AgentState
     ) -> AsyncIterator[Tuple[str, Any]]:
         """
-        Executes tool calls using agent.manager. ConfirmationRequired
-        is now handled by the client, so this is just a simple pass-through.
+        Executes tool calls (now only used for tools that needed ConfirmationRequired).
+        ConfirmationRequired is already handled by the client, so this is a clean pass-through.
+        Phase change is emitted and per-tool events are yielded exactly as before.
         """
         state.phase = self.Phase.EXECUTE
-        yield ("phase_changed", {"phase": state.phase.value})
+        yield (
+            "phase_changed",
+            {"phase": state.phase.value},
+        )  # ← ensure phase is always signalled
 
         for call in tool_calls or []:
-            name = call["function"]["name"]
-            try:
-                args = json.loads(call["function"]["arguments"])
-            except Exception:
-                args = {}
+            # Support both old raw tool_calls and the new "needs_confirmation" payload
+            if "function" in call:  # old format from legacy tool_calls
+                name = call["function"]["name"]
+                try:
+                    args = json.loads(call["function"]["arguments"])
+                except Exception:
+                    args = {}
+            else:  # new needs_confirmation payload from client
+                name = call.get("tool_name")
+                args = call.get("details", {}).get(
+                    "args", {}
+                )  # assuming ConfirmationRequired stores args
+
+            if not name:
+                yield ("tool_skipped", {"name": "unknown", "reason": "no_name"})
+                continue
 
             sig = f"{name}:{json.dumps(args, sort_keys=True)}"
             if sig in self.agent.executed_signatures:

@@ -286,6 +286,21 @@ class DynamicActionManager:
         # Step 2: load the desired toolset(s)
         return self.load_toolsets(toolset_names)
 
+    def get_action_set(self, set_name: str) -> Optional[ActionSet]:
+        """
+        Retrieve an ActionSet object by its name.
+
+        Args:
+            set_name (str): Name of the ActionSet.
+
+        Returns:
+            ActionSet or None: The ActionSet object if found, else None.
+        """
+        action_set = self.registry.sets.get(set_name)
+        if not action_set:
+            logger.warning(f"ActionSet '{set_name}' not found in registry")
+        return action_set
+
     def unload_tools(self, tool_names: Union[str, List[str], None] = None):
         """Unload specific tools by name."""
         if tool_names is None:

@@ -60,6 +60,8 @@ class Agent:
         #   - str                     → treated as user prompt
         #   - dict with "content" key → treated as user prompt (role ignored for now)
         self.message_queue: asyncio.Queue[Any] = asyncio.Queue()
+        self._input_event: asyncio.Event = asyncio.Event()
+        self._input_counter: int = 0
 
     def attach_tools(self):
         """Call after instantiating Agent to load tool sets."""
@@ -115,19 +117,19 @@ class Agent:
     # ---------------- PUBLIC API ----------------
 
     async def post_message(self, message: str | Dict[str, Any]) -> None:
-        """
-        Post a message as USER (default behavior).
-        """
+        """Post a message as USER."""
         if isinstance(message, str):
             item = {"role": "user", "content": message}
         elif isinstance(message, dict):
-            item = {"role": "user", **message}  # ensure role is user unless overridden
-            if "role" not in item:
+            item = {"role": "user", **message}
+            if "role" not in item or item["role"] != "user":
                 item["role"] = "user"
         else:
             item = {"role": "user", "content": str(message)}
 
         await self.message_queue.put(item)
+        self._input_counter += 1
+        self._input_event.set()  # still useful for other parts if any
         logger.debug(
             f"Agent '{self.name}' ← user message posted: {str(message)[:80]}..."
         )
@@ -154,21 +156,22 @@ class Agent:
 
     async def post_control(self, control: str | Dict[str, Any]) -> None:
         """
-        Post a control message/event to dynamically control the workflow
-        while it is running.
+                Post a control message/event to dynamically control the workflow
+                while it is running.
 
-        Supported controls (exactly as documented in Workflow.run):
-            {"event": "go_to", "name": "think"}                    # or "index": 3, "offset": 2
-            {"event": "switch_workflow", "name": "research"}
-            {"event": "break"}
-            {"event": "finish_iteration"}
-            {"event": "restart_iteration"}
-            {"event": "insert_steps", "steps": ["new_step1", ...], "after": "think"}
-            {"event": "insert_steps", "steps": ["final"], "at_end": True}
-            {"event": "cancelled"} / {"event": "finish"} / {"event": "needs_confirmation"}
+                Supported controls (exactly as documented in Workflow.run):
+                    {"event": "go_to", "name": "think"}                    # or "index": 3, "offset": 2
+                    {"event": "switch_workflow", "name": "research"}
+                    {"event": "break"}
+                    {"event": "finish_iteration"}
+                    {"event": "restart_iteration"}
+                    {"event": "insert_steps", "steps": ["new_step1", ...], "after": "think"}
+                    {"event": "insert_steps", "steps": ["final"], "at_end": True}
+                    {"event": "cancelled"} / {"event": "finish"} / {"event": "needs_confirmation"}
 
-        Controls are intercepted by Workflow._drain_control() during step execution.
-        If posted outside an active run they are safely ignored (with debug log).
+                Controls are intercepted by Workflow._drain_control(self._input_event: asyncio.Event = asyncio.Event()
+        self._input_counter: int = 0) during step execution.
+                If posted outside an active run they are safely ignored (with debug log).
         """
         if isinstance(control, str):
             item = {"event": control}
@@ -190,38 +193,56 @@ class Agent:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         stop_event: Optional[asyncio.Event] = None,
+        chat_mode: bool = False,  # ← NEW
     ) -> AsyncIterator[Tuple[str, Any]]:
         """
-        Run the agent with queue support + full control-message compatibility.
+        Run the agent.
+        - chat_mode=True  → starts the deploy_chat_loop (real conversation)
+        - chat_mode=False → original task-oriented behavior
         """
-        system_prompt = (
-            system_prompt if system_prompt is not None else self.system_prompt
-        )
+        system_prompt = system_prompt or self.system_prompt
         temperature = (
             float(temperature) if temperature is not None else float(self.temperature)
         )
         max_tokens = int(max_tokens) if max_tokens is not None else int(self.max_tokens)
 
-        # 1. Optional initial user prompt (backward compatibility)
-        if user_prompt is not None and str(user_prompt).strip():
+        # Optional initial prompt (backward compatibility)
+        if user_prompt and str(user_prompt).strip():
             async for event, payload in self.workflow.run(
                 user_prompt, system_prompt, temperature, max_tokens, stop_event
             ):
                 yield event, payload
 
-        # 2. Continuous message queue processor
+        # === CHAT MODE ===
+        if chat_mode:
+            logger.info(f"Agent '{self.name}' → Starting CHAT mode (deploy_chat_loop)")
+
+            # Put the first user message into the queue if provided (so first iteration doesn't wait)
+            if user_prompt and str(user_prompt).strip():
+                await self.message_queue.put({"role": "user", "content": user_prompt})
+                self._input_event.set()
+
+            # Start the chat workflow
+            async for event, payload in self.workflow.run(
+                user_prompt="",  # not used in chat mode
+                system_prompt=system_prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stop_event=stop_event,
+                workflow="deploy_chat",  # ← This selects your _wf_deploy_chat_loop
+            ):
+                yield event, payload
+            return
+
+        # === OLD NON-CHAT BEHAVIOR (kept for compatibility) ===
         try:
             while True:
                 if stop_event and stop_event.is_set():
                     logger.debug(f"Agent '{self.name}' stopped via stop_event")
                     break
 
-                # Get next message from queue
                 msg = await self.message_queue.get()
 
-                # === NEW: CONTROL MESSAGE SUPPORT (fixes compatibility) ===
-                # Controls must be left for Workflow._drain_control() when a run is active.
-                # If they arrive outside an active run we safely ignore them.
                 if isinstance(msg, dict):
                     event = msg.get("event") or msg.get("action") or msg.get("control")
                     if event in {
@@ -235,47 +256,25 @@ class Agent:
                         "cancelled",
                         "finish",
                     }:
-                        logger.debug(
-                            f"Agent '{self.name}' ← control ignored (outside active run): {event}"
-                        )
+                        logger.debug(f"Control ignored (outside active run): {event}")
                         self.message_queue.task_done()
                         continue
 
-                # Normalize message (user / system)
+                # Normalize
                 if isinstance(msg, str):
-                    role = "user"
                     content = msg.strip()
                 elif isinstance(msg, dict):
-                    role = msg.get("role", "user")
                     content = msg.get("content") or str(msg)
                     content = str(content).strip()
                 else:
-                    role = "user"
                     content = str(msg).strip()
 
                 if not content:
                     self.message_queue.task_done()
                     continue
 
-                # === Redirect to workflow based on role ===
-                if role == "system":
-                    # For system messages, we pass them as the system_prompt override
-                    current_system = content
-                    user_content = ""  # no user prompt for pure system injection
-                else:
-                    # Normal user message
-                    current_system = system_prompt
-                    user_content = content
-
-                # Run the workflow with appropriate prompt
                 async for event, payload in self.workflow.run(
-                    user_content
-                    if role != "system"
-                    else "",  # empty user prompt for system-only
-                    current_system,
-                    temperature,
-                    max_tokens,
-                    stop_event,
+                    content, system_prompt, temperature, max_tokens, stop_event
                 ):
                     yield event, payload
 

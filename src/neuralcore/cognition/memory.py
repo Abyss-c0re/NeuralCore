@@ -676,11 +676,43 @@ class ContextManager:
         reserved_for_output: int = 2048,
         system_prompt: str = "You are a helpful Terminal AI agent with full coding and filesystem support.",
         include_logs: bool = False,
-        min_history_tokens: int = 2000,  # always keep this much history
-        max_kb_tokens: int = 5000,  # cap KB retrieval
+        min_history_tokens: int = 2000,
+        max_kb_tokens: int = 5000,
+        # ── NEW ARGUMENT ─────────────────────────────────────
+        chat: bool = False,          # ← If True → "normal chat mode" (minimal context)
+        # ─────────────────────────────────────────────────────
     ) -> List[Dict[str, Any]]:
         messages: List[Dict[str, Any]] = []
 
+        # === CHAT MODE: Minimal context for normal conversations ===
+        if chat:
+            # Just use the base system prompt, no summary, no logs, no KB, no extra status
+            clean_system = system_prompt.strip()
+            messages.append({"role": "system", "content": clean_system})
+
+            # Add only the current user query
+            messages.append({
+                "role": "user",
+                "content": query if query.strip() else "[AUTONOMOUS CONTINUATION]"
+            })
+
+            # Optionally still respect the token limit (good practice)
+            total_tokens = self.count_tokens(messages)
+            if total_tokens > max_input_tokens - reserved_for_output:
+                # Light pruning if needed
+                self.prune_to_fit_context(
+                    messages,
+                    max_tokens=max_input_tokens - reserved_for_output,
+                    min_keep_messages=3,
+                    system_role="system",
+                    user_role="user",
+                    assistant_role="assistant",
+                    tool_role="tool",
+                )
+
+            return messages
+
+        # === NORMAL MODE (original behavior with full context) ===
         # --- SYSTEM PROMPT + SUMMARY ---
         base_system = system_prompt.strip()
         summary = self.get_context_summary()
@@ -715,7 +747,7 @@ class ContextManager:
         target_context_tokens = max_input_tokens - reserved_for_output
         remaining_tokens = target_context_tokens - tokens_used - query_tokens
         if remaining_tokens < 0:
-            remaining_tokens = 0  # query + system already exceed budget
+            remaining_tokens = 0
 
         # --- ALLOCATE KB / HISTORY DYNAMICALLY ---
         kb_tokens = min(max_kb_tokens, remaining_tokens // 2)
@@ -768,7 +800,8 @@ class ContextManager:
             )
             if pruned_turns:
                 self.current_topic.archived_history.extend(pruned_turns)
-        # Inside provide_context(), after building full_system
+
+        # Context window status message (only in normal mode)
         messages.append(
             {
                 "role": "system",
