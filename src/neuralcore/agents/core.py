@@ -62,6 +62,8 @@ class Agent:
         self.message_queue: asyncio.Queue[Any] = asyncio.Queue()
         self._input_event: asyncio.Event = asyncio.Event()
         self._input_counter: int = 0
+        self.sub_tasks: Dict[str, Dict[str, Any]] = {}  # task_id -> metadata
+        self._sub_task_counter: int = 0
 
     def attach_tools(self):
         """Call after instantiating Agent to load tool sets."""
@@ -135,43 +137,39 @@ class Agent:
         )
 
     async def post_system_message(self, message: str | Dict[str, Any]) -> None:
-        """
-        Post a message as SYSTEM.
-        This is useful for injecting instructions, context updates, tool results,
-        or internal system events into the workflow.
-        """
         if isinstance(message, str):
             item = {"role": "system", "content": message}
         elif isinstance(message, dict):
             item = {"role": "system", **message}
-            if "role" not in item:
-                item["role"] = "system"
         else:
             item = {"role": "system", "content": str(message)}
 
         await self.message_queue.put(item)
         logger.debug(
-            f"Agent '{self.name}' ← system message posted: {str(message)[:80]}..."
+            f"Agent '{self.name}' ← system alert posted: {str(message)[:100]}..."
         )
+
+        # Optional: signal that something important arrived (if you have other waiters)
+        self._input_event.set()
 
     async def post_control(self, control: str | Dict[str, Any]) -> None:
         """
-                Post a control message/event to dynamically control the workflow
-                while it is running.
+        Post a control message/event to dynamically control the workflow
+        while it is running.
 
-                Supported controls (exactly as documented in Workflow.run):
-                    {"event": "go_to", "name": "think"}                    # or "index": 3, "offset": 2
-                    {"event": "switch_workflow", "name": "research"}
-                    {"event": "break"}
-                    {"event": "finish_iteration"}
-                    {"event": "restart_iteration"}
-                    {"event": "insert_steps", "steps": ["new_step1", ...], "after": "think"}
-                    {"event": "insert_steps", "steps": ["final"], "at_end": True}
-                    {"event": "cancelled"} / {"event": "finish"} / {"event": "needs_confirmation"}
+        Supported controls (exactly as documented in Workflow.run):
+            {"event": "go_to", "name": "think"}                    # or "index": 3, "offset": 2
+            {"event": "switch_workflow", "name": "research"}
+            {"event": "break"}
+            {"event": "finish_iteration"}
+            {"event": "restart_iteration"}
+            {"event": "insert_steps", "steps": ["new_step1", ...], "after": "think"}
+            {"event": "insert_steps", "steps": ["final"], "at_end": True}
+            {"event": "cancelled"} / {"event": "finish"} / {"event": "needs_confirmation"}
 
-                Controls are intercepted by Workflow._drain_control(self._input_event: asyncio.Event = asyncio.Event()
+        Controls are intercepted by Workflow._drain_control(self._input_event: asyncio.Event = asyncio.Event()
         self._input_counter: int = 0) during step execution.
-                If posted outside an active run they are safely ignored (with debug log).
+        If posted outside an active run they are safely ignored (with debug log).
         """
         if isinstance(control, str):
             item = {"event": control}
@@ -286,3 +284,200 @@ class Agent:
         except Exception as e:
             logger.error(f"Agent '{self.name}' queue error: {e}", exc_info=True)
             raise
+
+            # ====================== SUB-TASK / DEPLOYMENT EXECUTION ======================
+
+    async def start_complex_deployment(self, task_description: str, user_facing_name: Optional[str] = None) -> str:
+        """
+        Starts a complex deployment in the background and returns the task_id immediately.
+        """
+        self._sub_task_counter += 1
+        task_id = f"deploy_{self.agent_id}_{self._sub_task_counter:03d}"
+        display_name = user_facing_name or task_description[:70]
+
+        logger.info(f"[Agent {self.name}] Starting sub-task {task_id}: {display_name}")
+
+        # Register immediately
+        self.sub_tasks[task_id] = {
+            "id": task_id,
+            "display_name": display_name,
+            "status": "pending",
+            "started_at": asyncio.get_event_loop().time(),
+            "description": task_description,
+            "progress": 0,
+            "task_obj": None,
+            "result_summary": None,
+            "error": None,
+        }
+
+        try:
+            sub_agent = self._create_sub_agent()
+            sub_agent.task = task_description
+            sub_agent.goal = task_description
+
+            # Create background task
+            coro = self._run_sub_agent_internal(sub_agent, task_id, task_description)
+            background_task = asyncio.create_task(coro, name=task_id)
+
+            self.sub_tasks[task_id]["task_obj"] = background_task
+            self.sub_tasks[task_id]["status"] = "running"
+
+            return task_id   # ← Return task_id to the tool / chat
+
+        except Exception as e:
+            self.sub_tasks[task_id]["status"] = "failed"
+            self.sub_tasks[task_id]["error"] = str(e)
+            logger.error(f"Failed to start sub-task {task_id}", exc_info=True)
+            return f"ERROR_{task_id}"
+            
+    async def _run_sub_agent_internal(
+        self, sub_agent: "Agent", task_id: str, task_description: str
+    ):
+        """Internal coroutine that actually runs the sub-agent and updates status."""
+        try:
+            # Run the full default workflow
+            events = []
+            async for event, payload in sub_agent.workflow.run(
+                user_prompt=task_description,
+                system_prompt="You are a precise deployment executor. Complete the task thoroughly and report clear results.",
+                workflow="default",
+                temperature=0.3,
+                max_tokens=10000,
+            ):
+                events.append((event, payload))
+                # Optional: update progress here if you emit progress events
+
+            # Success
+            summary = await self._generate_deployment_summary(
+                sub_agent, task_description
+            )
+
+            self.sub_tasks[task_id].update(
+                {
+                    "status": "completed",
+                    "completed_at": asyncio.get_event_loop().time(),
+                    "result": summary,
+                    "progress": 100,
+                }
+            )
+
+            # Alert the main chat
+            alert = f"""[DEPLOYMENT COMPLETE] ✅
+
+            **Task ID:** `{task_id}`
+            **Name:** {self.sub_tasks[task_id]["display_name"]}
+
+            {summary}
+
+            Back to normal chat — how else can I help?"""
+
+            await self.post_system_message(alert)
+
+        except asyncio.CancelledError:
+            self.sub_tasks[task_id]["status"] = "cancelled"
+            logger.warning(f"Sub-task {task_id} was cancelled")
+            raise
+        except Exception as exc:
+            self.sub_tasks[task_id].update(
+                {
+                    "status": "failed",
+                    "completed_at": asyncio.get_event_loop().time(),
+                    "error": str(exc),
+                }
+            )
+            error_alert = f"[DEPLOYMENT FAILED] ❌ Task `{task_id}` failed: {exc}"
+            await self.post_system_message(error_alert)
+            logger.error(f"Sub-task {task_id} failed", exc_info=True)
+        finally:
+            # Optional: clean up old finished tasks after some time
+            pass
+
+    def _create_sub_agent(self) -> "Agent":
+        """Create an isolated sub-agent for running complex tasks."""
+        sub = Agent(
+            agent_id=f"{self.agent_id}",
+            loader=self.loader,
+            app_root=self.app_root,
+            # You can pass a minimal config or None
+            config_file=None,
+        )
+
+        # Copy important settings
+        sub.max_iterations = self.max_iterations
+        sub.max_reflections = self.max_reflections
+        sub.temperature = 0.3
+        sub.max_tokens = 10000
+
+        sub.attach_tools()  # Load the same tools as main agent
+        sub.context_manager = ContextManager()  # Fresh context
+
+        return sub
+
+    def get_sub_tasks(self) -> Dict[str, Dict]:
+        """Return current status of all sub-agents (safe to call from tools or chat)."""
+        now = asyncio.get_event_loop().time()
+        return {
+            tid: {
+                **info,
+                "runtime_seconds": round(now - info["started_at"], 1)
+                if "started_at" in info
+                else 0,
+                "task_obj": None,  # don't expose the raw task object
+            }
+            for tid, info in self.sub_tasks.items()
+        }
+
+    async def get_sub_task_status(self, task_id: str) -> Optional[Dict]:
+        """Get status of a specific sub-task."""
+        return self.sub_tasks.get(task_id)
+
+    def cancel_sub_task(self, task_id: str) -> bool:
+        """Cancel a running sub-task."""
+        if task_id not in self.sub_tasks:
+            return False
+        task = self.sub_tasks[task_id].get("task_obj")
+        if task and not task.done():
+            task.cancel()
+            self.sub_tasks[task_id]["status"] = "cancelling"
+            return True
+        return False
+
+    def cleanup_finished_sub_tasks(self, older_than_seconds: int = 3600):
+        """Remove old completed/failed tasks to keep memory clean."""
+        now = asyncio.get_event_loop().time()
+        to_remove = [
+            tid
+            for tid, info in self.sub_tasks.items()
+            if info.get("status") in ("completed", "failed", "cancelled")
+            and (now - info.get("completed_at", info["started_at"]))
+            > older_than_seconds
+        ]
+        for tid in to_remove:
+            self.sub_tasks.pop(tid, None)
+
+    async def _generate_deployment_summary(self, sub_agent: "Agent", task: str) -> str:
+        """Generate a natural, user-friendly summary from the sub-agent results."""
+        tool_results_str = "\n".join(
+            f"• {r.get('name', 'unknown')}: {str(r.get('result', ''))[:350]}"
+            for r in getattr(sub_agent, "tool_results", [])[-12:]
+        )
+
+        prompt = f"""You are a helpful Deploy Agent. A complex background task has just finished.
+
+        Task: {task}
+
+        Key results from tools:
+        {tool_results_str or "No detailed tool output available."}
+
+        Write a friendly, concise summary (3-7 sentences) for the user.
+        - Mention what was accomplished
+        - Highlight any important outcomes or warnings
+        - Use natural language and light emojis if appropriate
+        - Keep it easy to read"""
+
+        try:
+            summary = await self.client.chat([{"role": "user", "content": prompt}])
+            return summary.strip()
+        except Exception:
+            # Safe fallback
+            return f"✅ The deployment task **{task}** has been completed successfully."

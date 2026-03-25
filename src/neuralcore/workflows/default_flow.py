@@ -13,26 +13,32 @@ from typing import AsyncIterator, Dict, Any, List, Optional, Tuple
 logger = Logger.get_logger()
 
 
-@tool(
-    "DeployControls",
-    name="RequestComplexAction",
-    description="Use when user request requires planning, tools, multiple steps, research or code changes.",
-)
-async def request_complex_action(agent, reason: str):
-    """Switch from chat mode to full planning workflow"""
-    await agent.post_control(
-        {"event": "switch_workflow", "name": "default", "reason": reason}
-    )
-    logger.info(f"[Deploy Agent] Switching to full planning mode → Reason: {reason}")
-    return f"✅ Switching to planning + execution mode for: {reason}"
-
-    # ==================== TOOLS ====================
+# ==================== TOOLS ====================
 
 
 @tool("ContextManager", name="GetContext", description="Search your own memory")
 async def provide_context(agent, query: str):
     return await agent.context_manager.provide_context(query)
 
+
+@tool(
+    "DeployControls",
+    name="RequestComplexAction",
+    description="Use when user request requires planning, tools, multiple steps, research or code changes.",
+)
+async def request_complex_action(agent, reason: str):
+    """Start complex task in background and immediately return the task ID"""
+    
+    # Start the monitored sub-task
+    task_id = await agent.start_complex_deployment(reason)   # ← we'll create this method
+
+    return (
+        f"✅ Started background deployment task.\n"
+        f"**Task ID:** `{task_id}`\n"
+        f"**Description:** {reason}\n\n"
+        f"I will notify you automatically when it finishes.\n"
+        f"You can check status anytime with `GetDeploymentStatus` tool using this ID."
+    )
 
 @tool(
     "DeployControls",
@@ -44,6 +50,32 @@ async def exit_deploy_mode(agent, reason: str = "Task completed"):
         {"event": "finish", "reason": "deploy_mode_exit", "details": reason}
     )
     return f"✅ Deploy session ended: {reason}"
+
+
+@tool("DeployControls", name="GetDeploymentStatus")
+async def get_deployment_status(agent, task_id: Optional[str] = None):
+    """Check status of one or all background deployments."""
+    if task_id:
+        status = agent.sub_tasks.get(task_id)
+        if not status:
+            return f"Task ID `{task_id}` not found."
+
+        return f"""Task `{task_id}`:
+        Status: **{status['status'].upper()}**
+        Name: {status['display_name']}
+        Runtime: {status.get('runtime_seconds', 0)} seconds
+        Progress: {status.get('progress', 0)}%
+        Description: {status['description'][:150]}...
+"""
+    else:
+        tasks = agent.get_sub_tasks()
+        if not tasks:
+            return "No background deployments running at the moment."
+
+        lines = ["**Active Background Deployments:**"]
+        for t in sorted(tasks.values(), key=lambda x: x.get("started_at", 0)):
+            lines.append(f"• `{t['id']}` → **{t['status']}** — {t['display_name']}")
+        return "\n".join(lines)
 
 
 class AgentFlow:
@@ -99,18 +131,17 @@ class AgentFlow:
     # ==================== SYSTEM PROMPTS ====================
     def _build_chat_system_prompt(self) -> str:
         return f"""You are a helpful Deploy Agent.
+        Speak naturally, concisely and friendly.
+        Rules:
+        - For simple questions → just reply normally.
+        - If user asks for something complex → call RequestComplexAction.
+        - When you see a message containing [DEPLOYMENT COMPLETE] or [DEPLOYMENT FAILED], 
+        read it carefully and give the user a friendly, clear response about the result.
+        Do NOT call tools unless the user asks for something new.
 
-Speak naturally, concisely and friendly.
-Help the user with deployment, infrastructure, code, or operational tasks.
+        Current goal: {self.agent.goal or "General assistance"}
 
-Rules:
-- For simple questions or conversation → just reply normally.
-- If the request needs planning, multiple steps, tools, research, or code changes → 
-  call the tool `RequestComplexAction` with a short clear reason.
-- Only call `ExitDeployMode` when the entire task is truly finished and user is done.
-
-Current goal: {self.agent.goal or "General assistance"}
-"""
+        """
 
     # ==================== CHAT LOOP STEP ====================
     @workflow.set("deploy_chat", name="deploy_chat_loop")
@@ -362,27 +393,65 @@ Current goal: {self.agent.goal or "General assistance"}
     @workflow.set(
         "default",
         name="check_complete",
-        description="Determines if execution is complete.",
+        description="Determines if execution is complete and returns to chat mode",
     )
     async def _wf_check_complete(self, iteration: int, state: AgentState):
-        if iteration == 1 and not state.tool_calls and not state.planned_tasks:
-            state.phase = self.Phase.FINALIZE
-            yield ("phase_changed", {"phase": state.phase.value})
-            yield (
-                "llm_response",
-                {"full_reply": state.full_reply, "tool_calls": [], "is_complete": True},
-            )
-            yield ("finish", {"reason": "casual_complete"})
-            self.engine._log_iteration_state(iteration, state)
+        # Handle early casual completion or verified goal completion
+        should_complete = state.is_complete or (
+            iteration == 1 and not state.tool_calls and not state.planned_tasks
+        )
+
+        if not should_complete:
             return
 
-        if state.is_complete:
-            state.phase = self.Phase.FINALIZE
-            yield ("phase_changed", {"phase": state.phase.value})
-            async for ev, pl in self._generate_final_summary(state):  # ← now self.
-                yield (ev, pl)
-            yield ("finish", {"reason": "complete"})
-            self.engine._log_iteration_state(iteration, state)
+        state.phase = self.Phase.FINALIZE
+        yield ("phase_changed", {"phase": state.phase.value})
+
+        # === GENERATE NICE SUMMARY FOR THE USER ===
+        try:
+            friendly_summary = await self._generate_user_friendly_summary(state)
+
+            # Send the beautiful summary to the user
+            yield (
+                "llm_response",
+                {"full_reply": friendly_summary, "tool_calls": [], "is_complete": True},
+            )
+
+            await self.agent.context_manager.add_message("assistant", friendly_summary)
+
+            logger.info(
+                f"[Deploy Agent] Generated user-friendly summary after {iteration} iterations"
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to generate friendly summary: {e}")
+            friendly_summary = "Task completed successfully."
+            yield (
+                "llm_response",
+                {"full_reply": friendly_summary, "tool_calls": [], "is_complete": True},
+            )
+
+        # === NOW SWITCH BACK TO CHAT LOOP ===
+        reason = "Complex deployment task completed successfully"
+
+        await self.agent.post_control(
+            {"event": "switch_workflow", "name": "deploy_chat", "reason": reason}
+        )
+
+        logger.info(f"[Deploy Agent] Switched back to deploy_chat workflow → {reason}")
+
+        # Optional: signal that we're returning to chat
+        yield (
+            "workflow_switched",
+            {"from": "default", "to": "deploy_chat", "reason": reason},
+        )
+
+        yield (
+            "finish",
+            {"reason": "deploy_task_complete", "switched_back_to_chat": True},
+        )
+
+        self.engine._log_iteration_state(iteration, state)
 
     @workflow.set(
         "default",
@@ -554,36 +623,41 @@ Current goal: {self.agent.goal or "General assistance"}
         if is_chat_mode:
             # === CHAT MODE ===
             if iteration > 0:
-                # Wait for a new user message (subsequent turns)
+                logger.debug(f"Chat loop (iter {iteration}): waiting for user message OR system alert...")
+
                 try:
+                    # Wait for ANY message (user or system alert from sub-agents)
                     user_msg = await asyncio.wait_for(
                         self.agent.message_queue.get(),
-                        timeout=300.0,  # 5 minutes — adjust as needed
+                        timeout=300,   # 5 minutes
                     )
                 except asyncio.TimeoutError:
-                    yield ("error", "Timeout waiting for user message in chat mode")
+                    state.phase = self.Phase.IDLE
                     return
+
             else:
-                # FIRST iteration: Do NOT wait. Use message if already in queue, else start empty
+                # First iteration
                 try:
                     user_msg = self.agent.message_queue.get_nowait()
                 except asyncio.QueueEmpty:
-                    user_msg = ""  # or "Hello" or any gentle starter
+                    user_msg = ""
 
             # Extract query safely
             if isinstance(user_msg, dict):
+                role = user_msg.get("role", "user")
                 query = user_msg.get("content", "") or str(user_msg)
             else:
+                role = "user"
                 query = str(user_msg).strip()
 
             if not query:
-                query = "Start the conversation naturally."  # fallback for first turn
+                query = "Start the conversation naturally."
 
             logger.debug(
-                f"Agent '{self.agent.name}' [iter {iteration}] processing: {query[:100]}..."
+                f"Agent '{self.agent.name}' [iter {iteration}] processing {role} message: {query[:100]}..."
             )
 
-            # Build clean chat context
+            # Build context - IMPORTANT: pass the original message so role is preserved
             messages = await self.agent.context_manager.provide_context(
                 query=query,
                 max_input_tokens=self.agent.max_tokens,
@@ -592,6 +666,12 @@ Current goal: {self.agent.goal or "General assistance"}
                 include_logs=False,
                 chat=True,
             )
+
+            # If this was a system alert from a sub-agent, we can add extra context if needed
+            if role == "system" and "[DEPLOYMENT COMPLETE]" in query:
+                # Optional: make the LLM aware this is an important system notification
+                await self.agent.context_manager.add_message("system", 
+                    "This is an important notification from a background deployment task.")
 
         else:
             # Normal EXECUTE mode (unchanged)
@@ -836,3 +916,41 @@ Current goal: {self.agent.goal or "General assistance"}
     def _build_objective_reminder(self) -> str:
         """You can keep or move this helper if it exists elsewhere."""
         return f"Current goal: {self.agent.goal}"
+
+    async def _generate_user_friendly_summary(self, state: AgentState) -> str:
+        """Generates a natural, friendly summary that will be shown to the user
+        right before returning to chat mode."""
+
+        tool_results_str = "\n".join(
+            f"• {r['name']}: {str(r.get('result', ''))[:400]}"
+            for r in self.agent.tool_results[-12:]  # last 12 results max
+        )
+
+        prompt = f"""You are a helpful Deploy Agent. The complex task has just finished.
+
+    Task: {self.agent.task}
+    Goal: {self.agent.goal or "General deployment assistance"}
+
+    What was actually done (tool results):
+    {tool_results_str or "No tool results recorded."}
+
+    Write a **friendly, concise, natural** message to the user (2–6 sentences max).
+    - Celebrate what was accomplished
+    - Mention any important outcomes or warnings
+    - End by saying we're back in normal chat mode and ask how else you can help
+
+    Tone: professional but warm and clear. No JSON. No technical jargon unless necessary.
+    """
+
+        try:
+            summary = await self.agent.client.chat(
+                [{"role": "user", "content": prompt}], temperature=0.7
+            )
+            return summary.strip()
+        except Exception:
+            # Fallback
+            return (
+                f"✅ **Task completed successfully!**\n\n"
+                f"I have finished the deployment task: **{self.agent.task}**.\n"
+                f"We are now back in normal chat mode. How else can I help you?"
+            )
