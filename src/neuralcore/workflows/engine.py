@@ -304,6 +304,7 @@ class WorkflowEngine:
     # ===================================================================
     # MAIN RUNNER
     # ===================================================================
+
     async def run(
         self,
         user_prompt: str,
@@ -336,6 +337,60 @@ class WorkflowEngine:
         MAX_ITERATIONS = getattr(self.agent, "max_iterations", 20)
         MAX_STEPS_PER_ITERATION = getattr(self.agent, "max_steps_per_iteration", 100)
         # =============================================================================
+
+        # ===================================================================
+        # NEW: MESSAGE QUEUE CONTROL SUPPORT
+        # ===================================================================
+        # This follows up the Agent's message_queue change.
+        # You can now post *control* messages to `agent.message_queue` (in addition
+        # to normal user/system prompts) to dynamically control workflow flow:
+        #
+        # Examples (post as dict):
+        #   {"event": "go_to", "name": "think"}                    # or "index": 3, or "offset": 2
+        #   {"event": "switch_workflow", "name": "research"}
+        #   {"event": "break"}
+        #   {"event": "finish_iteration"}
+        #   {"event": "restart_iteration"}
+        #   {"event": "insert_steps", "steps": ["new_step1", "new_step2"], "after": "think"}
+        #   {"event": "insert_steps", "steps": ["final"], "at_end": True}
+        #   {"event": "cancelled"}   # or "finish", "needs_confirmation"
+        #
+        # Controls are checked after every successful step (non-blocking).
+        # Normal user messages still work exactly as before via the Agent run loop.
+        # ===================================================================
+        control_queue = getattr(self.agent, "message_queue", None)
+
+        async def _drain_control() -> Optional[Tuple[str, Any]]:
+            """Non-blocking drain of one control message (if any)."""
+            if not control_queue:
+                return None
+            try:
+                msg = await asyncio.wait_for(control_queue.get(), timeout=0.02)
+            except asyncio.TimeoutError:
+                return None
+
+            # Only control messages (mirrors the events the step handlers can yield)
+            if isinstance(msg, dict):
+                event = msg.get("event") or msg.get("action") or msg.get("control")
+                if event in {
+                    "switch_workflow",
+                    "go_to",
+                    "break",
+                    "finish_iteration",
+                    "restart_iteration",
+                    "insert_steps",
+                    "needs_confirmation",
+                    "cancelled",
+                    "finish",
+                }:
+                    payload = msg.get("payload") or msg.get("data") or msg
+                    control_queue.task_done()
+                    return event, payload
+
+            # Not a control → put it back so the outer Agent queue loop can handle it
+            await control_queue.put(msg)
+            control_queue.task_done()
+            return None
 
         while iteration < MAX_ITERATIONS:
             iteration += 1
@@ -468,7 +523,7 @@ class WorkflowEngine:
                                 async for event, payload in handler(iteration, state):
                                     yield (event, payload)
 
-                                    # === INLINE CONTROL EVENT PROCESSING ===
+                                    # === INLINE CONTROL EVENT PROCESSING (unchanged) ===
                                     if event == "switch_workflow":
                                         target = (
                                             payload.get("name")
@@ -498,9 +553,7 @@ class WorkflowEngine:
                                                 "reason": payload or "explicit",
                                             },
                                         )
-                                        step_index = len(
-                                            steps
-                                        )  # force exit of step loop
+                                        step_index = len(steps)
                                         break
 
                                     elif event == "finish_iteration":
@@ -541,7 +594,7 @@ class WorkflowEngine:
                                         return
 
                         else:
-                            # No timeout – identical logic
+                            # No timeout – identical logic (unchanged)
                             async for event, payload in handler(iteration, state):
                                 yield (event, payload)
 
@@ -637,7 +690,7 @@ class WorkflowEngine:
                         )
                         if attempt == retries:
                             raise
-                        await asyncio.sleep(1.0 * (2**attempt))  # exponential backoff
+                        await asyncio.sleep(1.0 * (2**attempt))
 
                     attempt += 1
 
@@ -658,7 +711,78 @@ class WorkflowEngine:
                     },
                 )
 
-                # === NEXT STEP LOGIC (including go_to) ===
+                # === NEW: CONTROL VIA MESSAGE QUEUE (after every step) ===
+                control = await _drain_control()
+                if control:
+                    event, payload = control
+
+                    if event == "switch_workflow":
+                        target = (
+                            payload.get("name")
+                            if isinstance(payload, dict)
+                            else payload
+                        )
+                        if isinstance(target, str):
+                            self.switch_workflow(target)
+                            yield ("switch_workflow", {"name": target})
+
+                    elif event == "go_to":
+                        # Set the same variables the inline handler logic uses
+                        # → the code below will handle yielding + jumping exactly like a normal go_to
+                        if isinstance(payload, str):
+                            go_to_target = payload
+                            go_to_data = None
+                        elif isinstance(payload, dict):
+                            go_to_target = payload.get("name") or payload.get("index")
+                            go_to_data = payload.get("data")
+                            if "offset" in payload:
+                                offset = int(payload["offset"])
+                                go_to_target = step_index + offset
+                        # (no yield here – the next-step logic will emit "step_go_to")
+
+                    elif event == "break":
+                        yield (
+                            "step_break",
+                            {
+                                "step": step_name,
+                                "reason": payload or "control_message",
+                            },
+                        )
+                        step_index = len(steps)
+                        break
+
+                    elif event == "finish_iteration":
+                        yield ("iteration_finished_early", payload or {})
+                        step_index = len(steps)
+                        break
+
+                    elif event == "restart_iteration":
+                        yield ("iteration_restarted", payload or {})
+                        step_index = -1
+                        break
+
+                    elif event == "insert_steps":
+                        if isinstance(payload, dict):
+                            new_steps = payload.get("steps", [])
+                            if payload.get("at_end"):
+                                steps.extend(new_steps)
+                            else:
+                                target_name = payload.get("after")
+                                for i, cfg in enumerate(steps):
+                                    name = (
+                                        cfg.get("name", "")
+                                        if isinstance(cfg, dict)
+                                        else cfg
+                                    )
+                                    if name == target_name:
+                                        steps[i + 1 : i + 1] = new_steps
+                                        break
+
+                    elif event in ("needs_confirmation", "cancelled", "finish"):
+                        yield (event, payload or {})
+                        return
+
+                # === NEXT STEP LOGIC (including go_to from handler OR from queue control) ===
                 next_step_index = step_index + 1
 
                 if go_to_target is not None:
@@ -701,7 +825,6 @@ class WorkflowEngine:
 
             # End of iteration
             self._log_iteration_state(iteration, state)
-
         # # Final summary
         # async for ev, pl in self._generate_final_summary(state):
         #     yield (ev, pl)

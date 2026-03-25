@@ -152,6 +152,37 @@ class Agent:
             f"Agent '{self.name}' ← system message posted: {str(message)[:80]}..."
         )
 
+    async def post_control(self, control: str | Dict[str, Any]) -> None:
+        """
+        Post a control message/event to dynamically control the workflow
+        while it is running.
+
+        Supported controls (exactly as documented in Workflow.run):
+            {"event": "go_to", "name": "think"}                    # or "index": 3, "offset": 2
+            {"event": "switch_workflow", "name": "research"}
+            {"event": "break"}
+            {"event": "finish_iteration"}
+            {"event": "restart_iteration"}
+            {"event": "insert_steps", "steps": ["new_step1", ...], "after": "think"}
+            {"event": "insert_steps", "steps": ["final"], "at_end": True}
+            {"event": "cancelled"} / {"event": "finish"} / {"event": "needs_confirmation"}
+
+        Controls are intercepted by Workflow._drain_control() during step execution.
+        If posted outside an active run they are safely ignored (with debug log).
+        """
+        if isinstance(control, str):
+            item = {"event": control}
+        elif isinstance(control, dict):
+            item = dict(control)  # shallow copy
+            # Ensure it is recognisable as control even if caller omitted the key
+            if not any(k in item for k in ("event", "action", "control")):
+                item["event"] = "custom_control"
+        else:
+            item = {"event": "custom_control", "payload": str(control)}
+
+        await self.message_queue.put(item)
+        logger.debug(f"Agent '{self.name}' ← control posted: {str(control)[:80]}...")
+
     async def run(
         self,
         user_prompt: Optional[str] = None,
@@ -161,11 +192,7 @@ class Agent:
         stop_event: Optional[asyncio.Event] = None,
     ) -> AsyncIterator[Tuple[str, Any]]:
         """
-        Run the agent with queue support.
-
-        - Initial user_prompt (optional) is treated as user message.
-        - Then continuously consumes from message_queue.
-        - Supports both user and system messages via post_message() / post_system_message().
+        Run the agent with queue support + full control-message compatibility.
         """
         system_prompt = (
             system_prompt if system_prompt is not None else self.system_prompt
@@ -192,7 +219,29 @@ class Agent:
                 # Get next message from queue
                 msg = await self.message_queue.get()
 
-                # Normalize message
+                # === NEW: CONTROL MESSAGE SUPPORT (fixes compatibility) ===
+                # Controls must be left for Workflow._drain_control() when a run is active.
+                # If they arrive outside an active run we safely ignore them.
+                if isinstance(msg, dict):
+                    event = msg.get("event") or msg.get("action") or msg.get("control")
+                    if event in {
+                        "switch_workflow",
+                        "go_to",
+                        "break",
+                        "finish_iteration",
+                        "restart_iteration",
+                        "insert_steps",
+                        "needs_confirmation",
+                        "cancelled",
+                        "finish",
+                    }:
+                        logger.debug(
+                            f"Agent '{self.name}' ← control ignored (outside active run): {event}"
+                        )
+                        self.message_queue.task_done()
+                        continue
+
+                # Normalize message (user / system)
                 if isinstance(msg, str):
                     role = "user"
                     content = msg.strip()
