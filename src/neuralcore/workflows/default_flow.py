@@ -28,9 +28,9 @@ async def provide_context(agent, query: str):
 )
 async def request_complex_action(agent, reason: str):
     """Start complex task in background and immediately return the task ID"""
-    
+
     # Start the monitored sub-task
-    task_id = await agent.start_complex_deployment(reason)   # ← we'll create this method
+    task_id = await agent.start_complex_deployment(reason)  # ← we'll create this method
 
     return (
         f"✅ Started background deployment task.\n"
@@ -39,6 +39,7 @@ async def request_complex_action(agent, reason: str):
         f"I will notify you automatically when it finishes.\n"
         f"You can check status anytime with `GetDeploymentStatus` tool using this ID."
     )
+
 
 @tool(
     "DeployControls",
@@ -61,11 +62,11 @@ async def get_deployment_status(agent, task_id: Optional[str] = None):
             return f"Task ID `{task_id}` not found."
 
         return f"""Task `{task_id}`:
-        Status: **{status['status'].upper()}**
-        Name: {status['display_name']}
-        Runtime: {status.get('runtime_seconds', 0)} seconds
-        Progress: {status.get('progress', 0)}%
-        Description: {status['description'][:150]}...
+        Status: **{status["status"].upper()}**
+        Name: {status["display_name"]}
+        Runtime: {status.get("runtime_seconds", 0)} seconds
+        Progress: {status.get("progress", 0)}%
+        Description: {status["description"][:150]}...
 """
     else:
         tasks = agent.get_sub_tasks()
@@ -146,26 +147,81 @@ class AgentFlow:
     # ==================== CHAT LOOP STEP ====================
     @workflow.set("deploy_chat", name="deploy_chat_loop")
     async def _wf_deploy_chat_loop(self, iteration: int, state: AgentState):
-        state.phase = self.Phase.CHAT
-        yield ("phase_changed", {"phase": state.phase.value})
+        """Clean persistent chat loop — hides raw tool deltas, only shows nice output"""
 
-        # Only wait for user input starting from the second iteration
-        if iteration > 0:
-            logger.debug(
-                f"Chat loop (iter {iteration}): waiting for next user message..."
-            )
-            # Waiting happens inside _llm_stream_with_tools
+        if iteration == 0:
+            state.phase = self.Phase.CHAT
+            yield ("phase_changed", {"phase": state.phase.value})
+            logger.info(f"Agent '{self.agent.name}' → Persistent chat mode started")
+
         self.agent.manager.load_toolsets("DeployControls")
 
-        async for ev, pl in self._llm_stream_with_tools(
-            iteration=iteration,
-            state=state,
-            tools=self.agent.manager.get_action_set("DeployControls"),
-            is_chat_mode=True,
-        ):
-            yield (ev, pl)
+        while True:
+            logger.debug("Chat loop: awaiting next message...")
 
-        self.engine._log_iteration_state(iteration, state)
+            try:
+                raw_msg = await self.agent.message_queue.get()
+            except asyncio.CancelledError:
+                logger.info("Chat loop cancelled")
+                break
+
+            if isinstance(raw_msg, dict):
+                role = raw_msg.get("role", "user")
+                content = raw_msg.get("content", "") or str(raw_msg)
+            else:
+                role = "user"
+                content = str(raw_msg).strip()
+
+            if not content:
+                self.agent.message_queue.task_done()
+                continue
+
+            # === FAST PATH: Background deployment results ===
+            if role == "system" and (
+                "[DEPLOYMENT COMPLETE]" in content or "[DEPLOYMENT FAILED]" in content
+            ):
+                logger.debug("Fast-path: delivering background deployment result")
+                yield (
+                    "llm_response",
+                    {
+                        "full_reply": content,
+                        "tool_calls": [],
+                        "is_complete": True,
+                        "is_system_alert": True,
+                    },
+                )
+                await self.agent.context_manager.add_message("system", content)
+                await self.agent.context_manager.add_message("assistant", content)
+                self.agent.message_queue.task_done()
+                continue
+
+            # === NORMAL PATH: User message → LLM + tools ===
+            logger.debug(f"Processing normal message/role={role}: {content[:100]}...")
+
+            messages = await self.agent.context_manager.provide_context(
+                query=content,
+                max_input_tokens=self.agent.max_tokens,
+                reserved_for_output=8000,
+                system_prompt=self._build_chat_system_prompt(),
+                include_logs=False,
+                chat=True,
+            )
+
+            yield ("phase_changed", {"phase": self.Phase.CHAT.value})
+
+            logger.debug("→ Calling _process_user_message_with_llm")
+
+            # Yield only clean events, hide raw tool deltas
+            async for ev, pl in self._process_user_message_with_llm(messages, state):
+                if ev in ("tool_delta", "tool_call_delta"):
+                    logger.debug(f"Filtered out {ev} (raw tool metadata)")
+                    continue  # ← THIS IS THE KEY LINE
+
+                logger.debug(f"YIELDING event={ev}")
+                yield (ev, pl)
+
+            logger.debug("Finished processing user message")
+            self.agent.message_queue.task_done()
 
     @workflow.set(
         "default",
@@ -614,6 +670,7 @@ class AgentFlow:
         tools: Optional[ActionSet] = None,
         is_chat_mode: bool = False,
     ) -> AsyncIterator[Tuple[str, Any]]:
+
         if is_chat_mode:
             state.phase = self.Phase.CHAT
         else:
@@ -623,26 +680,21 @@ class AgentFlow:
         if is_chat_mode:
             # === CHAT MODE ===
             if iteration > 0:
-                logger.debug(f"Chat loop (iter {iteration}): waiting for user message OR system alert...")
-
                 try:
-                    # Wait for ANY message (user or system alert from sub-agents)
                     user_msg = await asyncio.wait_for(
                         self.agent.message_queue.get(),
-                        timeout=300,   # 5 minutes
+                        timeout=300.0,
                     )
                 except asyncio.TimeoutError:
                     state.phase = self.Phase.IDLE
+                    yield ("idle", {"reason": "timeout"})
                     return
-
             else:
-                # First iteration
                 try:
                     user_msg = self.agent.message_queue.get_nowait()
                 except asyncio.QueueEmpty:
                     user_msg = ""
 
-            # Extract query safely
             if isinstance(user_msg, dict):
                 role = user_msg.get("role", "user")
                 query = user_msg.get("content", "") or str(user_msg)
@@ -654,10 +706,9 @@ class AgentFlow:
                 query = "Start the conversation naturally."
 
             logger.debug(
-                f"Agent '{self.agent.name}' [iter {iteration}] processing {role} message: {query[:100]}..."
+                f"Agent '{self.agent.name}' processing {role} message: {query[:100]}..."
             )
 
-            # Build context - IMPORTANT: pass the original message so role is preserved
             messages = await self.agent.context_manager.provide_context(
                 query=query,
                 max_input_tokens=self.agent.max_tokens,
@@ -667,14 +718,14 @@ class AgentFlow:
                 chat=True,
             )
 
-            # If this was a system alert from a sub-agent, we can add extra context if needed
             if role == "system" and "[DEPLOYMENT COMPLETE]" in query:
-                # Optional: make the LLM aware this is an important system notification
-                await self.agent.context_manager.add_message("system", 
-                    "This is an important notification from a background deployment task.")
+                await self.agent.context_manager.add_message(
+                    "system",
+                    "This is an important notification from a background deployment task.",
+                )
 
         else:
-            # Normal EXECUTE mode (unchanged)
+            # Normal EXECUTE mode
             messages = await self.agent.context_manager.provide_context(
                 query=state.current_task or "Continue",
                 max_input_tokens=self.agent.max_tokens,
@@ -683,7 +734,7 @@ class AgentFlow:
                 include_logs=True,
             )
 
-        # === The rest of your function stays exactly the same ===
+        # ====================== LLM STREAM + TOOL EXECUTION ======================
         async def executor_callback(name: str, args: dict):
             executor = self.agent.manager.get_executor(name, self.agent)
             if not executor:
@@ -701,7 +752,8 @@ class AgentFlow:
         )
 
         text_buffer = ""
-        tool_calls = []
+        text_buffer = ""
+        tool_results = []
 
         try:
             async for item in self.agent.client._drain_queue(queue):
@@ -709,36 +761,73 @@ class AgentFlow:
                     continue
                 if not isinstance(item, tuple) or len(item) != 2:
                     continue
+
                 kind, payload = item
+
+                # Log for debugging
+                logger.debug(f"[STREAM EVENT] kind={kind}")
 
                 if kind == "content":
                     text_buffer += payload
-                    yield ("content_delta", payload)
+                    yield ("content_delta", payload)  # normal text streaming
+
                 elif kind in ("tool_delta", "tool_complete", "needs_confirmation"):
-                    if kind in ("tool_complete", "needs_confirmation"):
-                        tool_calls.append(payload)
-                    yield (kind, payload)
+                    # ── Capture REAL tool result only ──
+                    if isinstance(payload, dict):
+                        result = payload.get("result") or payload.get("output")
+
+                        if isinstance(result, str) and result.strip():
+                            clean_result = result.strip()
+                            tool_results.append(clean_result)
+                            logger.debug(f"[GOOD TOOL RESULT] {clean_result[:150]}...")
+
+                        # Skip metadata (this is what was polluting the UI)
+                        else:
+                            logger.debug(
+                                f"[SKIPPED TOOL METADATA] keys={list(payload.keys())[:8]}"
+                            )
+
+                    # DO NOT yield tool_delta to UI anymore
+                    # yield (kind, payload)   ← commented out on purpose
+
                 elif kind == "finish":
+                    logger.debug("STREAM FINISHED")
                     break
-                elif kind == "error":
-                    yield ("error", payload)
-                    return
-                elif kind == "cancelled":
-                    yield ("cancelled", payload)
+
+                elif kind in ("error", "cancelled"):
+                    yield (kind, payload)
                     return
 
         except asyncio.CancelledError:
             yield ("cancelled", "Task cancelled")
             return
+        except Exception as e:
+            logger.error(f"Stream error: {e}", exc_info=True)
+            yield ("error", str(e))
+            return
+
+        # ====================== FINAL REPLY ======================
+        final_reply = text_buffer.strip()
+
+        if not final_reply and tool_results:
+            final_reply = "\n\n".join(tool_results)
+            logger.info(f"Using clean tool result as final reply: {final_reply[:300]}")
+
+        if not final_reply:
+            final_reply = "✅ Tool executed successfully."
+
+        logger.info(f"FINAL REPLY being sent to user:\n{final_reply}")
 
         yield (
             "llm_response",
             {
-                "full_reply": text_buffer.strip(),
-                "tool_calls": tool_calls,
-                "is_complete": self.FINAL_ANSWER_MARKER in text_buffer,
+                "full_reply": final_reply,
+                "tool_calls": [],
+                "is_complete": True,
             },
         )
+
+        await self.agent.context_manager.add_message("assistant", final_reply)
 
     async def _execute_tools(
         self, tool_calls: List[Dict], iteration: int, state: AgentState
@@ -916,6 +1005,107 @@ class AgentFlow:
     def _build_objective_reminder(self) -> str:
         """You can keep or move this helper if it exists elsewhere."""
         return f"Current goal: {self.agent.goal}"
+
+    async def _process_user_message_with_llm(
+        self, messages: List[Dict], state: AgentState
+    ) -> AsyncIterator[Tuple[str, Any]]:
+        """Clean version: hide raw tool deltas, only emit clean text and final reply"""
+
+        logger.debug("=== ENTERING _process_user_message_with_llm ===")
+
+        async def executor_callback(name: str, args: dict):
+            logger.debug(f"[TOOL CALL] Executing {name} with args {args}")
+            executor = self.agent.manager.get_executor(name, self.agent)
+            if not executor:
+                raise RuntimeError(f"No executor for tool '{name}'")
+            maybe = executor(**args)
+            result = await maybe if asyncio.iscoroutine(maybe) else maybe
+            logger.debug(f"[TOOL RESULT] {name} returned: {str(result)[:200]}")
+            return result
+
+        queue = await self.agent.client.stream_with_tools(
+            messages=messages,
+            tools=self.agent.manager.get_action_set("DeployControls"),
+            temperature=self.agent.temperature,
+            max_tokens=self.agent.max_tokens,
+            tool_choice="auto",
+            executor_callback=executor_callback,
+        )
+
+        text_buffer = ""
+        tool_results = []
+
+        try:
+            async for item in self.agent.client._drain_queue(queue):
+                if item is None:
+                    continue
+                if not isinstance(item, tuple) or len(item) != 2:
+                    continue
+
+                kind, payload = item
+                logger.debug(f"[STREAM EVENT] kind={kind}")
+
+                if kind == "content":
+                    text_buffer += payload
+                    yield ("content_delta", payload)  # Normal streaming text
+
+                elif kind in ("tool_delta", "tool_complete", "needs_confirmation"):
+                    # Capture ONLY the real result, never yield the raw metadata
+                    if isinstance(payload, dict):
+                        result = payload.get("result") or payload.get("output")
+
+                        if isinstance(result, str) and result.strip():
+                            clean_result = result.strip()
+                            tool_results.append(clean_result)
+                            logger.debug(
+                                f"[GOOD TOOL RESULT CAPTURED] {clean_result[:200]}..."
+                            )
+
+                        else:
+                            logger.debug(f"[SKIPPED METADATA] kind={kind}")
+
+                    # DO NOT yield tool_delta/tool_complete to the UI
+                    # yield (kind, payload)   <--- COMMENTED OUT ON PURPOSE
+
+                elif kind == "finish":
+                    logger.debug("STREAM FINISHED")
+                    break
+
+                elif kind in ("error", "cancelled"):
+                    yield (kind, payload)
+                    return
+
+        except asyncio.CancelledError:
+            yield ("cancelled", "Task cancelled")
+            return
+        except Exception as e:
+            logger.error(f"Stream error: {e}", exc_info=True)
+            yield ("error", str(e))
+            return
+
+        # ====================== FINAL REPLY ======================
+        final_reply = text_buffer.strip()
+
+        if not final_reply and tool_results:
+            final_reply = "\n\n".join(tool_results)
+            logger.info(f"Using clean tool result as final_reply: {final_reply[:300]}")
+
+        if not final_reply:
+            final_reply = "✅ Tool executed successfully."
+
+        logger.info(f"FINAL REPLY being sent to user:\n{final_reply}")
+
+        yield (
+            "llm_response",
+            {
+                "full_reply": final_reply,
+                "tool_calls": [],
+                "is_complete": True,
+            },
+        )
+
+        await self.agent.context_manager.add_message("assistant", final_reply)
+        logger.debug("Message added to context")
 
     async def _generate_user_friendly_summary(self, state: AgentState) -> str:
         """Generates a natural, friendly summary that will be shown to the user
