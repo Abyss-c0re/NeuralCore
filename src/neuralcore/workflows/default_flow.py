@@ -1,8 +1,8 @@
 import re
 import asyncio
 import json
-
-from neuralcore.agents.state import AgentState, Phase
+from enum import Enum
+from neuralcore.agents.state import AgentState
 from neuralcore.actions.manager import tool
 from neuralcore.workflows.registry import workflow
 from neuralcore.utils.logger import Logger
@@ -20,11 +20,45 @@ class AgentFlow:
 
     FINAL_ANSWER_MARKER = "[FINAL_ANSWER_COMPLETE]"
 
+    class Phase(str, Enum):
+        IDLE = "idle"
+        PLAN = "plan"
+        EXECUTE = "execute"
+        REFLECT = "reflect"
+        DECISION = "decision"
+        FINALIZE = "finalize"
+
+    DEFAULT_WORKFLOW = [
+        "plan_tasks",
+        "llm_stream",
+        "execute_if_tools",
+        "verify_goal_completion",
+        "check_complete",
+        "reflect_if_stuck",
+        "replan_if_reflected",
+        "safety_fallback",
+    ]
+
     def __init__(self, engine):
+        self.engine = engine
         self.agent = engine.agent
-        self.engine = (
-            engine  # still needed for workflow_steps, _log_iteration_state, etc.
+        self._register_builtin_workflow()
+
+    def _register_builtin_workflow(self):
+        # Register default workflow in engine
+        self.engine.register_workflow(
+            name="default",
+            description="Default ReAct loop + persistent goal + efficient ContextManager",
+            steps=self.DEFAULT_WORKFLOW,
         )
+
+        # Register all _wf_* methods from this class into engine
+        for attr_name in dir(self):
+            if attr_name.startswith("_wf_"):
+                step_name = attr_name[4:]
+                method = getattr(self, attr_name)
+                if callable(method):
+                    self.engine._step_handlers[step_name] = method
 
     @tool(
         "ContextManager",
@@ -48,7 +82,7 @@ class AgentFlow:
     ) -> AsyncIterator:
         """(unchanged)"""
         if not state.planned_tasks:
-            state.phase = Phase.PLAN
+            state.phase = self.Phase.PLAN
             yield ("phase_changed", {"phase": state.phase.value})
 
             # ── Step 1: Generate queries
@@ -185,7 +219,7 @@ class AgentFlow:
             sig = f"{r['name']}:{json.dumps(r['args'], sort_keys=True)}"
             self.agent.executed_signatures.add(sig)
 
-        state.phase = Phase.DECISION
+        state.phase = self.Phase.DECISION
         yield ("phase_changed", {"phase": state.phase.value})
 
         self.engine._log_iteration_state(iteration, state)
@@ -202,7 +236,7 @@ class AgentFlow:
         if not state.is_complete:
             return
 
-        state.phase = Phase.DECISION
+        state.phase = self.Phase.DECISION
         yield ("phase_changed", {"phase": state.phase.value})
         yield ("goal_verification_start", {"iteration": iteration})
 
@@ -268,7 +302,7 @@ class AgentFlow:
     )
     async def _wf_check_complete(self, iteration: int, state: AgentState):
         if iteration == 1 and not state.tool_calls and not state.planned_tasks:
-            state.phase = Phase.FINALIZE
+            state.phase = self.Phase.FINALIZE
             yield ("phase_changed", {"phase": state.phase.value})
             yield (
                 "llm_response",
@@ -279,7 +313,7 @@ class AgentFlow:
             return
 
         if state.is_complete:
-            state.phase = Phase.FINALIZE
+            state.phase = self.Phase.FINALIZE
             yield ("phase_changed", {"phase": state.phase.value})
             async for ev, pl in self._generate_final_summary(state):  # ← now self.
                 yield (ev, pl)
@@ -447,7 +481,7 @@ class AgentFlow:
         Streams LLM responses and tool events using the client.
         Redundant JSON parsing and duplicate detection removed.
         """
-        state.phase = Phase.EXECUTE
+        state.phase = self.Phase.EXECUTE
 
         messages = await self.agent.context_manager.provide_context(
             query=state.current_task or "Continue",
@@ -516,7 +550,7 @@ class AgentFlow:
         Executes tool calls using agent.manager. ConfirmationRequired
         is now handled by the client, so this is just a simple pass-through.
         """
-        state.phase = Phase.EXECUTE
+        state.phase = self.Phase.EXECUTE
         yield ("phase_changed", {"phase": state.phase.value})
 
         for call in tool_calls or []:
@@ -565,7 +599,7 @@ class AgentFlow:
     async def _force_reflection(
         self, iteration: int, state: AgentState
     ) -> AsyncIterator[Tuple[str, Any]]:
-        state.phase = Phase.REFLECT
+        state.phase = self.Phase.REFLECT
         yield ("phase_changed", {"phase": state.phase.value})
 
         summary = self.agent.context_manager.get_context_summary()
@@ -643,7 +677,7 @@ class AgentFlow:
     async def _generate_final_summary(
         self, state: AgentState
     ) -> AsyncIterator[Tuple[str, Any]]:
-        state.phase = Phase.FINALIZE
+        state.phase = self.Phase.FINALIZE
         yield ("phase_changed", {"phase": state.phase.value})
 
         lines = [

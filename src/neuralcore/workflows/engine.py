@@ -19,17 +19,6 @@ class WorkflowEngine:
     AgentFlow only supplies the _wf_* steps.
     """
 
-    DEFAULT_WORKFLOW: List[Union[str, Dict[str, Any]]] = [
-        "plan_tasks",
-        "llm_stream",
-        "execute_if_tools",
-        "verify_goal_completion",
-        "check_complete",
-        "reflect_if_stuck",
-        "replan_if_reflected",
-        "safety_fallback",
-    ]
-
     FINAL_ANSWER_MARKER = "[FINAL_ANSWER_COMPLETE]"
 
     def __init__(self, agent):
@@ -47,11 +36,8 @@ class WorkflowEngine:
         ] = {}
 
         # === LOAD AgentFlow (now contains all _wf_* methods) ===
-        self.sequence_registry = SequenceRegistry(
-            self
-        )  # Register sequence as step for workflow
-
-        self._register_builtin_workflow()
+        self.sequence_registry = SequenceRegistry(self)
+        AgentFlow(self)
         self.load_workflow_from_config()
 
         logger.info(
@@ -87,22 +73,6 @@ class WorkflowEngine:
         logger.info(
             f"✅ Registered custom condition '{name}': {description or 'no desc'}"
         )
-
-    def _register_builtin_workflow(self):
-        self.register_workflow(
-            name="default",
-            description="Default ReAct loop + persistent goal + efficient ContextManager",
-            steps=self.DEFAULT_WORKFLOW,
-        )
-        flow = AgentFlow(self)
-
-        for attr_name in dir(flow):
-            if attr_name.startswith("_wf_"):
-                step_name = attr_name[4:]
-                method = getattr(flow, attr_name)
-
-                if callable(method):
-                    self._step_handlers[step_name] = method
 
     def _build_objective_reminder(self) -> str:
         return (
