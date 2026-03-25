@@ -54,6 +54,13 @@ class Agent:
         ToolBrowser(registry, self.manager)
         logger.debug(" ToolBrowser registered")
 
+        # NEW: Persistent queue where user and system (external code) can post messages.
+        # Messages are treated as user prompts and redirected into the workflow.
+        # Queue items can be:
+        #   - str                     → treated as user prompt
+        #   - dict with "content" key → treated as user prompt (role ignored for now)
+        self.message_queue: asyncio.Queue[Any] = asyncio.Queue()
+
     def attach_tools(self):
         """Call after instantiating Agent to load tool sets."""
         tool_sets = self.config.get("tool_sets", [])
@@ -105,21 +112,61 @@ class Agent:
         self.steps: List[str] = []
         self._stop_event: Optional[asyncio.Event] = None
 
-    # ---------------- PUBLIC API (signature unchanged) ----------------
+    # ---------------- PUBLIC API ----------------
+
+    async def post_message(self, message: str | Dict[str, Any]) -> None:
+        """
+        Post a message as USER (default behavior).
+        """
+        if isinstance(message, str):
+            item = {"role": "user", "content": message}
+        elif isinstance(message, dict):
+            item = {"role": "user", **message}  # ensure role is user unless overridden
+            if "role" not in item:
+                item["role"] = "user"
+        else:
+            item = {"role": "user", "content": str(message)}
+
+        await self.message_queue.put(item)
+        logger.debug(
+            f"Agent '{self.name}' ← user message posted: {str(message)[:80]}..."
+        )
+
+    async def post_system_message(self, message: str | Dict[str, Any]) -> None:
+        """
+        Post a message as SYSTEM.
+        This is useful for injecting instructions, context updates, tool results,
+        or internal system events into the workflow.
+        """
+        if isinstance(message, str):
+            item = {"role": "system", "content": message}
+        elif isinstance(message, dict):
+            item = {"role": "system", **message}
+            if "role" not in item:
+                item["role"] = "system"
+        else:
+            item = {"role": "system", "content": str(message)}
+
+        await self.message_queue.put(item)
+        logger.debug(
+            f"Agent '{self.name}' ← system message posted: {str(message)[:80]}..."
+        )
 
     async def run(
         self,
-        user_prompt: str,
+        user_prompt: Optional[str] = None,
         system_prompt: Optional[str] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         stop_event: Optional[asyncio.Event] = None,
     ) -> AsyncIterator[Tuple[str, Any]]:
         """
-        Run the agent workflow with defaults safely pulled from config.
-        Type-safe: ensures all values passed to workflow.run are correct types.
+        Run the agent with queue support.
+
+        - Initial user_prompt (optional) is treated as user message.
+        - Then continuously consumes from message_queue.
+        - Supports both user and system messages via post_message() / post_system_message().
         """
-        # Use config defaults if None
         system_prompt = (
             system_prompt if system_prompt is not None else self.system_prompt
         )
@@ -128,7 +175,66 @@ class Agent:
         )
         max_tokens = int(max_tokens) if max_tokens is not None else int(self.max_tokens)
 
-        async for event, payload in self.workflow.run(
-            user_prompt, system_prompt, temperature, max_tokens, stop_event
-        ):
-            yield event, payload
+        # 1. Optional initial user prompt (backward compatibility)
+        if user_prompt is not None and str(user_prompt).strip():
+            async for event, payload in self.workflow.run(
+                user_prompt, system_prompt, temperature, max_tokens, stop_event
+            ):
+                yield event, payload
+
+        # 2. Continuous message queue processor
+        try:
+            while True:
+                if stop_event and stop_event.is_set():
+                    logger.debug(f"Agent '{self.name}' stopped via stop_event")
+                    break
+
+                # Get next message from queue
+                msg = await self.message_queue.get()
+
+                # Normalize message
+                if isinstance(msg, str):
+                    role = "user"
+                    content = msg.strip()
+                elif isinstance(msg, dict):
+                    role = msg.get("role", "user")
+                    content = msg.get("content") or str(msg)
+                    content = str(content).strip()
+                else:
+                    role = "user"
+                    content = str(msg).strip()
+
+                if not content:
+                    self.message_queue.task_done()
+                    continue
+
+                # === Redirect to workflow based on role ===
+                if role == "system":
+                    # For system messages, we pass them as the system_prompt override
+                    current_system = content
+                    user_content = ""  # no user prompt for pure system injection
+                else:
+                    # Normal user message
+                    current_system = system_prompt
+                    user_content = content
+
+                # Run the workflow with appropriate prompt
+                async for event, payload in self.workflow.run(
+                    user_content
+                    if role != "system"
+                    else "",  # empty user prompt for system-only
+                    current_system,
+                    temperature,
+                    max_tokens,
+                    stop_event,
+                ):
+                    yield event, payload
+
+                self.message_queue.task_done()
+
+        except asyncio.CancelledError:
+            logger.debug(f"Agent '{self.name}' run cancelled")
+            raise
+        except Exception as e:
+            logger.error(f"Agent '{self.name}' queue error: {e}", exc_info=True)
+            raise
