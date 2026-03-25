@@ -273,6 +273,19 @@ class DynamicActionManager:
 
         return loaded_count
 
+    def select_toolset(self, toolset_names: Union[str, List[str]]) -> int:
+        """
+        Select one or more toolsets as active.
+        Unloads all other dynamic tools and loads only the specified toolset(s).
+
+        Returns the number of tools newly loaded.
+        """
+        # Step 1: unload all non-persistent tools
+        self.unload_all()
+
+        # Step 2: load the desired toolset(s)
+        return self.load_toolsets(toolset_names)
+
     def unload_tools(self, tool_names: Union[str, List[str], None] = None):
         """Unload specific tools by name."""
         if tool_names is None:
