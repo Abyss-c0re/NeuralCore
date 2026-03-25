@@ -1,8 +1,9 @@
 import re
 import asyncio
 import json
+
 from neuralcore.agents.state import AgentState, Phase
-from neuralcore.utils.exceptions_handler import ConfirmationRequired
+from neuralcore.actions.manager import tool
 from neuralcore.workflows.registry import workflow
 from neuralcore.utils.logger import Logger
 
@@ -24,6 +25,14 @@ class AgentFlow:
         self.engine = (
             engine  # still needed for workflow_steps, _log_iteration_state, etc.
         )
+
+    @tool(
+        "ContextManager",
+        name="GetContext",
+        description="use this tool to search your own memory",
+    )
+    async def provide_context(self, query):
+        return await self.agent.context_manager.provide_context(query)
 
     # ===================================================================
     # STEP HANDLERS (unchanged except internal calls)
@@ -434,7 +443,12 @@ class AgentFlow:
     async def _llm_stream_with_tools(
         self, iteration: int, state: AgentState
     ) -> AsyncIterator[Tuple[str, Any]]:
+        """
+        Streams LLM responses and tool events using the client.
+        Redundant JSON parsing and duplicate detection removed.
+        """
         state.phase = Phase.EXECUTE
+
         messages = await self.agent.context_manager.provide_context(
             query=state.current_task or "Continue",
             max_input_tokens=self.agent.max_tokens,
@@ -443,16 +457,24 @@ class AgentFlow:
             include_logs=True,
         )
 
+        # pass the executor callback to the client for proper tool execution
+        async def executor_callback(name: str, args: dict):
+            executor = self.agent.manager.get_executor(name, self.agent)
+            if not executor:
+                raise RuntimeError(f"No executor for tool '{name}'")
+            maybe = executor(**args)
+            return await maybe if asyncio.iscoroutine(maybe) else maybe
+
         queue = await self.agent.client.stream_with_tools(
             messages=messages,
             tools=self.agent.manager.get_llm_tools(),
             temperature=self.agent.temperature,
             max_tokens=self.agent.max_tokens,
             tool_choice="auto",
+            executor_callback=executor_callback,
         )
 
         text_buffer = ""
-        all_tool_calls: List[Dict] = []
 
         try:
             async for kind, payload in self.agent.client._drain_queue(queue):
@@ -460,23 +482,9 @@ class AgentFlow:
                     text_buffer += payload
                     yield ("content_delta", payload)
 
-                elif kind == "tool_delta":
-                    yield ("tool_delta", payload)
-
-                elif kind == "tool_complete":
-                    try:
-                        args_dict = json.loads(payload["function"]["arguments"])
-                        sig = f"{payload['function']['name']}:{json.dumps(args_dict, sort_keys=True)}"
-                    except (json.JSONDecodeError, TypeError, KeyError):
-                        sig = f"{payload.get('function', {}).get('name')}:{payload.get('function', {}).get('arguments', '')}"
-
-                    if not any(
-                        f"{c.get('function', {}).get('name')}:{json.dumps(c.get('function', {}).get('arguments', ''), sort_keys=True) if isinstance(c.get('function', {}).get('arguments'), (dict, str)) else c.get('function', {}).get('arguments', '')}"
-                        == sig
-                        for c in all_tool_calls
-                    ):
-                        all_tool_calls.append(payload)
-                    yield ("tool_complete", payload)
+                elif kind in ("tool_delta", "tool_complete", "needs_confirmation"):
+                    # forward tool events directly
+                    yield (kind, payload)
 
                 elif kind == "finish":
                     break
@@ -489,9 +497,14 @@ class AgentFlow:
             yield ("cancelled", "Task cancelled")
             return
 
+        # emit final llm_response summary
         response_state = {
             "full_reply": text_buffer.strip(),
-            "tool_calls": all_tool_calls,
+            "tool_calls": [
+                payload
+                for kind, payload in queue._queue
+                if kind in ("tool_complete", "needs_confirmation")
+            ],
             "is_complete": self.FINAL_ANSWER_MARKER in text_buffer,
         }
         yield ("llm_response", response_state)
@@ -499,6 +512,10 @@ class AgentFlow:
     async def _execute_tools(
         self, tool_calls: List[Dict], iteration: int, state: AgentState
     ) -> AsyncIterator[Tuple[str, Any]]:
+        """
+        Executes tool calls using agent.manager. ConfirmationRequired
+        is now handled by the client, so this is just a simple pass-through.
+        """
         state.phase = Phase.EXECUTE
         yield ("phase_changed", {"phase": state.phase.value})
 
@@ -511,9 +528,7 @@ class AgentFlow:
 
             sig = f"{name}:{json.dumps(args, sort_keys=True)}"
             if sig in self.agent.executed_signatures:
-                logger.debug(f"Skipping already executed tool: {sig}")
                 continue
-
             self.agent.executed_signatures.add(sig)
 
             executor = self.agent.manager.get_executor(name, self.agent)
@@ -523,48 +538,23 @@ class AgentFlow:
 
             yield ("tool_start", {"name": name, "args": args})
 
-            task_id = f"{name}:{hash(json.dumps(args, sort_keys=True))}"
-            if hasattr(self.agent.context_manager, "add_subtask"):
-                self.agent.context_manager.add_subtask(task_id)
-
             try:
-                if name in ("run", "self_run"):
-                    result = "Self-run tool skipped"
-                    yield (
-                        "tool_skipped",
-                        {"name": name, "reason": "recursion prevented"},
-                    )
-                else:
-                    maybe = executor(**args)
-                    result = await maybe if asyncio.iscoroutine(maybe) else maybe
+                maybe = executor(**args)
+                result = await maybe if asyncio.iscoroutine(maybe) else maybe
 
                 await self.agent.context_manager.record_tool_outcome(
                     name, str(result), args
                 )
                 await self.agent.context_manager.add_message("tool", str(result))
 
-                if hasattr(self.agent.context_manager, "complete_subtask"):
-                    self.agent.context_manager.complete_subtask(task_id)
-                if hasattr(self.agent.context_manager, "add_finding"):
-                    self.agent.context_manager.add_finding(
-                        f"{name} → {str(result)[:200]}"
-                    )
-
                 self.agent.tool_results.append(
                     {"name": name, "result": result, "args": args}
                 )
                 yield ("tool_result", {"name": name, "result": result})
 
-            except ConfirmationRequired as exc:
-                yield ("needs_confirmation", {**exc.__dict__, "tool_calls": tool_calls})
-                return
             except Exception as exc:
                 result = f"Tool '{name}' failed: {exc}"
                 await self.agent.context_manager.record_tool_outcome(name, result, args)
-                if hasattr(self.agent.context_manager, "add_unknown"):
-                    self.agent.context_manager.add_unknown(
-                        f"{name} failed: {str(exc)[:200]}"
-                    )
                 yield ("tool_result", {"name": name, "result": result, "error": True})
 
             stop_event = getattr(self.agent.client, "_current_stop_event", None)
