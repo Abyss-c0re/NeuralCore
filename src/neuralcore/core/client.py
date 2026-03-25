@@ -1,9 +1,10 @@
 import asyncio
 import json
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional, Union, Awaitable
 
 from openai import AsyncOpenAI, OpenAI
 from openai.types.chat import ChatCompletionMessageToolCall
+from neuralcore.utils.exceptions_handler import ConfirmationRequired
 from neuralcore.actions.actions import Action, ActionSet
 from neuralcore.actions.manager import DynamicActionManager
 from neuralcore.utils.text_tokenizer import TextTokenizer
@@ -362,41 +363,8 @@ class LLMClient:
             )
             return f"[error] {str(e)}"
 
-    def chat_sync(
-        self,
-        messages: List[Dict[str, Any]],
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        extra_body: Optional[Dict] = None,
-        **kwargs,
-    ) -> str:
-        merged_extra = {**self.extra_body_default, **(extra_body or {})}
-
-        if messages:
-            messages = prepare_messages_for_stream(messages)
-
-        params = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": temperature if temperature is not None else self.temperature,
-            "max_tokens": max_tokens if max_tokens is not None else self.max_tokens,
-            "stream": False,
-            **kwargs,
-        }
-        if merged_extra:
-            params["extra_body"] = merged_extra
-
-        try:
-            resp = self.sync_client.chat.completions.create(**params)
-            return (resp.choices[0].message.content or "").strip()
-        except Exception as e:
-            logger.warning(
-                f"chat_sync failed | model={self.model}, msgs={len(messages)} | {str(e)[:180]}"
-            )
-            return f"[sync error] {str(e)}"
-
     # -------------------------------------------------------------------------
-    # Describe image (vision) – async + sync
+    # Describe image (vision)
     # -------------------------------------------------------------------------
 
     async def describe_image(
@@ -457,57 +425,6 @@ class LLMClient:
         except Exception as e:
             logger.error(f"describe_image failed: {e}", exc_info=True)
             return f"[vision error] {str(e)}"
-
-    def describe_image_sync(
-        self,
-        image_base64: str | None,
-        prompt: str = "Describe this image in detail.",
-        vision_model: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: int = 1024,
-        **kwargs,
-    ) -> str:
-        if not image_base64:
-            return "No image provided"
-
-        model_to_use = vision_model or self.model
-
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"},
-                    },
-                ],
-            }
-        ]
-
-        if messages:
-            messages = prepare_messages_for_stream(messages)
-
-        merged_extra = {**self.extra_body_default, **kwargs.pop("extra_body", {})}
-
-        params = {
-            "model": model_to_use,
-            "messages": messages,
-            "temperature": temperature if temperature is not None else self.temperature,
-            "max_tokens": max_tokens,
-            "stream": False,
-            **kwargs,
-        }
-        if merged_extra:
-            params["extra_body"] = merged_extra
-
-        try:
-            resp = self.sync_client.chat.completions.create(**params)
-            description = (resp.choices[0].message.content or "").strip()
-            return description if description else "No description generated"
-        except Exception as e:
-            logger.error(f"describe_image_sync failed: {e}", exc_info=True)
-            return f"[sync vision error] {str(e)}"
 
     async def call_tools(
         self,
@@ -584,19 +501,14 @@ class LLMClient:
         tool_choice: Union[str, Dict] = "auto",
         auto_stop_on_complete_tool: bool = False,
         extra_body: Optional[Dict] = None,
+        executor_callback: Optional[Callable[[str, dict], Awaitable[Any]]] = None,
         **kwargs,
     ) -> asyncio.Queue:
         """
-        Streaming with tool support — returns queue of tagged events
+        Streaming with tool support, now fully supporting ConfirmationRequired.
 
-        Queue items are tuples: (kind: str, payload: Any)
-        Possible kinds:
-            - "content"       → str (text delta)
-            - "tool_delta"    → dict (partial update of one tool call)
-            - "tool_complete" → dict (finished tool call)
-            - "finish"        → dict { "finish_reason": str, "tool_calls": list|None }
-            - "error"         → str
-            - None            → end-of-stream marker
+        executor_callback: async callable(name: str, args: dict) -> result
+        This is how the client executes tools while catching ConfirmationRequired.
         """
 
         # ── Normalize tools ─────────────────────────────
@@ -630,15 +542,14 @@ class LLMClient:
             "tool_choice": tool_choice,
             **kwargs,
         }
-
         if tool_schemas:
             params["tools"] = tool_schemas
         if merged_extra:
             params["extra_body"] = merged_extra
 
         # ── State ───────────────────────────────────────
-        tool_call_buffer: Dict[int, Dict] = {}  # index → current tool state
-        tool_meta: Dict[int, Dict] = {}  # index → phase, last_len, completed
+        tool_call_buffer: Dict[int, Dict] = {}
+        tool_meta: Dict[int, Dict] = {}
         last_chunk = None
 
         def is_valid_json(s: str) -> bool:
@@ -664,8 +575,7 @@ class LLMClient:
                         continue
 
                     # ── CONTENT ──────────────────────────────
-                    #if delta.content is not None and not tool_call_buffer:
-                    if delta.content is not None:  # ← remove the "and not tool_call_buffer"
+                    if delta.content is not None:
                         await queue.put(("content", delta.content))
 
                     # ── TOOL CALLS ──────────────────────────
@@ -682,7 +592,7 @@ class LLMClient:
                                 }
                             if idx not in tool_meta:
                                 tool_meta[idx] = {
-                                    "phase": "buffering",  # buffering → streaming → done
+                                    "phase": "buffering",
                                     "last_len": 0,
                                     "completed": False,
                                 }
@@ -722,36 +632,58 @@ class LLMClient:
                                     )
                                 )
 
-                            # ── COMPLETE when JSON valid
+                            # ── COMPLETE when JSON valid ──
                             if is_valid_json(args) and not meta["completed"]:
                                 meta["completed"] = True
-                                await queue.put(
-                                    (
-                                        "tool_complete",
-                                        {
-                                            "index": idx,
-                                            **tc,
-                                        },
-                                    )
-                                )
+                                payload = {"index": idx, **tc}
+
+                                if executor_callback:
+                                    try:
+                                        args_dict = json.loads(args)
+                                        result = await executor_callback(
+                                            tc["function"]["name"], args_dict
+                                        )
+                                        payload["result"] = result
+                                    except ConfirmationRequired as exc:
+                                        # proper handling of ConfirmationRequired
+                                        await queue.put(
+                                            (
+                                                "needs_confirmation",
+                                                {
+                                                    "index": idx,
+                                                    "tool_name": tc["function"]["name"],
+                                                    "details": exc.__dict__,
+                                                },
+                                            )
+                                        )
+                                        continue  # skip marking complete until confirmed
+                                    except Exception as e:
+                                        payload["error"] = True
+                                        payload["result"] = str(e)
+
+                                await queue.put(("tool_complete", payload))
 
                                 if auto_stop_on_complete_tool:
                                     stop_event.set()
                                     break
 
                 # ── STREAM ENDED ─────────────────────────────
-                final_tool_calls = None
-                if tool_call_buffer:
-                    final_tool_calls = [
+                final_tool_calls = (
+                    [
                         {"index": i, **tool_call_buffer[i]}
                         for i in sorted(tool_call_buffer.keys())
                     ]
+                    if tool_call_buffer
+                    else None
+                )
 
-                finish_reason = None
-                if last_chunk and last_chunk.choices:
-                    finish_reason = last_chunk.choices[0].finish_reason
-                if finish_reason is None:
-                    finish_reason = "tool_calls" if final_tool_calls else "stop"
+                finish_reason = (
+                    last_chunk.choices[0].finish_reason
+                    if last_chunk and last_chunk.choices
+                    else "tool_calls"
+                    if final_tool_calls
+                    else "stop"
+                )
 
                 await queue.put(
                     (
@@ -776,70 +708,6 @@ class LLMClient:
 
         self._current_stream_task = asyncio.create_task(_run_stream())
         return queue
-
-    def call_tools_sync(
-        self,
-        messages: List[Dict[str, Any]],
-        tools: Optional[Union[List[Dict[str, Any]], "ActionSet"]] = None,
-        temperature: float = 0.0,
-        max_tokens: int = 1024,
-        tool_choice: Union[str, Dict] = "auto",
-        extra_body: Optional[Dict] = None,
-        **kwargs,
-    ) -> Optional[List[ChatCompletionMessageToolCall]]:
-        """
-        Synchronous (blocking) version of call_tools.
-
-        Same input flexibility:
-          - tools: List[dict]           → raw OpenAI tool schemas
-          - tools: ActionSet            → uses .get_llm_tools()
-          - tools: None                 → no tools
-
-        Returns:
-          List of tool calls or None
-        """
-        # Normalize tools → OpenAI-compatible schema
-        tool_schemas: Optional[List[Dict]] = None
-        if tools is not None:
-            if isinstance(tools, list):
-                tool_schemas = tools
-            elif isinstance(tools, ActionSet):
-                tool_schemas = tools.get_llm_tools()
-            else:
-                raise TypeError("tools must be List[dict] or ActionSet")
-
-        merged_extra = {**self.extra_body_default, **(extra_body or {})}
-
-        if messages:
-            messages = prepare_messages_for_stream(messages)
-
-        params = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": False,
-            "tool_choice": tool_choice,
-            **kwargs,
-        }
-
-        if tool_schemas:
-            params["tools"] = tool_schemas
-
-        if merged_extra:
-            params["extra_body"] = merged_extra
-
-        try:
-            resp = self.sync_client.chat.completions.create(**params)
-            tool_calls = resp.choices[0].message.tool_calls
-            if tool_calls:
-                logger.info(
-                    f"[sync] Tool calls returned: {[tc.function.name for tc in tool_calls]}"
-                )
-            return tool_calls
-        except Exception as e:
-            logger.error(f"[sync] call_tools_sync failed: {e}", exc_info=True)
-            return None
 
     # Tiny helper — makes the loop cleaner
     async def _drain_queue(
