@@ -187,11 +187,12 @@ class LLMClient:
         )
 
     def stop_stream(self) -> bool:
-        """Request to interrupt any active streaming call."""
+        """Request to interrupt only the active streaming call."""
         if self._current_stop_event is not None:
             self._current_stop_event.set()
-            logger.debug("stop_stream() triggered")
+            logger.debug(f"stop_stream() called on model={self.model}")
             return True
+        logger.debug("stop_stream() called but no active stream")
         return False
 
     def request_cancel_all(self):
@@ -521,8 +522,6 @@ class LLMClient:
             else:
                 raise TypeError("tools must be List[dict] or ActionSet")
 
-        self.stop_stream()  # stop any ongoing stream
-
         queue = asyncio.Queue()
         stop_event = asyncio.Event()
         self._current_stop_event = stop_event
@@ -701,10 +700,10 @@ class LLMClient:
                 await queue.put(("error", str(e)))
             finally:
                 await queue.put(None)
-                self._current_stop_event = None
-                self._current_output_queue = None
-                if self._current_stream_task is asyncio.current_task():
-                    self._current_stream_task = None
+                if self._current_stop_event is stop_event:
+                    self._current_stop_event = None
+                if self._current_output_queue is queue:
+                    self._current_output_queue = None
 
         self._current_stream_task = asyncio.create_task(_run_stream())
         return queue
