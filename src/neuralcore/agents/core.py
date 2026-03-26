@@ -60,6 +60,7 @@ class Agent:
         self._input_counter: int = 0
         self.sub_tasks: Dict[str, Dict[str, Any]] = {}  # task_id -> metadata
         self._sub_task_counter: int = 0
+        self.task_context: Optional["ContextManager.TaskContext"] = None
 
     def attach_tools(self):
         """Call after instantiating Agent to load tool sets."""
@@ -309,7 +310,7 @@ class Agent:
         }
 
         try:
-            sub_agent = self._create_sub_agent()
+            sub_agent = self._create_sub_agent(display_name)
             sub_agent.task = task_description
             sub_agent.goal = task_description
 
@@ -331,21 +332,41 @@ class Agent:
     async def _run_sub_agent_internal(
         self, sub_agent: "Agent", task_id: str, task_description: str
     ):
-        """Internal coroutine that actually runs the sub-agent and updates status."""
+        """Run sub-agent with clean per-task memory + auto-promotion."""
+        task_name = self.sub_tasks[task_id]["display_name"]
+        task_ctx = getattr(sub_agent, "task_context", None)
+
         try:
-            # Run the full default workflow
+            # Optional: Give the sub-agent a focused system prompt
+            sub_system = f"""You are a precise sub-agent working on one specific task.
+Your only job is to complete: {task_description}
+
+Use tools efficiently. When you make important discoveries (files, code structures, findings), 
+call add_important_result through your task_context if available.
+
+Stay focused. Do not chat — just execute and summarize key outcomes."""
+
             events = []
             async for event, payload in sub_agent.workflow.run(
                 user_prompt=task_description,
-                system_prompt="You are a precise deployment executor. Complete the task thoroughly and report clear results.",
-                workflow="default",
-                temperature=0.3,
+                system_prompt=sub_system,
+                workflow="default",  # or create a lighter "sub_execute" workflow later
+                temperature=0.25,
                 max_tokens=10000,
             ):
                 events.append((event, payload))
-                # Optional: update progress here if you emit progress events
 
-            # Success
+                # Optional: progress tracking
+                if event == "tool_result" and task_ctx:
+                    # Auto-promote tool results to per-task context
+                    await task_ctx.add_important_result(
+                        title=f"Tool: {payload.get('name', 'unknown')}",
+                        content=str(payload.get("result", "")),
+                        source=payload.get("name", "tool"),
+                        metadata=payload.get("args", {}),
+                    )
+
+            # Final summary
             summary = await self._generate_deployment_summary(
                 sub_agent, task_description
             )
@@ -359,15 +380,23 @@ class Agent:
                 }
             )
 
-            # Alert the main chat
+            # Final promotion to shared KB
+            if task_ctx:
+                await task_ctx.add_important_result(
+                    title="Final Task Summary",
+                    content=summary,
+                    source="sub_agent",
+                    metadata={"task_id": task_id},
+                )
+
             alert = f"""[DEPLOYMENT COMPLETE] ✅
 
-            **Task ID:** `{task_id}`
-            **Name:** {self.sub_tasks[task_id]["display_name"]}
+**Task ID:** `{task_id}`
+**Name:** {self.sub_tasks[task_id]["display_name"]}
 
-            {summary}
+{summary}
 
-            Back to normal chat — how else can I help?"""
+Back to normal chat — how else can I help?"""
 
             await self.post_system_message(alert)
 
@@ -390,27 +419,33 @@ class Agent:
             # Optional: clean up old finished tasks after some time
             pass
 
-    def _create_sub_agent(self) -> "Agent":
-        """Create an isolated sub-agent for running complex tasks."""
+    def _create_sub_agent(self, task_name: str) -> "Agent":
+        """Create a sub-agent that shares the main ContextManager but gets its own TaskContext."""
         sub = Agent(
-            agent_id=f"{self.agent_id}",
+            agent_id=f"{self.agent_id}_sub_{self._sub_task_counter}",
             loader=self.loader,
             app_root=self.app_root,
-            # You can pass a minimal config or None
             config_file=None,
         )
 
         sub.sub_agent = True
         sub.dispatcher = self.agent_id
-        # Copy important settings
-        sub.max_iterations = self.max_iterations
-        sub.max_reflections = self.max_reflections
-        sub.temperature = 0.3
+        sub.max_iterations = min(self.max_iterations, 15)  # keep subs lighter
+        sub.max_reflections = 2
+        sub.temperature = 0.25
         sub.max_tokens = 10000
 
-        sub.attach_tools()  # Load the same tools as main agent
-        sub.context_manager = self.context_manager  # Fresh context
+        # === KEY CHANGE: Share context manager ===
+        sub.context_manager = self.context_manager
 
+        # Create dedicated lightweight task context for this sub-agent
+        sub.task_context = self.context_manager.create_task_context(task_name)
+
+        sub.attach_tools()
+
+        logger.info(
+            f"Created sub-agent for task: {task_name} (shared context + per-task memory)"
+        )
         return sub
 
     def get_sub_tasks(self) -> Dict[str, Dict]:
