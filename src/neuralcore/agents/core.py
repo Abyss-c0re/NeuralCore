@@ -24,7 +24,7 @@ class Agent:
     def __init__(
         self, agent_id: str, loader, app_root: Path, config_file: Optional[Path] = None
     ):
-        self.agent_id = agent_id
+        self.agent_id: str = agent_id
         self.loader = loader
         self.app_root = app_root
         self.config = self._load_agent_config(agent_id, config_file)
@@ -45,7 +45,7 @@ class Agent:
         self.registry = registry  # Global tool registry
 
         self.manager = DynamicActionManager(registry)
-        self.context_manager = ContextManager()
+        self.context_manager = ContextManager(self.max_tokens)
 
         self.agent_tools = AgentActionHelper(
             self
@@ -53,12 +53,8 @@ class Agent:
         self.workflow = WorkflowEngine(self)
         ToolBrowser(registry, self.manager)
         logger.debug(" ToolBrowser registered")
-
-        # NEW: Persistent queue where user and system (external code) can post messages.
-        # Messages are treated as user prompts and redirected into the workflow.
-        # Queue items can be:
-        #   - str                     → treated as user prompt
-        #   - dict with "content" key → treated as user prompt (role ignored for now)
+        self.sub_agent: bool = False
+        self.dispatcher: str = "user"
         self.message_queue: asyncio.Queue[Any] = asyncio.Queue()
         self._input_event: asyncio.Event = asyncio.Event()
         self._input_counter: int = 0
@@ -287,7 +283,9 @@ class Agent:
 
             # ====================== SUB-TASK / DEPLOYMENT EXECUTION ======================
 
-    async def start_complex_deployment(self, task_description: str, user_facing_name: Optional[str] = None) -> str:
+    async def start_complex_deployment(
+        self, task_description: str, user_facing_name: Optional[str] = None
+    ) -> str:
         """
         Starts a complex deployment in the background and returns the task_id immediately.
         """
@@ -322,14 +320,14 @@ class Agent:
             self.sub_tasks[task_id]["task_obj"] = background_task
             self.sub_tasks[task_id]["status"] = "running"
 
-            return task_id   # ← Return task_id to the tool / chat
+            return task_id  # ← Return task_id to the tool / chat
 
         except Exception as e:
             self.sub_tasks[task_id]["status"] = "failed"
             self.sub_tasks[task_id]["error"] = str(e)
             logger.error(f"Failed to start sub-task {task_id}", exc_info=True)
             return f"ERROR_{task_id}"
-            
+
     async def _run_sub_agent_internal(
         self, sub_agent: "Agent", task_id: str, task_description: str
     ):
@@ -402,6 +400,8 @@ class Agent:
             config_file=None,
         )
 
+        sub.sub_agent = True
+        sub.dispatcher = self.agent_id
         # Copy important settings
         sub.max_iterations = self.max_iterations
         sub.max_reflections = self.max_reflections
@@ -409,7 +409,7 @@ class Agent:
         sub.max_tokens = 10000
 
         sub.attach_tools()  # Load the same tools as main agent
-        sub.context_manager = ContextManager()  # Fresh context
+        sub.context_manager = self.context_manager  # Fresh context
 
         return sub
 

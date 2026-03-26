@@ -157,6 +157,134 @@ class ContextManager:
         }
 
     # ─────────────────────────────────────────────────────────────
+    # PER-TASK LIGHTWEIGHT CONTEXT (Shared + Per-Task Hybrid)
+    # ─────────────────────────────────────────────────────────────
+    # When delegating a sub-task
+    # auth_task = ctx.create_task_context("analyze_auth_flow")
+
+    # # Inside sub-agent (after doing work)
+    # await auth_task.add_important_result(
+    #     title="Login handler discovered",
+    #     content=tool_result,
+    #     source="grep",
+    #     metadata={"file": "app/routes/auth.py", "confidence": 0.9}
+    # )
+
+    # auth_task.add_important_file("app/routes/auth.py")
+    # auth_task.add_finding("JWT verification is missing rate limiting")
+
+    class TaskContext:
+        """Lightweight per-task / per-sub-agent memory.
+        Only keeps distilled, important information (files + results).
+        Never stores full LLM responses or chat history."""
+
+        def __init__(self, name: str, parent: "ContextManager"):
+            self.name = name
+            self.parent = parent
+            self.important_files: set[str] = set()
+            self.key_results: List[Dict[str, Any]] = []  # distilled summaries only
+            self.findings: List[str] = []
+            self.hypotheses: List[str] = []
+            self.max_results = 15
+
+        async def add_important_result(
+            self,
+            title: str,
+            content: str,
+            source: str = "tool",
+            metadata: dict | None = None,
+        ) -> None:
+            """Distill result and auto-promote to shared Knowledge Base."""
+            if not content or not content.strip():
+                return
+
+            summary = content[:600] + ("..." if len(content) > 600 else "")
+
+            entry = {
+                "title": title,
+                "summary": summary,
+                "source": source,
+                "ts": time.time(),
+                "metadata": metadata or {},
+            }
+
+            self.key_results.append(entry)
+            if len(self.key_results) > self.max_results:
+                self.key_results.pop(0)
+
+            # Auto-promote important result to shared KB (the magic)
+            await self.parent.add_external_content(
+                source_type=f"task_result_{self.name}",
+                content=f"[{title}] {summary}\nMetadata: {metadata or {}}",
+                metadata={"task": self.name, **(metadata or {})},
+            )
+
+            self.parent._log_action(
+                "task_result", f"Task {self.name} → {title}", metadata
+            )
+
+        def add_important_file(self, filepath: str):
+            """Track files that matter for this task"""
+            self.important_files.add(filepath)
+            self.parent.files_checked.add(filepath)  # also update global
+
+        def add_finding(self, finding: str):
+            """Add finding and sync with global investigation state"""
+            cleaned = finding[:400]
+            self.findings.append(cleaned)
+            self.parent.add_finding(cleaned)
+
+        def add_hypothesis(self, hypothesis: str):
+            self.hypotheses.append(hypothesis[:300])
+
+        def get_context(self, max_tokens: int = 3500) -> str:
+            """Return clean, focused context for this specific task/sub-agent"""
+            lines = [f"🔹 TASK CONTEXT: {self.name.upper()}"]
+
+            if self.important_files:
+                files_str = ", ".join(sorted(list(self.important_files))[:12])
+                lines.append(f"Important files: {files_str}")
+
+            for r in self.key_results[-10:]:
+                lines.append(f"• {r['title']}: {r['summary']}")
+
+            if self.findings:
+                lines.append(
+                    "Key Findings:\n"
+                    + "\n".join(f"   - {f}" for f in self.findings[-8:])
+                )
+            if self.hypotheses:
+                lines.append(
+                    "Hypotheses:\n"
+                    + "\n".join(f"   - {h}" for h in self.hypotheses[-5:])
+                )
+
+            text = "\n".join(lines)
+            # Rough token limiting (can be improved with tokenizer later)
+            return text[: max_tokens * 4]
+
+    # ── Task Management Methods ──
+    def create_task_context(self, task_name: str) -> "ContextManager.TaskContext":
+        """Create or get a lightweight task-specific context."""
+        if not hasattr(self, "_task_contexts"):
+            self._task_contexts: Dict[str, ContextManager.TaskContext] = {}
+
+        if task_name not in self._task_contexts:
+            self._task_contexts[task_name] = self.TaskContext(task_name, self)
+            self.add_subtask(task_name)  # track in global investigation_state
+            logger.info(f"Created new task context: {task_name}")
+
+        return self._task_contexts[task_name]
+
+    def get_task_context(self, task_name: str) -> "ContextManager.TaskContext | None":
+        """Retrieve existing task context."""
+        return getattr(self, "_task_contexts", {}).get(task_name)
+
+    def list_active_tasks(self) -> List[str]:
+        """Helpful for context summary."""
+        return list(getattr(self, "_task_contexts", {}).keys())
+
+    # ─────────────────────────────────────────────────────────────
     # FETCH EMBEDDING
     # ─────────────────────────────────────────────────────────────
 
@@ -282,6 +410,9 @@ class ContextManager:
         - Only include up to `max_messages` recent messages
         - Truncates to max_chars if necessary
         """
+
+        # # Sub-agent can use clean focused context:
+        # task_ctx_str = auth_task.get_context(max_tokens=3000)
         # Full files and tools
         files = sorted(list(self.files_checked))
         tools = self.tools_executed
@@ -679,7 +810,7 @@ class ContextManager:
         min_history_tokens: int = 2000,
         max_kb_tokens: int = 5000,
         # ── NEW ARGUMENT ─────────────────────────────────────
-        chat: bool = False,          # ← If True → "normal chat mode" (minimal context)
+        chat: bool = False,  # ← If True → "normal chat mode" (minimal context)
         # ─────────────────────────────────────────────────────
     ) -> List[Dict[str, Any]]:
         messages: List[Dict[str, Any]] = []
@@ -691,10 +822,12 @@ class ContextManager:
             messages.append({"role": "system", "content": clean_system})
 
             # Add only the current user query
-            messages.append({
-                "role": "user",
-                "content": query if query.strip() else "[AUTONOMOUS CONTINUATION]"
-            })
+            messages.append(
+                {
+                    "role": "user",
+                    "content": query if query.strip() else "[AUTONOMOUS CONTINUATION]",
+                }
+            )
 
             # Optionally still respect the token limit (good practice)
             total_tokens = self.count_tokens(messages)
@@ -781,10 +914,12 @@ class ContextManager:
         messages.extend(recent_msgs)
 
         # --- ADD USER QUERY ---
-        messages.append({
-            "role": "user",
-            "content": query if query.strip() else "[AUTONOMOUS CONTINUATION]"
-        })
+        messages.append(
+            {
+                "role": "user",
+                "content": query if query.strip() else "[AUTONOMOUS CONTINUATION]",
+            }
+        )
 
         # --- FINAL PRUNE IF STILL OVER ---
         total_tokens = self.count_tokens(messages)
