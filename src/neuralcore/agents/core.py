@@ -181,86 +181,93 @@ class Agent:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         stop_event: Optional[asyncio.Event] = None,
-        chat_mode: bool = False,  # ← NEW
+        chat_mode: bool = False,
+        workflow: Optional[str] = None,  # ← allow explicit workflow override
     ) -> AsyncIterator[Tuple[str, Any]]:
         """
-        Run the agent.
-        - chat_mode=True  → starts the deploy_chat_loop (real conversation)
-        - chat_mode=False → original task-oriented behavior
+        Unified run method.
+        - chat_mode=True          → persistent deploy_chat_loop (UI/terminal chat)
+        - chat_mode=False         → headless / script mode (one-shot or queue-driven)
         """
         system_prompt = system_prompt or self.system_prompt
-        temperature = (
-            float(temperature) if temperature is not None else float(self.temperature)
-        )
-        max_tokens = int(max_tokens) if max_tokens is not None else int(self.max_tokens)
+        temperature = temperature if temperature is not None else self.temperature
+        max_tokens = max_tokens if max_tokens is not None else self.max_tokens
 
-        # Optional initial prompt (backward compatibility)
-        if user_prompt and str(user_prompt).strip():
-            async for event, payload in self.workflow.run(
-                user_prompt, system_prompt, temperature, max_tokens, stop_event
-            ):
-                yield event, payload
+        # Reset state for a fresh run
+        self._reset_state()
+        if stop_event is None:
+            stop_event = asyncio.Event()
 
-        # === CHAT MODE ===
+        # === CHAT MODE (persistent loop) ===
         if chat_mode:
-            logger.info(f"Agent '{self.name}' → Starting CHAT mode (deploy_chat_loop)")
+            logger.info(
+                f"Agent '{self.name}' → Starting CHAT mode with workflow 'deploy_chat'"
+            )
 
-            # Put the first user message into the queue if provided (so first iteration doesn't wait)
             if user_prompt and str(user_prompt).strip():
-                await self.message_queue.put({"role": "user", "content": user_prompt})
-                self._input_event.set()
+                await self.post_message(user_prompt)
 
-            # Start the chat workflow
+            # Run the persistent chat workflow
             async for event, payload in self.workflow.run(
-                user_prompt="",  # not used in chat mode
+                user_prompt="",  # not used directly
                 system_prompt=system_prompt,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 stop_event=stop_event,
-                workflow="deploy_chat",  # ← This selects your _wf_deploy_chat_loop
+                workflow="deploy_chat",  # forces deploy_chat_loop
             ):
                 yield event, payload
             return
 
         # === HEADLESS / SCRIPT MODE ===
+        logger.info(f"Agent '{self.name}' → Starting HEADLESS mode")
+
+        # If a specific workflow is requested (e.g. "default" for complex tasks)
+        target_workflow = workflow or "default"
+
         try:
+            # Initial prompt handling
+            if user_prompt and str(user_prompt).strip():
+                await self.post_message(user_prompt)
+
             while True:
-                if stop_event and stop_event.is_set():
-                    logger.debug(f"Agent '{self.name}' stopped via stop_event")
+                if stop_event.is_set():
+                    logger.debug("Headless run stopped via stop_event")
                     break
 
-                msg = await self.message_queue.get()
+                # Wait for next message (user or control)
+                try:
+                    msg = await asyncio.wait_for(self.message_queue.get(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    # No new input → continue or break depending on your policy
+                    continue
 
-                # Better control handling
-                if isinstance(msg, dict):
+                # Handle control messages
+                if isinstance(msg, dict) and "event" in msg:
                     event = msg.get("event")
-                    if event in {"switch_workflow", "finish", "cancelled", "break"}:
-                        if event == "switch_workflow":
-                            workflow_name = msg.get("name") or "default"
-                            logger.info(
-                                f"Headless mode received switch to: {workflow_name}"
-                            )
-                            # Let the engine handle it
-                            try:
-                                self.workflow.switch_workflow(
-                                    workflow_name
-                                )  # assuming it exists
-                            except Exception:
-                                pass
-                        elif event in ("finish", "cancelled"):
-                            logger.info(f"Headless run received {event} signal")
-                            self.message_queue.task_done()
-                            break
+                    logger.debug(f"Headless received control: {event}")
 
+                    if event == "switch_workflow":
+                        wf_name = msg.get("name", "default")
+                        logger.info(f"Headless switching to workflow: {wf_name}")
+                        try:
+                            self.workflow.switch_workflow(wf_name)
+                        except Exception as e:
+                            logger.warning(f"Switch failed: {e}")
                         self.message_queue.task_done()
                         continue
 
-                # Normal message processing
-                if isinstance(msg, str):
-                    content = msg.strip()
-                elif isinstance(msg, dict):
+                    elif event in ("finish", "cancelled", "break"):
+                        logger.info(f"Headless received termination signal: {event}")
+                        self.message_queue.task_done()
+                        break
+
+                    self.message_queue.task_done()
+                    continue
+
+                # Normal content message
+                if isinstance(msg, dict):
                     content = msg.get("content") or str(msg)
-                    content = str(content).strip()
                 else:
                     content = str(msg).strip()
 
@@ -268,19 +275,29 @@ class Agent:
                     self.message_queue.task_done()
                     continue
 
+                logger.debug(f"Headless processing prompt: {content[:150]}...")
+
+                # Run the workflow (default or the one set via switch)
                 async for event, payload in self.workflow.run(
-                    content, system_prompt, temperature, max_tokens, stop_event
+                    user_prompt=content,
+                    system_prompt=system_prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    stop_event=stop_event,
+                    workflow=target_workflow,  # respect current workflow
                 ):
                     yield event, payload
 
                 self.message_queue.task_done()
 
         except asyncio.CancelledError:
-            logger.debug(f"Agent '{self.name}' run cancelled")
+            logger.debug("Headless run cancelled")
             raise
         except Exception as e:
-            logger.error(f"Agent '{self.name}' queue error: {e}", exc_info=True)
+            logger.error(f"Headless run error: {e}", exc_info=True)
             raise
+        finally:
+            logger.info(f"Agent '{self.name}' headless run finished")
 
             # ====================== SUB-TASK / DEPLOYMENT EXECUTION ======================
 

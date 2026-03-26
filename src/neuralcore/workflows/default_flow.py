@@ -260,7 +260,7 @@ class AgentFlow:
 
     @workflow.set("deploy_chat", name="deploy_chat_loop")
     async def _wf_deploy_chat_loop(self, iteration: int, state: AgentState):
-        """Clean persistent chat loop — handles controls properly without infinite loop"""
+        """Clean persistent chat loop with safe queue handling."""
 
         if iteration == 0:
             state.phase = self.Phase.CHAT
@@ -278,106 +278,105 @@ class AgentFlow:
                 logger.info("Chat loop cancelled")
                 break
 
-            # ====================== CONTROL MESSAGE HANDLING ======================
-            if isinstance(raw_msg, dict) and "event" in raw_msg:
-                event = raw_msg.get("event")
-                logger.debug(f"Control event received: {event}")
+            # We will call task_done() exactly once per get() in the finally block
+            try:
+                # ====================== CONTROL MESSAGE HANDLING ======================
+                if isinstance(raw_msg, dict) and "event" in raw_msg:
+                    event = raw_msg.get("event")
+                    logger.debug(f"Control event received: {event}")
 
-                if event == "switch_workflow":
-                    workflow_name = raw_msg.get("name", "default")
-                    reason = raw_msg.get("reason", "")
+                    if event == "switch_workflow":
+                        workflow_name = raw_msg.get("name", "default")
+                        reason = raw_msg.get("reason", "")
 
-                    logger.info(
-                        f"Switching workflow to: {workflow_name} | reason: {reason}"
-                    )
-
-                    # Tell the WorkflowEngine to switch (do NOT post_control again!)
-                    try:
-                        # This is the proper way - let the engine handle the switch
-                        self.engine.switch_workflow(workflow_name)
-                    except AttributeError:
-                        # Fallback if your engine doesn't have switch_workflow yet
-                        logger.warning(
-                            "WorkflowEngine.switch_workflow not available, using post_control"
+                        logger.info(
+                            f"Switching workflow to: {workflow_name} | reason: {reason}"
                         )
-                        await self.agent.post_control(raw_msg)  # only as last resort
 
-                    self.agent.message_queue.task_done()
-                    continue
+                        try:
+                            self.engine.switch_workflow(workflow_name)
+                        except AttributeError:
+                            logger.warning(
+                                "WorkflowEngine.switch_workflow not available, using post_control"
+                            )
+                            await self.agent.post_control(raw_msg)
+                        except Exception as e:
+                            logger.error(f"Workflow switch failed: {e}")
 
-                elif event == "cancelled":
-                    if (
-                        hasattr(self.agent.client, "_current_stop_event")
-                        and self.agent.client._current_stop_event
-                    ):
-                        self.agent.client._current_stop_event.set()
-                    logger.info("Cancelled current generation via control")
-                    self.agent.message_queue.task_done()
-                    continue
+                        continue  # Let finally call task_done()
 
-                # Add other controls here (e.g. "finish", "break", etc.)
+                    elif event == "cancelled":
+                        if (
+                            hasattr(self.agent.client, "_current_stop_event")
+                            and self.agent.client._current_stop_event
+                        ):
+                            self.agent.client._current_stop_event.set()
+                        logger.info("Cancelled current generation via control")
+                        continue
+
+                    else:
+                        logger.debug(f"Unknown control event: {event}")
+                        continue
+
+                # ====================== NORMAL MESSAGE PROCESSING ======================
+                if isinstance(raw_msg, dict):
+                    role = raw_msg.get("role", "user")
+                    content = raw_msg.get("content", "") or str(raw_msg)
                 else:
-                    logger.debug(f"Unknown control event: {event}")
-                    self.agent.message_queue.task_done()
+                    role = "user"
+                    content = str(raw_msg).strip()
+
+                if not content and role != "system":
                     continue
 
-            # ====================== NORMAL MESSAGE PROCESSING ======================
-            if isinstance(raw_msg, dict):
-                role = raw_msg.get("role", "user")
-                content = raw_msg.get("content", "") or str(raw_msg)
-            else:
-                role = "user"
-                content = str(raw_msg).strip()
+                # === FAST PATH: Background deployment results ===
+                if role == "system" and (
+                    "[DEPLOYMENT COMPLETE]" in content
+                    or "[DEPLOYMENT FAILED]" in content
+                ):
+                    logger.debug("Fast-path: delivering background deployment result")
+                    yield (
+                        "llm_response",
+                        {
+                            "full_reply": content,
+                            "tool_calls": [],
+                            "is_complete": True,
+                            "is_system_alert": True,
+                        },
+                    )
+                    await self.agent.context_manager.add_message("system", content)
+                    await self.agent.context_manager.add_message("assistant", content)
+                    continue
 
-            if not content and role != "system":
-                self.agent.message_queue.task_done()
-                continue
-
-            # === FAST PATH: Background deployment results ===
-            if role == "system" and (
-                "[DEPLOYMENT COMPLETE]" in content or "[DEPLOYMENT FAILED]" in content
-            ):
-                logger.debug("Fast-path: delivering background deployment result")
-                yield (
-                    "llm_response",
-                    {
-                        "full_reply": content,
-                        "tool_calls": [],
-                        "is_complete": True,
-                        "is_system_alert": True,
-                    },
+                # === NORMAL PATH: User message → LLM + tools ===
+                logger.debug(
+                    f"Processing normal message/role={role}: {content[:100]}..."
                 )
-                await self.agent.context_manager.add_message("system", content)
-                await self.agent.context_manager.add_message("assistant", content)
+
+                messages = await self.agent.context_manager.provide_context(
+                    query=content,
+                    max_input_tokens=self.agent.max_tokens,
+                    reserved_for_output=8000,
+                    system_prompt=self._build_chat_system_prompt(),
+                    include_logs=False,
+                    chat=True,
+                )
+
+                yield ("phase_changed", {"phase": self.Phase.CHAT.value})
+
+                logger.debug("→ Calling _process_user_message_with_llm")
+
+                async for ev, pl in self._process_user_message_with_llm(
+                    messages, state
+                ):
+                    if ev in ("tool_delta", "tool_call_delta"):
+                        continue
+                    yield (ev, pl)
+
+            finally:
+                # CRITICAL: Call task_done() exactly once for every .get()
                 self.agent.message_queue.task_done()
-                continue
-
-            # === NORMAL PATH: User message → LLM + tools ===
-            logger.debug(f"Processing normal message/role={role}: {content[:100]}...")
-
-            messages = await self.agent.context_manager.provide_context(
-                query=content,
-                max_input_tokens=self.agent.max_tokens,
-                reserved_for_output=8000,
-                system_prompt=self._build_chat_system_prompt(),
-                include_logs=False,
-                chat=True,
-            )
-
-            yield ("phase_changed", {"phase": self.Phase.CHAT.value})
-
-            logger.debug("→ Calling _process_user_message_with_llm")
-
-            async for ev, pl in self._process_user_message_with_llm(messages, state):
-                if ev in ("tool_delta", "tool_call_delta"):
-                    logger.debug(f"Filtered out {ev} (raw tool metadata)")
-                    continue
-
-                logger.debug(f"YIELDING event={ev}")
-                yield (ev, pl)
-
-            logger.debug("Finished processing user message")
-            self.agent.message_queue.task_done()
+                logger.debug("task_done() called for this message")
 
     @workflow.set(
         "default",
@@ -1255,7 +1254,7 @@ class AgentFlow:
     async def _process_user_message_with_llm(
         self, messages: List[Dict], state: AgentState
     ) -> AsyncIterator[Tuple[str, Any]]:
-        """Process message in chat mode. Handle complex action switching with minimal duplication."""
+        """Process message in chat mode. Handle complex action switching safely."""
 
         logger.debug("=== ENTERING _process_user_message_with_llm ===")
 
@@ -1273,7 +1272,6 @@ class AgentFlow:
             and self.agent.client._current_stop_event
         ):
             self.agent.client._current_stop_event.clear()
-            logger.debug("Cleared previous stop_event for new user message")
 
         queue = await self.agent.client.stream_with_tools(
             messages=messages,
@@ -1329,40 +1327,47 @@ class AgentFlow:
             yield ("error", str(e))
             return
 
-        # ====================== FINAL REPLY LOGIC ======================
         final_reply = text_buffer.strip()
-        workflow = "sub_agent_execute" if self.agent.sub_agent else "default"
 
-        # === KEY: Suppress normal reply when complex action was called ===
         if complex_action_called:
             logger.info(
-                f"[CHAT → DEFAULT] Complex action detected → switching workflow"
+                f"[CHAT → ORCHESTRATOR] Complex task detected: {complex_reason[:100]}..."
             )
 
-            # Better: switch directly via engine if possible
+            self.agent.task = complex_reason
+            self.agent.goal = complex_reason
+
+            # Force switch to default workflow
             try:
-                self.engine.switch_workflow(workflow)
-            except Exception:
-                # fallback
+                self.engine.switch_workflow("default")
+                logger.info("Successfully switched to 'default' orchestrator workflow")
+            except Exception as e:
+                logger.warning(f"Direct switch failed: {e}. Using control fallback.")
                 await self.agent.post_control(
                     {
                         "event": "switch_workflow",
-                        "name": workflow,
+                        "name": "default",
                         "reason": complex_reason,
                     }
                 )
 
-            if complex_reason:
-                self.agent.task = complex_reason
-                self.agent.goal = complex_reason
-
             final_reply = (
-                f"✅ Understood. Starting complex task:\n"
-                f"**{complex_reason[:100]}{'...' if len(complex_reason) > 100 else ''}**\n\n"
-                f"I'll handle this with sub-agents in the background."
+                f"✅ Understood. Starting **multi-step orchestration**:\n"
+                f"**{complex_reason[:120]}{'...' if len(complex_reason) > 120 else ''}**\n\n"
+                f"Planning steps → deploying specialized sub-agents sequentially."
             )
 
-        elif not final_reply and tool_results:
+            yield (
+                "llm_response",
+                {"full_reply": final_reply, "tool_calls": [], "is_complete": True},
+            )
+            await self.agent.context_manager.add_message("assistant", final_reply)
+
+            logger.debug("Complex action handled — exiting chat loop processor")
+            return  # Exit here. Let the outer loop handle task_done()
+
+        # Normal reply (no complex action)
+        if not final_reply and tool_results:
             final_reply = "\n\n".join(tool_results)
         elif not final_reply:
             final_reply = "✅ Tool executed successfully."
@@ -1371,13 +1376,8 @@ class AgentFlow:
 
         yield (
             "llm_response",
-            {
-                "full_reply": final_reply,
-                "tool_calls": [],
-                "is_complete": True,
-            },
+            {"full_reply": final_reply, "tool_calls": [], "is_complete": True},
         )
-
         await self.agent.context_manager.add_message("assistant", final_reply)
         logger.debug("Message added to context")
 
