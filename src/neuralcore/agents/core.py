@@ -58,6 +58,7 @@ class Agent:
         self.message_queue: asyncio.Queue[Any] = asyncio.Queue()
         self._input_event: asyncio.Event = asyncio.Event()
         self._input_counter: int = 0
+        self.max_sub_agents = self.config.get("max_sub_agents", 6)
         self.sub_tasks: Dict[str, Dict[str, Any]] = {}  # task_id -> metadata
         self._sub_task_counter: int = 0
         self.task_context: Optional["ContextManager.TaskContext"] = None
@@ -285,18 +286,18 @@ class Agent:
             # ====================== SUB-TASK / DEPLOYMENT EXECUTION ======================
 
     async def start_complex_deployment(
-        self, task_description: str, user_facing_name: Optional[str] = None
+        self,
+        task_description: str,
+        user_facing_name: Optional[str] = None,
+        sub_profile: Optional[str] = None,  # ← optional explicit profile
     ) -> str:
-        """
-        Starts a complex deployment in the background and returns the task_id immediately.
-        """
+        """Start a sub-agent. Automatically prefers sub_<main_agent_id> if available."""
         self._sub_task_counter += 1
         task_id = f"deploy_{self.agent_id}_{self._sub_task_counter:03d}"
-        display_name = user_facing_name or task_description[:70]
+        display_name = user_facing_name or task_description[:65]
 
-        logger.info(f"[Agent {self.name}] Starting sub-task {task_id}: {display_name}")
+        logger.info(f"[DEPLOY] Starting sub-task {task_id}: {display_name}")
 
-        # Register immediately
         self.sub_tasks[task_id] = {
             "id": task_id,
             "display_name": display_name,
@@ -305,68 +306,68 @@ class Agent:
             "description": task_description,
             "progress": 0,
             "task_obj": None,
-            "result_summary": None,
+            "result": None,
             "error": None,
         }
 
         try:
-            sub_agent = self._create_sub_agent(display_name)
+            # Auto-select best profile: sub_<main_id> > sub_default > explicit
+            sub_agent = self._create_sub_agent(
+                task_name=display_name, profile=sub_profile
+            )
+
             sub_agent.task = task_description
             sub_agent.goal = task_description
 
-            # Create background task
             coro = self._run_sub_agent_internal(sub_agent, task_id, task_description)
             background_task = asyncio.create_task(coro, name=task_id)
 
             self.sub_tasks[task_id]["task_obj"] = background_task
             self.sub_tasks[task_id]["status"] = "running"
 
-            return task_id  # ← Return task_id to the tool / chat
+            logger.info(
+                f"[DEPLOY] Sub-agent {task_id} started successfully using profile from main agent"
+            )
+            return task_id
 
         except Exception as e:
+            logger.error(
+                f"[DEPLOY] Failed to create sub-agent {task_id}", exc_info=True
+            )
             self.sub_tasks[task_id]["status"] = "failed"
             self.sub_tasks[task_id]["error"] = str(e)
-            logger.error(f"Failed to start sub-task {task_id}", exc_info=True)
             return f"ERROR_{task_id}"
 
     async def _run_sub_agent_internal(
         self, sub_agent: "Agent", task_id: str, task_description: str
     ):
-        """Run sub-agent with clean per-task memory + auto-promotion."""
-        task_name = self.sub_tasks[task_id]["display_name"]
+        """Run sub-agent with dedicated workflow and task context."""
         task_ctx = getattr(sub_agent, "task_context", None)
 
         try:
-            # Optional: Give the sub-agent a focused system prompt
-            sub_system = f"""You are a precise sub-agent working on one specific task.
-Your only job is to complete: {task_description}
+            sub_system = f"""You are a precise sub-agent.
+        Task: {task_description}
 
-Use tools efficiently. When you make important discoveries (files, code structures, findings), 
-call add_important_result through your task_context if available.
+        Complete the task using tools. Record important results with task_context.add_important_result.
+        Stay focused and concise."""
 
-Stay focused. Do not chat — just execute and summarize key outcomes."""
-
-            events = []
             async for event, payload in sub_agent.workflow.run(
                 user_prompt=task_description,
                 system_prompt=sub_system,
-                workflow="default",  # or create a lighter "sub_execute" workflow later
+                workflow="sub_agent_execute",  # ← important
                 temperature=0.25,
                 max_tokens=10000,
             ):
-                events.append((event, payload))
+                if event == "tool_result" and task_ctx and isinstance(payload, dict):
+                    result_str = str(payload.get("result") or "")
+                    if result_str.strip():
+                        await task_ctx.add_important_result(
+                            title=f"{payload.get('name', 'Tool')} Result",
+                            content=result_str,
+                            source=payload.get("name", "tool"),
+                            metadata=payload.get("args", {}),
+                        )
 
-                # Optional: progress tracking
-                if event == "tool_result" and task_ctx:
-                    # Auto-promote tool results to per-task context
-                    await task_ctx.add_important_result(
-                        title=f"Tool: {payload.get('name', 'unknown')}",
-                        content=str(payload.get("result", "")),
-                        source=payload.get("name", "tool"),
-                        metadata=payload.get("args", {}),
-                    )
-
-            # Final summary
             summary = await self._generate_deployment_summary(
                 sub_agent, task_description
             )
@@ -380,10 +381,9 @@ Stay focused. Do not chat — just execute and summarize key outcomes."""
                 }
             )
 
-            # Final promotion to shared KB
             if task_ctx:
                 await task_ctx.add_important_result(
-                    title="Final Task Summary",
+                    title="Final Summary",
                     content=summary,
                     source="sub_agent",
                     metadata={"task_id": task_id},
@@ -391,19 +391,13 @@ Stay focused. Do not chat — just execute and summarize key outcomes."""
 
             alert = f"""[DEPLOYMENT COMPLETE] ✅
 
-**Task ID:** `{task_id}`
-**Name:** {self.sub_tasks[task_id]["display_name"]}
+            **Task ID:** `{task_id}`
+            **Name:** {self.sub_tasks[task_id]["display_name"]}
 
-{summary}
-
-Back to normal chat — how else can I help?"""
+            {summary}"""
 
             await self.post_system_message(alert)
 
-        except asyncio.CancelledError:
-            self.sub_tasks[task_id]["status"] = "cancelled"
-            logger.warning(f"Sub-task {task_id} was cancelled")
-            raise
         except Exception as exc:
             self.sub_tasks[task_id].update(
                 {
@@ -412,41 +406,101 @@ Back to normal chat — how else can I help?"""
                     "error": str(exc),
                 }
             )
-            error_alert = f"[DEPLOYMENT FAILED] ❌ Task `{task_id}` failed: {exc}"
-            await self.post_system_message(error_alert)
+            await self.post_system_message(
+                f"[DEPLOYMENT FAILED] Task `{task_id}` failed: {exc}"
+            )
             logger.error(f"Sub-task {task_id} failed", exc_info=True)
-        finally:
-            # Optional: clean up old finished tasks after some time
-            pass
 
-    def _create_sub_agent(self, task_name: str) -> "Agent":
-        """Create a sub-agent that shares the main ContextManager but gets its own TaskContext."""
-        sub = Agent(
-            agent_id=f"{self.agent_id}_sub_{self._sub_task_counter}",
-            loader=self.loader,
-            app_root=self.app_root,
-            config_file=None,
-        )
-
-        sub.sub_agent = True
-        sub.dispatcher = self.agent_id
-        sub.max_iterations = min(self.max_iterations, 15)  # keep subs lighter
-        sub.max_reflections = 2
-        sub.temperature = 0.25
-        sub.max_tokens = 10000
-
-        # === KEY CHANGE: Share context manager ===
-        sub.context_manager = self.context_manager
-
-        # Create dedicated lightweight task context for this sub-agent
-        sub.task_context = self.context_manager.create_task_context(task_name)
-
-        sub.attach_tools()
-
+    def _create_sub_agent(
+        self, task_name: str, profile: Optional[str] = None
+    ) -> "Agent":
+        """Create sub-agent with smart profile selection and proper config setup."""
         logger.info(
-            f"Created sub-agent for task: {task_name} (shared context + per-task memory)"
+            f"[SUB-AGENT] Creating for task: {task_name} (profile={profile or 'auto'})"
         )
-        return sub
+
+        try:
+            loader_config = (
+                getattr(self.loader, "config", {})
+                if hasattr(self.loader, "config")
+                else {}
+            )
+            agents_section = loader_config.get("agents", {})
+
+            # Determine profile
+            if profile and profile in agents_section:
+                chosen_profile = profile
+                template = agents_section[profile]
+            elif f"sub_{self.agent_id}" in agents_section:
+                chosen_profile = f"sub_{self.agent_id}"
+                template = agents_section[chosen_profile]
+            elif "sub_default" in agents_section:
+                chosen_profile = "sub_default"
+                template = agents_section["sub_default"]
+            else:
+                chosen_profile = None
+                template = {}
+
+            # Create raw agent
+            sub = Agent.__new__(Agent)
+
+            # === CRITICAL: Manually set required attributes ===
+            sub.agent_id = f"{self.agent_id}_sub_{self._sub_task_counter}"
+            sub.loader = self.loader
+            sub.app_root = self.app_root
+
+            # Set config dict so WorkflowEngine doesn't crash
+            sub.config = template.copy() if template else {}
+
+            # Basic flags
+            sub.sub_agent = True
+            sub.dispatcher = self.agent_id
+
+            # Apply template values
+            if template:
+                sub.name = (
+                    f"{template.get('name', 'Sub-Agent')}-{self._sub_task_counter:03d}"
+                )
+                sub.description = template.get("description", "Focused sub-agent")
+                sub.client = get_clients().get(template.get("client", "reasoning"))
+                sub.max_iterations = template.get("max_iterations", 15)
+                sub.max_reflections = template.get("max_reflections", 4)
+                sub.temperature = template.get("temperature", 0.25)
+                sub.max_tokens = template.get("max_tokens", 20000)
+                sub.max_sub_agents = template.get("max_sub_agents", 4)
+                sub.system_prompt = template.get("system_prompt", "")
+            else:
+                sub.name = f"Sub-{self._sub_task_counter:03d}"
+                sub.temperature = 0.25
+                sub.max_iterations = 15
+                sub.max_sub_agents = 4
+                sub.system_prompt = (
+                    "You are a focused sub-agent completing a specific task."
+                )
+
+            # Initialize infrastructure
+            sub.registry = registry
+            sub.manager = DynamicActionManager(registry)
+            sub.agent_tools = AgentActionHelper(sub)
+            sub.workflow = WorkflowEngine(sub)  # ← now safe
+            ToolBrowser(registry, sub.manager)
+
+            # Share context + per-task context
+            sub.context_manager = self.context_manager
+            sub.task_context = self.context_manager.create_task_context(task_name)
+
+            sub.attach_tools()
+
+            logger.info(
+                f"[SUB-AGENT] Successfully created '{sub.name}' using profile '{chosen_profile or 'fallback'}'"
+            )
+            return sub
+
+        except Exception as e:
+            logger.error(
+                f"[SUB-AGENT] Creation failed for task '{task_name}'", exc_info=True
+            )
+            raise
 
     def get_sub_tasks(self) -> Dict[str, Dict]:
         """Return current status of all sub-agents (safe to call from tools or chat)."""

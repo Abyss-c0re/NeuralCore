@@ -156,23 +156,6 @@ class ContextManager:
             "unknowns": [],
         }
 
-    # ─────────────────────────────────────────────────────────────
-    # PER-TASK LIGHTWEIGHT CONTEXT (Shared + Per-Task Hybrid)
-    # ─────────────────────────────────────────────────────────────
-    # When delegating a sub-task
-    # auth_task = ctx.create_task_context("analyze_auth_flow")
-
-    # # Inside sub-agent (after doing work)
-    # await auth_task.add_important_result(
-    #     title="Login handler discovered",
-    #     content=tool_result,
-    #     source="grep",
-    #     metadata={"file": "app/routes/auth.py", "confidence": 0.9}
-    # )
-
-    # auth_task.add_important_file("app/routes/auth.py")
-    # auth_task.add_finding("JWT verification is missing rate limiting")
-
     class TaskContext:
         """Lightweight per-task / per-sub-agent memory.
         Only keeps distilled, important information (files + results).
