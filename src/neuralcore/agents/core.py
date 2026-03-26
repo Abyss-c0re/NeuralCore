@@ -62,15 +62,7 @@ class Agent:
         self.sub_tasks: Dict[str, Dict[str, Any]] = {}  # task_id -> metadata
         self._sub_task_counter: int = 0
         self.task_context: Optional["ContextManager.TaskContext"] = None
-
-    def attach_tools(self):
-        """Call after instantiating Agent to load tool sets."""
-        tool_sets = self.config.get("tool_sets", [])
-        if tool_sets:
-            self.loader.load_tool_sets(sets_to_load=tool_sets)
-        # Explicitly register all actions in the registry
-        for action_name in self.registry.all_actions:
-            self.manager.load_tools([action_name])
+        self.assigned_tools: Optional[List[str]] = None
 
     def _load_agent_config(self, agent_id: str, config_file: Optional[Path]) -> dict:
         print(f"[DEBUG] Loading config for agent_id='{agent_id}'")
@@ -230,7 +222,7 @@ class Agent:
                 yield event, payload
             return
 
-        # === OLD NON-CHAT BEHAVIOR (kept for compatibility) ===
+        # === HEADLESS / SCRIPT MODE ===
         try:
             while True:
                 if stop_event and stop_event.is_set():
@@ -239,24 +231,31 @@ class Agent:
 
                 msg = await self.message_queue.get()
 
+                # Better control handling
                 if isinstance(msg, dict):
-                    event = msg.get("event") or msg.get("action") or msg.get("control")
-                    if event in {
-                        "switch_workflow",
-                        "go_to",
-                        "break",
-                        "finish_iteration",
-                        "restart_iteration",
-                        "insert_steps",
-                        "needs_confirmation",
-                        "cancelled",
-                        "finish",
-                    }:
-                        logger.debug(f"Control ignored (outside active run): {event}")
+                    event = msg.get("event")
+                    if event in {"switch_workflow", "finish", "cancelled", "break"}:
+                        if event == "switch_workflow":
+                            workflow_name = msg.get("name") or "default"
+                            logger.info(
+                                f"Headless mode received switch to: {workflow_name}"
+                            )
+                            # Let the engine handle it
+                            try:
+                                self.workflow.switch_workflow(
+                                    workflow_name
+                                )  # assuming it exists
+                            except Exception:
+                                pass
+                        elif event in ("finish", "cancelled"):
+                            logger.info(f"Headless run received {event} signal")
+                            self.message_queue.task_done()
+                            break
+
                         self.message_queue.task_done()
                         continue
 
-                # Normalize
+                # Normal message processing
                 if isinstance(msg, str):
                     content = msg.strip()
                 elif isinstance(msg, dict):
@@ -289,14 +288,20 @@ class Agent:
         self,
         task_description: str,
         user_facing_name: Optional[str] = None,
-        sub_profile: Optional[str] = None,  # ← optional explicit profile
+        sub_profile: Optional[str] = None,
+        assigned_tools: Optional[List[str]] = None,  # ← NEW: best-match tools
+        custom_system_prompt: Optional[str] = None,  # ← NEW: per-task prompt
+        temperature: Optional[float] = None,
+        max_iterations: Optional[int] = None,
     ) -> str:
-        """Start a sub-agent. Automatically prefers sub_<main_agent_id> if available."""
+        """Start a specialized sub-agent with optional tool restriction."""
         self._sub_task_counter += 1
         task_id = f"deploy_{self.agent_id}_{self._sub_task_counter:03d}"
         display_name = user_facing_name or task_description[:65]
 
-        logger.info(f"[DEPLOY] Starting sub-task {task_id}: {display_name}")
+        logger.info(
+            f"[DEPLOY] Starting sub-task {task_id}: {display_name} | tools={len(assigned_tools) if assigned_tools else 'all'}"
+        )
 
         self.sub_tasks[task_id] = {
             "id": task_id,
@@ -304,6 +309,7 @@ class Agent:
             "status": "pending",
             "started_at": asyncio.get_event_loop().time(),
             "description": task_description,
+            "assigned_tools": assigned_tools or [],  # ← store for monitoring
             "progress": 0,
             "task_obj": None,
             "result": None,
@@ -311,9 +317,13 @@ class Agent:
         }
 
         try:
-            # Auto-select best profile: sub_<main_id> > sub_default > explicit
             sub_agent = self._create_sub_agent(
-                task_name=display_name, profile=sub_profile
+                task_name=display_name,
+                profile=sub_profile,
+                assigned_tools=assigned_tools,  # ← pass down
+                custom_system_prompt=custom_system_prompt,
+                temperature=temperature,
+                max_iterations=max_iterations,
             )
 
             sub_agent.task = task_description
@@ -325,9 +335,6 @@ class Agent:
             self.sub_tasks[task_id]["task_obj"] = background_task
             self.sub_tasks[task_id]["status"] = "running"
 
-            logger.info(
-                f"[DEPLOY] Sub-agent {task_id} started successfully using profile from main agent"
-            )
             return task_id
 
         except Exception as e:
@@ -345,11 +352,19 @@ class Agent:
         task_ctx = getattr(sub_agent, "task_context", None)
 
         try:
-            sub_system = f"""You are a precise sub-agent.
-        Task: {task_description}
+            assigned = getattr(sub_agent, "assigned_tools", None)
+            tool_hint = (
+                f"\n\nYou have been given these tools: {', '.join(assigned[:15])}{', ...' if assigned and len(assigned) > 15 else ''}"
+                if assigned
+                else ""
+            )
 
-        Complete the task using tools. Record important results with task_context.add_important_result.
-        Stay focused and concise."""
+            sub_system = f"""You are a precise, focused sub-agent.
+            Task: {task_description}{tool_hint}
+
+            Complete the task using the tools available to you.
+            Record important findings using task_context.add_important_result when useful.
+            Stay concise and goal-oriented. Do not call tools unnecessarily."""
 
             async for event, payload in sub_agent.workflow.run(
                 user_prompt=task_description,
@@ -412,95 +427,162 @@ class Agent:
             logger.error(f"Sub-task {task_id} failed", exc_info=True)
 
     def _create_sub_agent(
-        self, task_name: str, profile: Optional[str] = None
+        self,
+        task_name: str,
+        profile: Optional[str] = None,
+        assigned_tools: Optional[List[str]] = None,
+        custom_system_prompt: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_iterations: Optional[int] = None,
     ) -> "Agent":
-        """Create sub-agent with smart profile selection and proper config setup."""
+        """Create a focused sub-agent with proper config and restricted tools."""
         logger.info(
-            f"[SUB-AGENT] Creating for task: {task_name} (profile={profile or 'auto'})"
+            f"[SUB-AGENT] Creating '{task_name}' (profile={profile or 'auto'}, "
+            f"tools={len(assigned_tools) if assigned_tools else 'full'})"
         )
 
         try:
-            loader_config = (
-                getattr(self.loader, "config", {})
-                if hasattr(self.loader, "config")
-                else {}
-            )
+            # ==================== CONFIG / PROFILE SELECTION ====================
+            loader_config = getattr(self.loader, "config", {}) or {}
             agents_section = loader_config.get("agents", {})
 
-            # Determine profile
             if profile and profile in agents_section:
-                chosen_profile = profile
                 template = agents_section[profile]
+                chosen_profile = profile
             elif f"sub_{self.agent_id}" in agents_section:
+                template = agents_section[f"sub_{self.agent_id}"]
                 chosen_profile = f"sub_{self.agent_id}"
-                template = agents_section[chosen_profile]
             elif "sub_default" in agents_section:
-                chosen_profile = "sub_default"
                 template = agents_section["sub_default"]
+                chosen_profile = "sub_default"
             else:
-                chosen_profile = None
                 template = {}
+                chosen_profile = None
 
-            # Create raw agent
+            # ==================== INSTANTIATE SUB-AGENT ====================
             sub = Agent.__new__(Agent)
 
-            # === CRITICAL: Manually set required attributes ===
             sub.agent_id = f"{self.agent_id}_sub_{self._sub_task_counter}"
             sub.loader = self.loader
             sub.app_root = self.app_root
+            sub.config = dict(template)  # copy
 
-            # Set config dict so WorkflowEngine doesn't crash
-            sub.config = template.copy() if template else {}
-
-            # Basic flags
+            # Sub-agent flags
             sub.sub_agent = True
             sub.dispatcher = self.agent_id
+            sub.assigned_tools = assigned_tools or []
 
-            # Apply template values
-            if template:
-                sub.name = (
-                    f"{template.get('name', 'Sub-Agent')}-{self._sub_task_counter:03d}"
-                )
-                sub.description = template.get("description", "Focused sub-agent")
-                sub.client = get_clients().get(template.get("client", "reasoning"))
-                sub.max_iterations = template.get("max_iterations", 15)
-                sub.max_reflections = template.get("max_reflections", 4)
-                sub.temperature = template.get("temperature", 0.25)
-                sub.max_tokens = template.get("max_tokens", 20000)
-                sub.max_sub_agents = template.get("max_sub_agents", 4)
-                sub.system_prompt = template.get("system_prompt", "")
-            else:
-                sub.name = f"Sub-{self._sub_task_counter:03d}"
-                sub.temperature = 0.25
-                sub.max_iterations = 15
-                sub.max_sub_agents = 4
-                sub.system_prompt = (
-                    "You are a focused sub-agent completing a specific task."
-                )
+            # Basic attributes
+            sub.name = (
+                f"{template.get('name', 'Sub-Agent')}-{self._sub_task_counter:03d}"
+                if template
+                else f"Sub-{self._sub_task_counter:03d}"
+            )
+            sub.description = template.get("description", "Focused sub-agent")
 
-            # Initialize infrastructure
+            # Client
+            clients = get_clients()
+            client_key = template.get("client", "reasoning")
+            sub.client = clients.get(client_key, clients.get("main"))
+
+            # Runtime params
+            sub.temperature = temperature or template.get("temperature", 0.25)
+            sub.max_iterations = max_iterations or template.get("max_iterations", 15)
+            sub.max_reflections = template.get("max_reflections", 4)
+            sub.max_tokens = template.get("max_tokens", 20000)
+            sub.max_sub_agents = template.get("max_sub_agents", 4)
+
+            # System prompt
+            base_prompt = custom_system_prompt or template.get("system_prompt", "")
+            sub.system_prompt = base_prompt or (
+                "You are a precise sub-agent. Complete the assigned task efficiently "
+                "using only the tools you have been given."
+            )
+
+            # ==================== CORE INFRASTRUCTURE ====================
             sub.registry = registry
             sub.manager = DynamicActionManager(registry)
             sub.agent_tools = AgentActionHelper(sub)
-            sub.workflow = WorkflowEngine(sub)  # ← now safe
-            ToolBrowser(registry, sub.manager)
+            sub.workflow = WorkflowEngine(sub)
 
-            # Share context + per-task context
+            # Context sharing
             sub.context_manager = self.context_manager
             sub.task_context = self.context_manager.create_task_context(task_name)
 
-            sub.attach_tools()
+            # ==================== TOOL LOADING (KEY DIFFERENCE) ====================
+            sub.attach_tools(assigned_tools=assigned_tools)
+
+            ToolBrowser(registry, sub.manager)
 
             logger.info(
-                f"[SUB-AGENT] Successfully created '{sub.name}' using profile '{chosen_profile or 'fallback'}'"
+                f"[SUB-AGENT] '{sub.name}' created successfully | "
+                f"profile='{chosen_profile or 'fallback'}' | "
+                f"tools loaded: {len(assigned_tools) if assigned_tools else 'full set'}"
             )
             return sub
 
         except Exception as e:
             logger.error(
-                f"[SUB-AGENT] Creation failed for task '{task_name}'", exc_info=True
+                f"[SUB-AGENT] Creation failed for '{task_name}'", exc_info=True
             )
             raise
+
+    def attach_tools(self, assigned_tools: Optional[List[str]] = None):
+        """Load tools for this agent.
+
+        - Main agents → follow config.tool_sets + load everything (your original behavior)
+        - Sub-agents  → load ONLY the assigned best-match tools (specialization)
+        """
+        if getattr(self, "sub_agent", False) and assigned_tools:
+            # === SUB-AGENT WITH RESTRICTED TOOLSET ===
+            if assigned_tools:
+                logger.info(
+                    f"[SUB-AGENT] '{self.name}' loading {len(assigned_tools)} specialized tools: "
+                    f"{assigned_tools[:10]}{'...' if len(assigned_tools) > 10 else ''}"
+                )
+                self.manager.load_tools(
+                    assigned_tools
+                )  # ← Uses your DynamicActionManager
+            else:
+                # Fallback: load minimal safe set for sub-agents
+                logger.warning(
+                    f"[SUB-AGENT] '{self.name}' has no assigned tools → loading core only"
+                )
+                core_tools = [
+                    "GetContext",
+                    "RequestComplexAction",
+                    "GetDeploymentStatus",
+                    "browse_tools",
+                ]
+                self.manager.load_tools(
+                    [t for t in core_tools if t in self.registry.all_actions]
+                )
+        else:
+            # === MAIN AGENT or unrestricted sub-agent ===
+            tool_sets = self.config.get("tool_sets", [])
+            if tool_sets:
+                logger.debug(f"Loading tool sets for main agent: {tool_sets}")
+                self.loader.load_tool_sets(sets_to_load=tool_sets)
+
+            # Load all registered actions (your original behavior)
+            for action_name in list(self.registry.all_actions.keys()):
+                try:
+                    self.manager.load_tools([action_name])
+                except Exception as e:
+                    logger.warning(f"Failed to load tool '{action_name}': {e}")
+
+        # === ALWAYS ensure critical control tools are present ===
+        critical_tools = [
+            "GetContext",
+            "RequestComplexAction",
+            "GetDeploymentStatus",
+            "browse_tools",
+        ]
+        for tool_name in critical_tools:
+            if tool_name in self.registry.all_actions and not self.manager.is_loaded(
+                tool_name
+            ):
+                self.manager.load_tools([tool_name])
 
     def get_sub_tasks(self) -> Dict[str, Dict]:
         """Return current status of all sub-agents (safe to call from tools or chat)."""

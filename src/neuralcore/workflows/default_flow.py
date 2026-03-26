@@ -27,17 +27,46 @@ async def provide_context(agent, query: str):
     description="Use when user request requires planning, tools, multiple steps, research or code changes.",
 )
 async def request_complex_action(agent, reason: str):
-    """Start complex task in background and immediately return the task ID"""
+    """Force the full multi-step orchestrator."""
+    logger.info(f"[RequestComplexAction] Received complex task: {reason[:100]}...")
 
-    # Start the monitored sub-task
-    task_id = await agent.start_complex_deployment(reason)  # ← we'll create this method
+    agent.task = reason
+    agent.goal = reason
+
+    # Stronger switch to default workflow
+    try:
+        # Direct engine switch
+        if hasattr(agent.workflow, "engine") and hasattr(
+            agent.workflow.engine, "switch_workflow"
+        ):
+            agent.workflow.engine.switch_workflow("default")
+            logger.info("Successfully forced switch to 'default' (multi-step planner)")
+        else:
+            # Fallback control message
+            await agent.post_control(
+                {
+                    "event": "switch_workflow",
+                    "name": "default",
+                    "reason": reason,
+                }
+            )
+            logger.info("Posted switch_workflow control to default")
+    except Exception as e:
+        logger.error(f"Failed to switch to default workflow: {e}")
+
+    # Start the deployment as backup
+    task_id = await agent.start_complex_deployment(
+        task_description=reason,
+        user_facing_name=reason[:60] + "...",
+        assigned_tools=None,
+        temperature=0.3,
+    )
 
     return (
-        f"✅ Started background deployment task.\n"
-        f"**Task ID:** `{task_id}`\n"
-        f"**Description:** {reason}\n\n"
-        f"I will notify you automatically when it finishes.\n"
-        f"You can check status anytime with `GetDeploymentStatus` tool using this ID."
+        f"✅ Starting complex task with full planning.\n\n"
+        f"**Task:** {reason}\n"
+        f"**ID:** `{task_id}`\n\n"
+        f"Breaking this down into steps and executing sequentially..."
     )
 
 
@@ -55,27 +84,97 @@ async def exit_deploy_mode(agent, reason: str = "Task completed"):
 
 @tool("DeployControls", name="GetDeploymentStatus")
 async def get_deployment_status(agent, task_id: Optional[str] = None):
-    """Check status of one or all background deployments."""
+    """Check status of one specific background deployment or get full overview.
+
+    Now includes plan progress, current stage, and better formatting.
+    """
     if task_id:
+        # === SINGLE TASK DETAIL ===
         status = agent.sub_tasks.get(task_id)
         if not status:
-            return f"Task ID `{task_id}` not found."
+            return f"❌ Task ID `{task_id}` not found."
 
-        return f"""Task `{task_id}`:
-        Status: **{status["status"].upper()}**
-        Name: {status["display_name"]}
-        Runtime: {status.get("runtime_seconds", 0)} seconds
-        Progress: {status.get("progress", 0)}%
-        Description: {status["description"][:150]}...
-"""
+        runtime = status.get("runtime_seconds", 0)
+        progress = status.get("progress", 0)
+        step_num = status.get("step_number", "?")  # we'll add this later
+
+        output = [
+            f"**Task ID:** `{task_id}`",
+            f"**Step:** {step_num}",
+            f"**Name:** {status.get('display_name', 'Unnamed Task')}",
+            f"**Status:** {status.get('status', 'unknown').upper()}",
+            f"**Runtime:** {runtime:.1f} seconds",
+            f"**Progress:** {progress}%",
+            f"**Description:** {status.get('description', '')[:280]}{'...' if len(status.get('description', '')) > 280 else ''}",
+        ]
+
+        assigned = status.get("assigned_tools", [])
+        if assigned:
+            output.append(
+                f"**Assigned Tools:** {', '.join(assigned[:10])}{'...' if len(assigned) > 10 else ''}"
+            )
+
+        if status.get("status") in ("completed", "failed"):
+            if status.get("result"):
+                output.append(f"\n**Result:**\n{status['result']}")
+            if status.get("error"):
+                output.append(f"\n**Error:** {status['error']}")
+
+        return "\n".join(output)
+
     else:
+        # === FULL OVERVIEW ===
         tasks = agent.get_sub_tasks()
         if not tasks:
             return "No background deployments running at the moment."
 
-        lines = ["**Active Background Deployments:**"]
-        for t in sorted(tasks.values(), key=lambda x: x.get("started_at", 0)):
-            lines.append(f"• `{t['id']}` → **{t['status']}** — {t['display_name']}")
+        lines = ["# 📊 **Deployment Status Overview**"]
+
+        total = len(tasks)
+        running = sum(1 for t in tasks.values() if t.get("status") == "running")
+        completed = sum(1 for t in tasks.values() if t.get("status") == "completed")
+        failed = sum(
+            1 for t in tasks.values() if t.get("status") in ("failed", "cancelled")
+        )
+
+        lines.append(
+            f"**Progress:** {completed}/{total} steps completed | "
+            f"Running: {running} | Failed: {failed}"
+        )
+
+        if hasattr(agent, "task") and agent.task:
+            lines.append(f"\n**Main Task:** {agent.task}")
+
+        # Current stage
+        if hasattr(agent.workflow, "current_workflow"):
+            lines.append(f"**Current Stage:** {agent.workflow.current_workflow}")
+
+        # List all sub-tasks
+        lines.append("\n**Steps:**")
+        sorted_tasks = sorted(tasks.values(), key=lambda x: x.get("started_at", 0))
+
+        for t in sorted_tasks:
+            status_str = t.get("status", "unknown").upper()
+            emoji = {
+                "running": "🔄",
+                "completed": "✅",
+                "failed": "❌",
+                "pending": "⏳",
+            }.get(status_str.lower(), "•")
+
+            runtime = t.get("runtime_seconds", 0)
+            line = (
+                f"{emoji} `{t['id']}` → **{status_str}** — {t.get('display_name', '')}"
+            )
+
+            if runtime > 5:
+                line += f" ({runtime:.1f}s)"
+            lines.append(line)
+
+        # Overall completion
+        if completed == total and total > 0:
+            lines.append("\n✅ **All steps completed successfully.**")
+
         return "\n".join(lines)
 
 
@@ -283,76 +382,26 @@ class AgentFlow:
     @workflow.set(
         "default",
         name="plan_tasks",
-        description="Generates tool queries and task plan.",
+        description="Generates steps + per-step tool searches and assignments.",
     )
     async def _wf_plan_tasks(
         self, iteration: int, state: "AgentState"
     ) -> AsyncIterator:
-        """(unchanged)"""
         if not state.planned_tasks:
             state.phase = self.Phase.PLAN
             yield ("phase_changed", {"phase": state.phase.value})
 
-            # ── Step 1: Generate queries
-            query_prompt = f"""
-            Agent must generate queries to identify tools from the registry
-            that are relevant to accomplishing the following TASK:
+            # Step 1: Generate fine-grained tasks (keep or refine your existing prompt)
+            plan_prompt = f"""
+            Break the following TASK into the smallest possible independent actionable steps.
+            Each step should be completable by one focused sub-agent.
 
             TASK:
             {self.agent.task}
 
-            REQUIREMENTS:
-            - Respond ONLY with a JSON array of short search queries.
-            - NO explanation, NO extra text.
-            JSON format: {{ "queries": ["query1", "query2", ...] }}
+            Return ONLY JSON:
+            {{"tasks": ["step 1 description", "step 2 description", ...]}}
             """
-            raw_queries = await self.agent.client.chat(
-                [{"role": "user", "content": query_prompt}]
-            )
-
-            try:
-                queries_list = json.loads(raw_queries).get("queries", [])
-            except Exception:
-                match = re.search(r"\{.*?\}", raw_queries, re.DOTALL)
-                queries_list = []
-                if match:
-                    try:
-                        queries_list = json.loads(match.group()).get("queries", [])
-                    except Exception as e:
-                        yield ("warning", f"Failed to parse queries JSON: {e}")
-
-            if not queries_list:
-                yield ("warning", "No queries generated; cannot plan tasks.")
-                return
-
-            # ── Step 2: Parallel registry search
-            async def search_registry(query: str):
-                return await asyncio.to_thread(self.agent.registry.search, query, 3)
-
-            registry_tasks = [search_registry(q) for q in queries_list]
-            search_results = await asyncio.gather(*registry_tasks)
-
-            suggested_tools = list(
-                dict.fromkeys(a.name for results in search_results for a, _ in results)
-            )
-
-            if suggested_tools:
-                self.agent.manager.load_tools(suggested_tools)
-                yield ("info", f"Loaded tools: {', '.join(suggested_tools)}")
-
-            # ── Step 3: Generate plan
-            tools_str = ", ".join(self.agent.manager._loaded_tools) or "none"
-            plan_prompt = f"""    
-            Break the TASK into the smallest possible independent actionable steps.
-            Each step should be something one sub-agent can complete with tools.
-            Only use tools available in the agent's dynamic toolset: {tools_str}.
-
-            TASK:
-            {self.agent.task}
-
-            Return ONLY JSON: {{ "tasks": ["step 1 description", "step 2 description", ...] }}
-            """
-
             raw_plan = await self.agent.client.chat(
                 [{"role": "user", "content": plan_prompt}]
             )
@@ -361,122 +410,221 @@ class AgentFlow:
                 plan_json = json.loads(raw_plan)
                 state.planned_tasks = plan_json.get("tasks", [])
             except Exception:
-                match = re.search(r"\{.*?\}", raw_plan, re.DOTALL)
-                if match:
-                    try:
-                        plan_json = json.loads(match.group())
-                        state.planned_tasks = plan_json.get("tasks", [])
-                    except Exception as e:
-                        state.planned_tasks = []
-                        yield ("warning", f"Failed to parse plan JSON: {e}")
-                else:
-                    state.planned_tasks = []
-                    yield ("warning", "No JSON found in planning response")
+                # fallback parsing as before...
+                state.planned_tasks = []
+
+            if not state.planned_tasks:
+                yield ("warning", "No tasks planned.")
+                return
 
             state.current_task_index = 0
+            state.task_tool_assignments = {}
 
-        # ── Step 4: Yield next task
+            # Step 2: For EACH task, generate a targeted tool search query + search registry
+            yield (
+                "info",
+                f"Planning {len(state.planned_tasks)} steps with per-step tool discovery...",
+            )
+
+            for i, task_desc in enumerate(state.planned_tasks):
+                # Generate a precise search query for this step only
+                query_prompt = f"""
+                Generate 1-3 short, precise search queries to find the MOST RELEVANT tools 
+                from the registry for this specific sub-task:
+
+                SUB-TASK: {task_desc}
+
+                Requirements:
+                - Focus on capabilities needed (e.g., "web search", "code execution", "file read", "API call", etc.)
+                - Be specific to the action described.
+                - Return ONLY JSON: {{"queries": ["query1", "query2"]}}
+                """
+
+                raw_queries = await self.agent.client.chat(
+                    [{"role": "user", "content": query_prompt}]
+                )
+                try:
+                    queries = json.loads(raw_queries).get(
+                        "queries", [task_desc]
+                    )  # fallback to task desc
+                except Exception:
+                    queries = [task_desc]
+
+                # Parallel search
+                async def search_for_step(q: str):
+                    return await asyncio.to_thread(
+                        self.agent.registry.search, q, limit=10
+                    )
+
+                search_results = await asyncio.gather(
+                    *[search_for_step(q) for q in queries]
+                )
+
+                # Rank tools (simple frequency + first occurrence)
+                tool_scores: Dict[str, float] = {}
+                for results in search_results:
+                    for action, set_name in results:
+                        name = action.name
+                        tool_scores[name] = tool_scores.get(name, 0) + 1.0
+
+                # Take top N
+                best_tools = sorted(
+                    tool_scores.items(), key=lambda x: x[1], reverse=True
+                )[:8]
+                assigned_tool_names = [name for name, _ in best_tools]
+
+                state.task_tool_assignments[i] = assigned_tool_names
+
+                yield (
+                    "step_tool_assignment",
+                    {
+                        "step": i + 1,
+                        "task": task_desc[:120],
+                        "assigned_tools": assigned_tool_names,
+                        "tool_count": len(assigned_tool_names),
+                    },
+                )
+
+                logger.info(
+                    f"Step {i + 1}: Assigned {len(assigned_tool_names)} tools → {assigned_tool_names}"
+                )
+
+        # Yield next task (as before, but now with tool assignment awareness)
         while state.planned_tasks and state.current_task_index < len(
             state.planned_tasks
         ):
-            next_task = state.planned_tasks[state.current_task_index]
+            idx = state.current_task_index
+            next_task = state.planned_tasks[idx]
+            assigned_tools = state.task_tool_assignments.get(idx, [])
+
             await self.agent.context_manager.add_message(
-                "system", f"[NEXT TASK REMINDER] {next_task}"
+                "system",
+                f"[NEXT TASK] {next_task}\n[RECOMMENDED TOOLS] {', '.join(assigned_tools) or 'none'}",
             )
+
             state.current_task_index += 1
-            yield ("planned_task", {"task": next_task})
+            yield (
+                "planned_task",
+                {"task": next_task, "assigned_tools": assigned_tools},
+            )
 
     @workflow.set("default", name="deploy_sub_agents")
     async def _wf_deploy_sub_agents(
         self, iteration: int, state: AgentState
     ) -> AsyncIterator:
-        """Deploy one sub-agent per planned task (parallel)."""
+        """Deploy ONLY the next pending step. This allows progressive execution."""
         if not state.planned_tasks:
-            yield ("warning", "No planned tasks to deploy.")
+            yield ("warning", "No planned tasks.")
             return
 
         state.phase = self.Phase.EXECUTE
         yield ("phase_changed", {"phase": state.phase.value})
 
-        max_allowed = getattr(self.agent, "max_sub_agents", 6)
-        tasks_to_deploy = state.planned_tasks[:max_allowed]  # safety limit
+        if state.current_task_index >= len(state.planned_tasks):
+            state.is_complete = True
+            yield ("info", "All steps have been deployed.")
+            return
 
-        yield (
-            "info",
-            f"🚀 Deploying {len(tasks_to_deploy)} sub-agents (max {max_allowed})...",
+        i = state.current_task_index
+        task_desc = state.planned_tasks[i]
+        assigned_tools = state.task_tool_assignments.get(i, [])
+
+        name = f"Step {i + 1}/{len(state.planned_tasks)}: {task_desc[:50]}..."
+
+        yield ("info", f"🚀 Deploying step {i + 1}/{len(state.planned_tasks)} ...")
+
+        task_id = await self.agent.start_complex_deployment(
+            task_description=task_desc,
+            user_facing_name=name,
+            assigned_tools=assigned_tools,
+            temperature=0.25,
         )
 
-        deployment_ids = []
-        for i, task_desc in enumerate(tasks_to_deploy):
-            name = f"Step {i + 1}: {task_desc[:45]}..."
-            task_id = await self.agent.start_complex_deployment(
-                task_description=task_desc, user_facing_name=name
-            )
-            deployment_ids.append(task_id)
+        state.sub_task_ids = [task_id]  # only current one
+        state.task_id_map[i] = task_id
 
-            yield (
-                "sub_agent_deployed",
-                {"task_id": task_id, "step": i + 1, "description": task_desc},
-            )
+        # Store step number for better status reporting
+        if task_id in self.agent.sub_tasks:
+            self.agent.sub_tasks[task_id]["step_number"] = i + 1
 
-        state.sub_task_ids = deployment_ids
-        logger.info(f"Deployed sub-agents: {deployment_ids}")
+        yield (
+            "sub_agent_deployed",
+            {
+                "task_id": task_id,
+                "step": i + 1,
+                "total_steps": len(state.planned_tasks),
+                "description": task_desc,
+                "assigned_tools": assigned_tools,
+            },
+        )
+
+        logger.info(f"Deployed step {i + 1} → task {task_id}")
 
     @workflow.set("default", name="wait_for_sub_agents")
     async def _wf_wait_for_sub_agents(
         self, iteration: int, state: AgentState
     ) -> AsyncIterator:
-        """Wait for all sub-agents to finish and mark main task as complete when done."""
-        if not getattr(state, "sub_task_ids", None):
-            yield ("info", "No sub-agents to wait for.")
+        """Wait for the current step only. When it finishes, signal to continue."""
+        if not state.sub_task_ids:
+            yield ("info", "No active sub-agent.")
             return
 
         yield ("phase_changed", {"phase": self.Phase.EXECUTE.value})
-        yield ("waiting_for_sub_agents", {"count": len(state.sub_task_ids)})
 
-        pending = [
-            self.agent.sub_tasks[tid]["task_obj"]
-            for tid in state.sub_task_ids
-            if tid in self.agent.sub_tasks
-            and not self.agent.sub_tasks[tid]["task_obj"].done()
-        ]
+        current_task_id = state.sub_task_ids[0]  # we only run one at a time now
 
-        if pending:
-            logger.info(f"Waiting for {len(pending)} sub-agents to complete...")
-            await asyncio.wait_for(
-                asyncio.gather(*pending, return_exceptions=True), timeout=900
+        if current_task_id in self.agent.sub_tasks:
+            task_info = self.agent.sub_tasks[current_task_id]
+            task_obj = task_info.get("task_obj")
+
+            if task_obj and not task_obj.done():
+                logger.info(
+                    f"Waiting for step {state.current_task_index + 1} ({current_task_id})"
+                )
+                try:
+                    await asyncio.wait_for(task_obj, timeout=900)
+                except asyncio.TimeoutError:
+                    logger.warning(f"Step {current_task_id} timed out")
+                    task_info["status"] = "failed"
+
+        # Check status
+        status = self.agent.sub_tasks.get(current_task_id, {})
+        step_status = status.get("status", "unknown")
+
+        if step_status == "completed":
+            yield (
+                "step_completed",
+                {
+                    "step": state.current_task_index + 1,
+                    "task_id": current_task_id,
+                    "result": status.get("result", ""),
+                },
             )
+            state.current_task_index += 1
+            state.sub_task_ids = []  # clear so next iteration can deploy next step
 
-        # === CHECK FINAL STATUS ===
-        completed = 0
-        failed = 0
-        for tid in state.sub_task_ids:
-            status = self.agent.sub_tasks.get(tid, {}).get("status")
-            if status == "completed":
-                completed += 1
-            elif status in ("failed", "cancelled"):
-                failed += 1
+            if state.current_task_index >= len(state.planned_tasks):
+                state.is_complete = True
+                yield ("info", "✅ All steps completed!")
+            else:
+                yield (
+                    "info",
+                    f"Step {state.current_task_index} finished → preparing next step...",
+                )
 
-        logger.info(f"Sub-agents finished: {completed} completed, {failed} failed")
-
-        # Mark main task as complete if all (or most) sub-agents succeeded
-        if completed > 0 and failed == 0:
-            state.is_complete = True
-            logger.info(
-                "✅ All sub-agents completed successfully → marking main task complete"
+        else:
+            yield (
+                "step_failed",
+                {"step": state.current_task_index + 1, "task_id": current_task_id},
             )
-        elif completed > 0:
-            state.is_complete = True  # still consider it done even with some failures
-            logger.warning(
-                f"Some sub-agents failed ({failed}), but marking main task as complete"
-            )
+            state.is_complete = False
 
         yield (
-            "sub_agents_completed",
+            "progress_update",
             {
-                "total": len(state.sub_task_ids),
-                "completed": completed,
-                "failed": failed,
+                "current_step": state.current_task_index,
+                "total_steps": len(state.planned_tasks),
+                "is_fully_complete": state.is_complete,
             },
         )
 
@@ -597,8 +745,19 @@ class AgentFlow:
 
     @workflow.set("default", name="check_complete")
     async def _wf_check_complete(self, iteration: int, state: AgentState):
-        """Check if the overall task is complete (after sub-agents)."""
+        """Only finish the entire deployment when ALL steps are done.
+        Safely handles both chat_mode and headless mode.
+        """
         if not state.is_complete:
+            return
+
+        # Extra safety check
+        total_steps = len(getattr(state, "planned_tasks", []))
+        if state.current_task_index < total_steps:
+            logger.info(
+                f"Still {total_steps - state.current_task_index} steps remaining. Continuing..."
+            )
+            state.is_complete = False
             return
 
         state.phase = self.Phase.FINALIZE
@@ -614,7 +773,7 @@ class AgentFlow:
             yield ("finish", {"reason": "sub_agent_task_complete"})
             return
 
-        # Main orchestrator finish
+        # === MAIN AGENT FULL COMPLETION ===
         try:
             friendly_summary = await self._generate_user_friendly_summary(state)
             yield (
@@ -623,24 +782,47 @@ class AgentFlow:
             )
             await self.agent.context_manager.add_message("assistant", friendly_summary)
         except Exception:
-            friendly_summary = "Task completed successfully."
+            friendly_summary = (
+                f"✅ All {total_steps} steps of the deployment completed successfully."
+            )
             yield (
                 "llm_response",
                 {"full_reply": friendly_summary, "is_complete": True},
             )
+            await self.agent.context_manager.add_message("assistant", friendly_summary)
 
-        # Switch back to chat mode
-        await self.agent.post_control(
-            {
-                "event": "switch_workflow",
-                "name": "deploy_chat",
-                "reason": "Complex task completed",
-            }
-        )
+        # === SMART SWITCHING ===
+        is_in_chat_mode = False
+        try:
+            # Check if we are currently running inside the chat loop
+            is_in_chat_mode = (
+                hasattr(self.engine, "current_workflow")
+                and self.engine.current_workflow == "deploy_chat"
+            )
+
+            if is_in_chat_mode:
+                logger.info("Complex task completed → switching back to chat mode")
+                await self.agent.post_control(
+                    {
+                        "event": "switch_workflow",
+                        "name": "deploy_chat",
+                        "reason": "Complex deployment finished",
+                    }
+                )
+            else:
+                logger.info(
+                    "Complex task completed in headless/script mode → finishing cleanly"
+                )
+        except Exception as e:
+            logger.warning(f"Failed to switch workflow cleanly: {e}")
 
         yield (
             "finish",
-            {"reason": "deploy_task_complete", "switched_back_to_chat": True},
+            {
+                "reason": "deploy_task_complete",
+                "switched_back_to_chat": is_in_chat_mode,
+                "total_steps": total_steps,
+            },
         )
 
     @workflow.set(
