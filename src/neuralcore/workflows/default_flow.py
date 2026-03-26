@@ -33,28 +33,19 @@ async def request_complex_action(agent, reason: str):
     agent.task = reason
     agent.goal = reason
 
-    # Stronger switch to default workflow
     try:
-        # Direct engine switch
         if hasattr(agent.workflow, "engine") and hasattr(
             agent.workflow.engine, "switch_workflow"
         ):
             agent.workflow.engine.switch_workflow("default")
-            logger.info("Successfully forced switch to 'default' (multi-step planner)")
+            logger.info("Successfully forced switch to 'default'")
         else:
-            # Fallback control message
             await agent.post_control(
-                {
-                    "event": "switch_workflow",
-                    "name": "default",
-                    "reason": reason,
-                }
+                {"event": "switch_workflow", "name": "default", "reason": reason}
             )
-            logger.info("Posted switch_workflow control to default")
     except Exception as e:
         logger.error(f"Failed to switch to default workflow: {e}")
 
-    # Start the deployment as backup
     task_id = await agent.start_complex_deployment(
         task_description=reason,
         user_facing_name=reason[:60] + "...",
@@ -84,34 +75,24 @@ async def exit_deploy_mode(agent, reason: str = "Task completed"):
 
 @tool("DeployControls", name="GetDeploymentStatus")
 async def get_deployment_status(agent, task_id: Optional[str] = None):
-    """Check status of one specific background deployment or get full overview.
-
-    Now includes plan progress, current stage, and better formatting.
-    """
     if task_id:
-        # === SINGLE TASK DETAIL ===
         status = agent.sub_tasks.get(task_id)
         if not status:
             return f"❌ Task ID `{task_id}` not found."
 
-        runtime = status.get("runtime_seconds", 0)
-        progress = status.get("progress", 0)
-        step_num = status.get("step_number", "?")  # we'll add this later
-
         output = [
             f"**Task ID:** `{task_id}`",
-            f"**Step:** {step_num}",
+            f"**Step:** {status.get('step_number', '?')}",
             f"**Name:** {status.get('display_name', 'Unnamed Task')}",
             f"**Status:** {status.get('status', 'unknown').upper()}",
-            f"**Runtime:** {runtime:.1f} seconds",
-            f"**Progress:** {progress}%",
-            f"**Description:** {status.get('description', '')[:280]}{'...' if len(status.get('description', '')) > 280 else ''}",
+            f"**Runtime:** {status.get('runtime_seconds', 0):.1f} seconds",
+            f"**Progress:** {status.get('progress', 0)}%",
+            f"**Description:** {status.get('description', '')[:280]}...",
         ]
 
-        assigned = status.get("assigned_tools", [])
-        if assigned:
+        if status.get("assigned_tools"):
             output.append(
-                f"**Assigned Tools:** {', '.join(assigned[:10])}{'...' if len(assigned) > 10 else ''}"
+                f"**Assigned Tools:** {', '.join(status['assigned_tools'][:10])}..."
             )
 
         if status.get("status") in ("completed", "failed"):
@@ -122,60 +103,47 @@ async def get_deployment_status(agent, task_id: Optional[str] = None):
 
         return "\n".join(output)
 
-    else:
-        # === FULL OVERVIEW ===
-        tasks = agent.get_sub_tasks()
-        if not tasks:
-            return "No background deployments running at the moment."
+    # Full overview
+    tasks = agent.get_sub_tasks()
+    if not tasks:
+        return "No background deployments running at the moment."
 
-        lines = ["# 📊 **Deployment Status Overview**"]
+    lines = ["# 📊 **Deployment Status Overview**"]
+    total = len(tasks)
+    running = sum(1 for t in tasks.values() if t.get("status") == "running")
+    completed = sum(1 for t in tasks.values() if t.get("status") == "completed")
+    failed = sum(
+        1 for t in tasks.values() if t.get("status") in ("failed", "cancelled")
+    )
 
-        total = len(tasks)
-        running = sum(1 for t in tasks.values() if t.get("status") == "running")
-        completed = sum(1 for t in tasks.values() if t.get("status") == "completed")
-        failed = sum(
-            1 for t in tasks.values() if t.get("status") in ("failed", "cancelled")
-        )
+    lines.append(
+        f"**Progress:** {completed}/{total} steps completed | "
+        f"Running: {running} | Failed: {failed}"
+    )
 
-        lines.append(
-            f"**Progress:** {completed}/{total} steps completed | "
-            f"Running: {running} | Failed: {failed}"
-        )
+    if hasattr(agent, "task") and agent.task:
+        lines.append(f"\n**Main Task:** {agent.task}")
 
-        if hasattr(agent, "task") and agent.task:
-            lines.append(f"\n**Main Task:** {agent.task}")
+    if hasattr(agent.workflow, "current_workflow"):
+        lines.append(f"**Current Stage:** {agent.workflow.current_workflow}")
 
-        # Current stage
-        if hasattr(agent.workflow, "current_workflow"):
-            lines.append(f"**Current Stage:** {agent.workflow.current_workflow}")
+    lines.append("\n**Steps:**")
+    for t in sorted(tasks.values(), key=lambda x: x.get("started_at", 0)):
+        emoji = {
+            "running": "🔄",
+            "completed": "✅",
+            "failed": "❌",
+            "pending": "⏳",
+        }.get(t.get("status", "").lower(), "•")
+        line = f"{emoji} `{t['id']}` → **{t.get('status', 'unknown').upper()}** — {t.get('display_name', '')}"
+        if t.get("runtime_seconds", 0) > 5:
+            line += f" ({t['runtime_seconds']:.1f}s)"
+        lines.append(line)
 
-        # List all sub-tasks
-        lines.append("\n**Steps:**")
-        sorted_tasks = sorted(tasks.values(), key=lambda x: x.get("started_at", 0))
+    if completed == total and total > 0:
+        lines.append("\n✅ **All steps completed successfully.**")
 
-        for t in sorted_tasks:
-            status_str = t.get("status", "unknown").upper()
-            emoji = {
-                "running": "🔄",
-                "completed": "✅",
-                "failed": "❌",
-                "pending": "⏳",
-            }.get(status_str.lower(), "•")
-
-            runtime = t.get("runtime_seconds", 0)
-            line = (
-                f"{emoji} `{t['id']}` → **{status_str}** — {t.get('display_name', '')}"
-            )
-
-            if runtime > 5:
-                line += f" ({runtime:.1f}s)"
-            lines.append(line)
-
-        # Overall completion
-        if completed == total and total > 0:
-            lines.append("\n✅ **All steps completed successfully.**")
-
-        return "\n".join(lines)
+    return "\n".join(lines)
 
 
 class AgentFlow:
@@ -260,86 +228,68 @@ class AgentFlow:
 
     @workflow.set("deploy_chat", name="deploy_chat_loop")
     async def _wf_deploy_chat_loop(self, iteration: int, state: AgentState):
-        """Clean persistent chat loop with safe queue handling."""
-
         if iteration == 0:
             state.phase = self.Phase.CHAT
             yield ("phase_changed", {"phase": state.phase.value})
             logger.info(f"Agent '{self.agent.name}' → Persistent chat mode started")
 
+        # Load DeployControls ONCE (not every loop)
         self.agent.manager.load_toolsets("DeployControls")
 
         while True:
-            logger.debug("Chat loop: awaiting next message...")
-
             try:
-                raw_msg = await self.agent.message_queue.get()
+                raw_msg = await asyncio.wait_for(
+                    self.agent.message_queue.get(), timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                if (
+                    getattr(self.agent, "_stop_event", None)
+                    and self.agent._stop_event.is_set()
+                ):
+                    break
+                continue
             except asyncio.CancelledError:
-                logger.info("Chat loop cancelled")
                 break
 
-            # We will call task_done() exactly once per get() in the finally block
             try:
-                # ====================== CONTROL MESSAGE HANDLING ======================
                 if isinstance(raw_msg, dict) and "event" in raw_msg:
                     event = raw_msg.get("event")
-                    logger.debug(f"Control event received: {event}")
 
                     if event == "switch_workflow":
-                        workflow_name = raw_msg.get("name", "default")
-                        reason = raw_msg.get("reason", "")
+                        self.engine.switch_workflow(raw_msg.get("name", "default"))
+                        continue
 
-                        logger.info(
-                            f"Switching workflow to: {workflow_name} | reason: {reason}"
-                        )
+                    elif event == "sub_task_completed":
+                        yield ("step_completed", raw_msg)
+                        continue
 
-                        try:
-                            self.engine.switch_workflow(workflow_name)
-                        except AttributeError:
-                            logger.warning(
-                                "WorkflowEngine.switch_workflow not available, using post_control"
-                            )
-                            await self.agent.post_control(raw_msg)
-                        except Exception as e:
-                            logger.error(f"Workflow switch failed: {e}")
-
-                        continue  # Let finally call task_done()
+                    elif event == "sub_task_failed":
+                        yield ("step_failed", raw_msg)
+                        continue
 
                     elif event == "cancelled":
-                        if (
-                            hasattr(self.agent.client, "_current_stop_event")
-                            and self.agent.client._current_stop_event
-                        ):
+                        if hasattr(self.agent.client, "_current_stop_event"):
                             self.agent.client._current_stop_event.set()
-                        logger.info("Cancelled current generation via control")
                         continue
 
-                    else:
-                        logger.debug(f"Unknown control event: {event}")
-                        continue
-
-                # ====================== NORMAL MESSAGE PROCESSING ======================
+                # Normal message handling (unchanged)
                 if isinstance(raw_msg, dict):
                     role = raw_msg.get("role", "user")
                     content = raw_msg.get("content", "") or str(raw_msg)
                 else:
-                    role = "user"
-                    content = str(raw_msg).strip()
+                    role, content = "user", str(raw_msg).strip()
 
                 if not content and role != "system":
                     continue
 
-                # === FAST PATH: Background deployment results ===
                 if role == "system" and (
                     "[DEPLOYMENT COMPLETE]" in content
                     or "[DEPLOYMENT FAILED]" in content
                 ):
-                    logger.debug("Fast-path: delivering background deployment result")
                     yield (
                         "llm_response",
                         {
                             "full_reply": content,
-                            "tool_calls": [],
                             "is_complete": True,
                             "is_system_alert": True,
                         },
@@ -347,11 +297,6 @@ class AgentFlow:
                     await self.agent.context_manager.add_message("system", content)
                     await self.agent.context_manager.add_message("assistant", content)
                     continue
-
-                # === NORMAL PATH: User message → LLM + tools ===
-                logger.debug(
-                    f"Processing normal message/role={role}: {content[:100]}..."
-                )
 
                 messages = await self.agent.context_manager.provide_context(
                     query=content,
@@ -362,10 +307,6 @@ class AgentFlow:
                     chat=True,
                 )
 
-                yield ("phase_changed", {"phase": self.Phase.CHAT.value})
-
-                logger.debug("→ Calling _process_user_message_with_llm")
-
                 async for ev, pl in self._process_user_message_with_llm(
                     messages, state
                 ):
@@ -374,9 +315,7 @@ class AgentFlow:
                     yield (ev, pl)
 
             finally:
-                # CRITICAL: Call task_done() exactly once for every .get()
                 self.agent.message_queue.task_done()
-                logger.debug("task_done() called for this message")
 
     @workflow.set(
         "default",
@@ -1362,15 +1301,17 @@ class AgentFlow:
                 {"full_reply": final_reply, "tool_calls": [], "is_complete": True},
             )
             await self.agent.context_manager.add_message("assistant", final_reply)
+            return
 
-            logger.debug("Complex action handled — exiting chat loop processor")
-            return  # Exit here. Let the outer loop handle task_done()
-
-        # Normal reply (no complex action)
-        if not final_reply and tool_results:
+        # Normal reply — be more cautious
+        elif not final_reply and tool_results:
             final_reply = "\n\n".join(tool_results)
         elif not final_reply:
             final_reply = "✅ Tool executed successfully."
+
+        # Add a safety note if we suspect partial progress
+        if "README" in complex_reason or "main.py" in complex_reason:
+            final_reply += "\n\n(Note: This is part of a multi-step process. More steps may still be running.)"
 
         logger.info(f"FINAL REPLY being sent to user:\n{final_reply}")
 
