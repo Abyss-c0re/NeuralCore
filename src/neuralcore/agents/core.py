@@ -484,73 +484,52 @@ class Agent:
             self.sub_tasks[task_id]["error"] = str(e)
             return f"ERROR_{task_id}"
 
+    # --- Internal runner for SubAgent ---
     async def _run_sub_agent_internal(
         self, sub_agent: "SubAgent", task_id: str, task_description: str
     ):
-        """Run a SubAgent using the proper Agent.run() entry point for consistency."""
-        task_ctx = getattr(sub_agent, "task_context", None)
 
         try:
-            # === FORCE STRICT ISOLATION + TOOL RESTRICTION (before starting run) ===
+            # --- Tool restriction ---
             assigned = getattr(sub_agent, "assigned_tools", None)
             if assigned:
-                logger.info(
-                    f"[SUB-AGENT ISOLATION] Restricting '{sub_agent.name}' to {len(assigned)} tools"
-                )
                 sub_agent.manager.unload_all()
                 sub_agent.manager.load_tools(assigned)
-                # Always ensure safe core tools
-                core_tools = ["GetContext", "GetDeploymentStatus"]
-                for t in core_tools:
+                for t in ["GetContext", "GetDeploymentStatus"]:
                     if (
                         t in sub_agent.registry.all_actions
                         and not sub_agent.manager.is_loaded(t)
                     ):
                         sub_agent.manager.load_tools([t])
             else:
-                logger.warning(
-                    f"[SUB-AGENT] No assigned_tools for {sub_agent.name} → using core only"
-                )
                 sub_agent.manager.unload_all()
                 sub_agent.manager.load_tools(["GetContext", "GetDeploymentStatus"])
 
-            # Strong isolated system prompt
-            sub_system = f"""You are a precise sub-agent executing **one focused micro-task**.
+            sub_system = f"""You are a precise sub-agent executing one focused micro-task.
 
             Task: {task_description}
 
             Rules:
             - Use tools as needed to complete this exact task.
-            - You may need multiple reasoning + tool steps.
             - Do not speculate about other steps or the bigger picture.
             - Stay strictly within the tools you were given."""
 
-            # === KEY CHANGE: Use sub_agent.run() instead of workflow.run() directly ===
-            logger.info(
-                f"[SUB-AGENT] Starting {sub_agent.name} via proper run() method"
-            )
-
+            # --- Run the sub-agent with isolated queue ---
             async for event, payload in sub_agent.run(
                 user_prompt=task_description,
                 system_prompt=sub_system,
                 temperature=0.25,
                 max_tokens=10000,
-                workflow="sub_agent_execute",  # Use a dedicated minimal workflow for sub-agents
-                chat_mode=False,  # Force headless mode
+                workflow="sub_agent_execute",
+                chat_mode=False,
             ):
-                # Forward important events to the parent agent
-                if event == "tool_result" and task_ctx is not None:
-                    result_str = str(payload.get("result", ""))
-                    if result_str.strip():
-                        await task_ctx.add_important_result(
-                            title=f"{payload.get('name', 'Tool')} Result",
-                            content=result_str[:800],
-                            source=payload.get("name", "tool"),
-                            metadata=payload.get("args", {}),
-                        )
-
-                elif event in ("step_completed", "final_answer", "iteration_finished"):
-                    # Forward progress to parent (optional but very useful)
+                # --- Forward only relevant events to parent ---
+                if event in (
+                    "tool_result",
+                    "step_completed",
+                    "iteration_finished",
+                    "final_answer",
+                ):
                     await self.post_control(
                         {
                             "event": "sub_agent_progress",
@@ -558,12 +537,9 @@ class Agent:
                             "type": event,
                             "payload": payload,
                             "sub_agent_name": sub_agent.name,
+                            "origin": sub_agent.agent_id,
                         }
                     )
-
-                # You can add more event types you care about here
-
-                logger.debug(f"[SUB-AGENT {task_id}] Event: {event}")
 
         except asyncio.CancelledError:
             self.sub_tasks[task_id].update(
@@ -575,11 +551,9 @@ class Agent:
             await self.post_control(
                 {"event": "sub_task_failed", "task_id": task_id, "error": "cancelled"}
             )
-            logger.warning(f"Sub-task {task_id} was cancelled")
             raise
 
         except Exception as exc:
-            logger.error(f"Sub-task {task_id} failed", exc_info=True)
             self.sub_tasks[task_id].update(
                 {
                     "status": "failed",
@@ -592,13 +566,10 @@ class Agent:
             )
 
         finally:
-            # === CLEANUP ===
-            self.context_manager.prune_sub_agent_noise()
-
+            sub_agent.context_manager.prune_sub_agent_noise()
             summary = await self._generate_deployment_summary(
                 sub_agent, task_description
             )
-
             self.sub_tasks[task_id].update(
                 {
                     "status": "completed",
@@ -607,16 +578,16 @@ class Agent:
                     "progress": 100,
                 }
             )
-
-            signal = {
-                "event": "sub_task_completed",
-                "task_id": task_id,
-                "summary": summary[:500],
-                "success": True,
-            }
-
-            await self.post_control(signal)
-
+            # --- Notify parent ---
+            await self.post_control(
+                {
+                    "event": "sub_task_completed",
+                    "task_id": task_id,
+                    "summary": summary[:500],
+                    "success": True,
+                    "origin": sub_agent.agent_id,
+                }
+            )
             await self.post_system_message(
                 f"✅ Step completed: {self.sub_tasks[task_id].get('display_name', task_id)}\n"
                 f"{summary[:300]}{'...' if len(summary) > 300 else ''}"
@@ -782,15 +753,8 @@ class Agent:
             return f"✅ The deployment task **{task}** has been completed successfully."
 
 
+# --- SubAgent constructor (isolated queue + controlled reporting) ---
 class SubAgent(Agent):
-    """
-    Production-ready specialized sub-agent for background / deployment steps.
-    - Full inheritance from Agent → all queues, events, state management, and public API work.
-    - Shares the parent's ContextManager exactly as required.
-    - Loads only the assigned_tools (restricted toolset).
-    - Clean, safe initialization with no __new__ hack.
-    """
-
     def __init__(
         self,
         parent: "Agent",
@@ -802,7 +766,6 @@ class SubAgent(Agent):
         profile: Optional[str] = None,
         agent_id_override: Optional[str] = None,
     ):
-        # === CONFIG / PROFILE SELECTION (reused logic from old _create_sub_agent) ===
         loader_config = getattr(parent.loader, "config", {}) or {}
         agents_section = loader_config.get("agents", {})
 
@@ -819,11 +782,10 @@ class SubAgent(Agent):
             template = {}
             chosen_profile = "fallback"
 
-        # Agent ID for logging / uniqueness
         if agent_id_override is None:
             agent_id_override = f"{parent.agent_id}_sub_unknown"
 
-        # === PROPER INHERITANCE (queues, events, manager, workflow, etc. are all initialized) ===
+        # --- Initialize base Agent ---
         super().__init__(
             agent_id=agent_id_override,
             loader=parent.loader,
@@ -831,35 +793,24 @@ class SubAgent(Agent):
             config_override=template,
             sub_agent=True,
         )
+        
 
-        # Sub-agent specific wiring
+        # --- ISOLATED queue for this sub-agent ---
+        self.message_queue = asyncio.Queue()
         self.dispatcher = parent.agent_id
         self.assigned_tools = assigned_tools or []
 
-        # Make name more descriptive for logs/UI
-        if task_name and len(task_name) > 0:
-            self.name = f"{self.name} ({task_name[:40]})"
-
-        # === SHARED CONTEXT MANAGER (exactly as requested) ===
+        # --- Shared context ---
         self.context_manager = parent.context_manager
         self.task_context = self.context_manager.create_task_context(task_name)
 
-        # Sub-agent tuned defaults (override anything from template)
-        self.temperature = (
-            temperature
-            if temperature is not None
-            else self.config.get("temperature", 0.25)
-        )
-        self.max_iterations = (
-            max_iterations
-            if max_iterations is not None
-            else self.config.get("max_iterations", 15)
-        )
+        # --- Sub-agent tuned defaults ---
+        self.temperature = temperature or self.config.get("temperature", 0.25)
+        self.max_iterations = max_iterations or self.config.get("max_iterations", 15)
         self.max_tokens = self.config.get("max_tokens", 20000)
         self.max_reflections = self.config.get("max_reflections", 4)
         self.max_sub_agents = self.config.get("max_sub_agents", 4)
 
-        # System prompt priority
         if custom_system_prompt:
             self.system_prompt = custom_system_prompt
         elif not self.system_prompt.strip():
@@ -868,7 +819,7 @@ class SubAgent(Agent):
                 "using only the tools you have been given."
             )
 
-        # === TOOL LOADING (restricted set for this sub-agent) ===
+        # --- Load assigned tools only ---
         self.attach_tools(assigned_tools=assigned_tools)
 
         logger.info(
