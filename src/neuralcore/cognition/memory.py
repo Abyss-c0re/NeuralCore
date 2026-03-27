@@ -457,6 +457,62 @@ class ContextManager:
 
         return full_summary
 
+    def prune_sub_agent_noise(self):
+        """Prune ONLY the noisy chat history from the last sub-agent.
+        IMPORTANT: We NEVER touch the Knowledge Base or TaskContext.
+        All useful data must have gone through add_external_content()
+        or record_tool_outcome() to survive for the next agent."""
+
+        if not hasattr(self, "current_topic") or not self.current_topic.history:
+            return
+
+        original_len = len(self.current_topic.history)
+        kept = []
+
+        for msg in self.current_topic.history:
+            content_lower = msg.get("content", "").lower()
+            role = msg.get("role", "")
+
+            # Keep anything that came through the official important channels
+            if (
+                role in ("tool", "system")
+                or "add_external_content" in content_lower
+                or any(
+                    k in content_lower
+                    for k in [
+                        "important",
+                        "result",
+                        "file",
+                        "finding",
+                        "kb",
+                        "indexed",
+                        "tool_outcome",
+                    ]
+                )
+            ):
+                kept.append(msg)
+                continue
+
+            # Keep the very last assistant message (the final summary)
+            if (
+                role == "assistant"
+                and len(self.current_topic.history)
+                - self.current_topic.history.index(msg)
+                <= 3
+            ):
+                kept.append(msg)
+
+        # Replace history with clean version (max 15 clean turns)
+        self.current_topic.history = kept[-15:]
+
+        pruned = original_len - len(self.current_topic.history)
+        if pruned > 0:
+            logger.info(
+                f"[PRUNE] Sub-agent noise cleaned: {pruned} messages removed | "
+                f"KB preserved via add_external_content()"
+            )
+            self.context_stats["prunes"] += 1
+
     def set_goal(self, goal: str):
         self.investigation_state["goal"] = goal
 
