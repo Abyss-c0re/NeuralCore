@@ -692,6 +692,17 @@ class WorkflowEngine:
                     step_index += 1
                     continue
 
+                # =============================================================
+                # NEW: Configure tools for this specific step using @workflow.set
+                # =============================================================
+                if hasattr(self.agent, "manager"):
+                    self.agent.manager.configure_for_step(step_name, workflow)
+                else:
+                    logger.warning(
+                        f"Agent has no manager. Skipping tool configuration for step '{step_name}'."
+                    )
+
+                # Keep backward compatibility with old "toolset" override in step config
                 if "toolset" in overrides:
                     toolset_value = overrides.pop("toolset")
                     if toolset_value:
@@ -879,6 +890,7 @@ class WorkflowEngine:
                 step_index = next_step_index
 
             self._log_iteration_state(iteration, state)
-        # # Final summary
-        # # async for ev, pl in self._generate_final_summary(state):
-        #         yield (ev, pl)
+
+        # Final summary (commented as in original)
+        # async for ev, pl in self._generate_final_summary(state):
+        #     yield (ev, pl)

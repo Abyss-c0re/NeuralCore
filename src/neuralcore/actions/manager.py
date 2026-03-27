@@ -5,6 +5,7 @@ from functools import wraps
 from typing import Any, Dict, List, Optional, Set, Union, Callable
 from neuralcore.utils.search import fuzzy_score, keyword_score
 from neuralcore.actions.actions import Action, ActionSet
+from neuralcore.workflows.registry import Workflow
 
 from inspect import signature, _empty, iscoroutinefunction
 from typing import get_origin
@@ -300,6 +301,60 @@ class DynamicActionManager:
         if not action_set:
             logger.warning(f"ActionSet '{set_name}' not found in registry")
         return action_set
+
+    def configure_for_step(self, step_name: str, workflow: "Workflow") -> int:
+        """
+        Configure the dynamic tool set exactly according to the @workflow.set decorator
+        for the current workflow step.
+
+        This is the **recommended** and cleanest way to assign tools per workflow step.
+        """
+        if workflow is None:
+            logger.warning(
+                f"No Workflow instance provided for step '{step_name}'. Unloading all tools."
+            )
+            self.unload_all()
+            return 0
+
+        meta = workflow.get_step_metadata(step_name)
+        if not meta:
+            logger.warning(
+                f"No metadata found for step '{step_name}'. Unloading all tools."
+            )
+            self.unload_all()
+            return 0
+
+        logger.info(f"🔧 Configuring tools for workflow step: '{step_name}'")
+
+        # 1. Start clean - unload everything non-persistent
+        self.unload_all()
+
+        loaded_count = 0
+
+        # 2. Load assigned toolsets (primary recommendation)
+        if meta.get("toolsets"):
+            loaded_count += self.load_toolsets(meta["toolsets"])
+
+        # 3. Load specific individual tools
+        if meta.get("tools"):
+            self.load_tools(meta["tools"])
+            loaded_count += len(meta["tools"])
+
+        # 4. Handle dynamic tool browsing
+        if not meta.get("dynamic_allowed", True):
+            if "browse_tools" in self._loaded_tools:
+                self.unload_tools("browse_tools")
+                logger.debug(f"Disabled 'browse_tools' for strict step '{step_name}'")
+
+        current_tools = len(self.current_set.actions)
+        logger.info(
+            f"✅ Step '{step_name}' configured with {current_tools} tools "
+            f"(toolsets={meta.get('toolsets', [])}, "
+            f"specific_tools={meta.get('tools', [])}, "
+            f"dynamic_allowed={meta.get('dynamic_allowed', True)})"
+        )
+
+        return loaded_count
 
     def unload_tools(self, tool_names: Union[str, List[str], None] = None):
         """Unload specific tools by name."""
