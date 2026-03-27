@@ -302,16 +302,22 @@ class DynamicActionManager:
             logger.warning(f"ActionSet '{set_name}' not found in registry")
         return action_set
 
-    def configure_for_step(self, step_name: str, workflow: "Workflow") -> int:
+    def configure_for_step(
+        self, step_name: str, workflow: Optional["Workflow"] = None
+    ) -> int:
         """
         Configure the dynamic tool set exactly according to the @workflow.set decorator
         for the current workflow step.
-
-        This is the **recommended** and cleanest way to assign tools per workflow step.
         """
+        # If no workflow instance was passed, use the global singleton
+        if workflow is None:
+            from neuralcore.workflows.registry import workflow as global_workflow
+
+            workflow = global_workflow
+
         if workflow is None:
             logger.warning(
-                f"No Workflow instance provided for step '{step_name}'. Unloading all tools."
+                f"No Workflow instance available for step '{step_name}'. Unloading all tools."
             )
             self.unload_all()
             return 0

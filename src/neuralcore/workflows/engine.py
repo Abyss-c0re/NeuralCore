@@ -696,7 +696,7 @@ class WorkflowEngine:
                 # NEW: Configure tools for this specific step using @workflow.set
                 # =============================================================
                 if hasattr(self.agent, "manager"):
-                    self.agent.manager.configure_for_step(step_name, workflow)
+                    self.agent.manager.configure_for_step(step_name)
                 else:
                     logger.warning(
                         f"Agent has no manager. Skipping tool configuration for step '{step_name}'."
