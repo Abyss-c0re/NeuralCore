@@ -485,22 +485,23 @@ class Agent:
             return f"ERROR_{task_id}"
 
     async def _run_sub_agent_internal(
-        self, sub_agent: "Agent", task_id: str, task_description: str
+        self, sub_agent: "SubAgent", task_id: str, task_description: str
     ):
+        """Run a SubAgent using the proper Agent.run() entry point for consistency."""
         task_ctx = getattr(sub_agent, "task_context", None)
 
         try:
+            # === FORCE STRICT ISOLATION + TOOL RESTRICTION (before starting run) ===
             assigned = getattr(sub_agent, "assigned_tools", None)
-
-            # === FORCE STRICT ISOLATION + TOOL RESTRICTION ===
             if assigned:
                 logger.info(
-                    f"[SUB-AGENT ISOLATION] Restricting to {len(assigned)} tools: {assigned[:10]}"
+                    f"[SUB-AGENT ISOLATION] Restricting '{sub_agent.name}' to {len(assigned)} tools"
                 )
                 sub_agent.manager.unload_all()
                 sub_agent.manager.load_tools(assigned)
-                # Safe core tools only
-                for t in ["GetContext", "GetDeploymentStatus"]:
+                # Always ensure safe core tools
+                core_tools = ["GetContext", "GetDeploymentStatus"]
+                for t in core_tools:
                     if (
                         t in sub_agent.registry.all_actions
                         and not sub_agent.manager.is_loaded(t)
@@ -508,24 +509,33 @@ class Agent:
                         sub_agent.manager.load_tools([t])
             else:
                 logger.warning(
-                    "[SUB-AGENT] No assigned_tools - using minimal core only"
+                    f"[SUB-AGENT] No assigned_tools for {sub_agent.name} → using core only"
                 )
                 sub_agent.manager.unload_all()
                 sub_agent.manager.load_tools(["GetContext", "GetDeploymentStatus"])
 
-            # Strong isolated prompt - sub-agent knows NOTHING about other steps
+            # Strong isolated system prompt
             sub_system = f"""You are a precise sub-agent executing **ONE single step only**.
 
-            TASK: {task_description}
-            """
+    Task: {task_description}
 
-            async for event, payload in sub_agent.workflow.run(
+    Focus exclusively on this task. Do not speculate about other steps or the overall goal.
+    When finished, clearly indicate completion."""
+
+            # === KEY CHANGE: Use sub_agent.run() instead of workflow.run() directly ===
+            logger.info(
+                f"[SUB-AGENT] Starting {sub_agent.name} via proper run() method"
+            )
+
+            async for event, payload in sub_agent.run(
                 user_prompt=task_description,
                 system_prompt=sub_system,
-                workflow="sub_agent_execute",
                 temperature=0.25,
                 max_tokens=10000,
+                workflow="sub_agent_execute",  # Use a dedicated minimal workflow for sub-agents
+                chat_mode=False,  # Force headless mode
             ):
+                # Forward important events to the parent agent
                 if event == "tool_result" and task_ctx is not None:
                     result_str = str(payload.get("result", ""))
                     if result_str.strip():
@@ -536,7 +546,50 @@ class Agent:
                             metadata=payload.get("args", {}),
                         )
 
-            # === CLEAN NOISE: Keep only important data added via add_external_content ===
+                elif event in ("step_completed", "final_answer", "iteration_finished"):
+                    # Forward progress to parent (optional but very useful)
+                    await self.post_control(
+                        {
+                            "event": "sub_agent_progress",
+                            "task_id": task_id,
+                            "type": event,
+                            "payload": payload,
+                            "sub_agent_name": sub_agent.name,
+                        }
+                    )
+
+                # You can add more event types you care about here
+
+                logger.debug(f"[SUB-AGENT {task_id}] Event: {event}")
+
+        except asyncio.CancelledError:
+            self.sub_tasks[task_id].update(
+                {
+                    "status": "cancelled",
+                    "completed_at": asyncio.get_event_loop().time(),
+                }
+            )
+            await self.post_control(
+                {"event": "sub_task_failed", "task_id": task_id, "error": "cancelled"}
+            )
+            logger.warning(f"Sub-task {task_id} was cancelled")
+            raise
+
+        except Exception as exc:
+            logger.error(f"Sub-task {task_id} failed", exc_info=True)
+            self.sub_tasks[task_id].update(
+                {
+                    "status": "failed",
+                    "completed_at": asyncio.get_event_loop().time(),
+                    "error": str(exc),
+                }
+            )
+            await self.post_control(
+                {"event": "sub_task_failed", "task_id": task_id, "error": str(exc)}
+            )
+
+        finally:
+            # === CLEANUP ===
             self.context_manager.prune_sub_agent_noise()
 
             summary = await self._generate_deployment_summary(
@@ -555,7 +608,6 @@ class Agent:
             signal = {
                 "event": "sub_task_completed",
                 "task_id": task_id,
-                "step": self.sub_tasks[task_id].get("step_number"),
                 "summary": summary[:500],
                 "success": True,
             }
@@ -566,31 +618,6 @@ class Agent:
                 f"✅ Step completed: {self.sub_tasks[task_id].get('display_name', task_id)}\n"
                 f"{summary[:300]}{'...' if len(summary) > 300 else ''}"
             )
-
-        except asyncio.CancelledError:
-            self.sub_tasks[task_id].update(
-                {
-                    "status": "cancelled",
-                    "completed_at": asyncio.get_event_loop().time(),
-                }
-            )
-            await self.post_control(
-                {"event": "sub_task_failed", "task_id": task_id, "error": "cancelled"}
-            )
-            logger.warning(f"Sub-task {task_id} was cancelled")
-            raise
-        except Exception as exc:
-            self.sub_tasks[task_id].update(
-                {
-                    "status": "failed",
-                    "completed_at": asyncio.get_event_loop().time(),
-                    "error": str(exc),
-                }
-            )
-            await self.post_control(
-                {"event": "sub_task_failed", "task_id": task_id, "error": str(exc)}
-            )
-            logger.error(f"Sub-task {task_id} failed", exc_info=True)
 
     def attach_tools(self, assigned_tools: Optional[List[str]] = None):
         if getattr(self, "sub_agent", False) and assigned_tools:
