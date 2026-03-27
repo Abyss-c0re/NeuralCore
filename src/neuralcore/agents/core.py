@@ -78,7 +78,7 @@ class Agent:
         # === UPGRADE: Current task/role, default workflow, background support ===
         self.current_task: str = ""
         self.current_role: str = self.config.get("role", "general_assistant")
-        self.default_workflow: str = self.config.get("default_workflow", "default")
+        self.default_workflow: str = self.config.get("orchestrator", "orchestrator")
         self._status: str = "idle"
         self._background_task: Optional[asyncio.Task] = None
 
@@ -515,12 +515,15 @@ class Agent:
                 sub_agent.manager.load_tools(["GetContext", "GetDeploymentStatus"])
 
             # Strong isolated system prompt
-            sub_system = f"""You are a precise sub-agent executing **ONE single step only**.
+            sub_system = f"""You are a precise sub-agent executing **one focused micro-task**.
 
-    Task: {task_description}
+            Task: {task_description}
 
-    Focus exclusively on this task. Do not speculate about other steps or the overall goal.
-    When finished, clearly indicate completion."""
+            Rules:
+            - Use tools as needed to complete this exact task.
+            - You may need multiple reasoning + tool steps.
+            - Do not speculate about other steps or the bigger picture.
+            - Stay strictly within the tools you were given."""
 
             # === KEY CHANGE: Use sub_agent.run() instead of workflow.run() directly ===
             logger.info(

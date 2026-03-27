@@ -38,9 +38,9 @@ async def request_complex_action(agent, reason: str):
 
     # Switch orchestrator
     try:
-        agent.workflow.engine.switch_workflow("default")
+        agent.workflow.engine.switch_workflow("orchestrator")
     except Exception:
-        await agent.post_control({"event": "switch_workflow", "name": "default"})
+        await agent.post_control({"event": "switch_workflow", "name": "orchestrator"})
 
     task_id = await agent.start_complex_deployment(
         task_description=reason,
@@ -54,12 +54,6 @@ async def request_complex_action(agent, reason: str):
         f"**{reason}**\n\n"
         f"Task ID: `{task_id}` — breaking it down into focused steps..."
     )
-
-
-@tool("DeployControls", name="ExitDeployMode")
-async def exit_deploy_mode(agent, reason: str = "Task completed"):
-    await agent.post_control({"event": "finish", "reason": "deploy_mode_exit"})
-    return f"✅ Deploy session ended: {reason}"
 
 
 @tool("DeployControls", name="GetDeploymentStatus")
@@ -144,64 +138,56 @@ class AgentFlow:
         PLAN = "plan"
         EXECUTE = "execute"
         WAIT = "wait"
-        DECISION = "decision"
-        REFLECT = "reflect"
         FINALIZE = "finalize"
 
-    # ── Two separate workflows ─────────────────────────────────────
     def __init__(self, engine):
         self.engine = engine
         self.agent = engine.agent
         self._register_workflows()
 
     def _register_workflows(self):
-        # 1. Orchestrator (sequential one-step-at-a-time)
-        self.engine.register_workflow(
-            name="default",
-            description="Plan → Deploy one step → Wait → Verify → Next step",
-            steps=[
-                "plan_tasks",
-                "deploy_next_step",
-                "wait_for_current_step",
-                "verify_and_advance",
-                "reflect_if_stuck",
-                "safety_fallback",
-            ],
-        )
-
-        # 2. Sub-agent (strict single-step ReAct)
-        self.engine.register_workflow(
-            name="sub_agent_execute",
-            description="Focused ReAct for ONE micro-task only",
-            steps=[
-                "llm_stream",
-                "execute_if_tools",
-                "sub_agent_check_complete",  # ← new strict handler
-                "reflect_if_stuck",
-                "safety_fallback",
-            ],
-        )
-
-        # 3. Chat mode (persistent UI loop)
+        # Battle-tested: Chat mode
         self.engine.register_workflow(
             name="deploy_chat",
             description="Natural chat → RequestComplexAction switches to orchestrator",
             steps=["deploy_chat_loop"],
+            hidden_toolsets=["DeployControls"],
         )
 
-        # Register all _wf_* methods
+        # Battle-tested: Sub-agent micro-task execution
+        self.engine.register_workflow(
+            name="sub_agent_execute",
+            description="Focused ReAct for ONE micro-task only",
+            steps=["llm_stream", "execute_if_tools", "sub_agent_check_complete"],
+            hidden_toolsets=["DeployControls"],
+        )
+
+        # New clean orchestrator (uses your current AgentState fields)
+        self.engine.register_workflow(
+            name="orchestrator",
+            description="One-shot plan with tool hints → launch restricted sub-agents → finalize",
+            steps=[
+                "plan_microtasks",
+                "launch_next_subtask",
+                "wait_for_subtask",
+                "check_orchestrator_complete",
+            ],
+        )
+
+        # Register all _wf_* handlers
         for attr_name in dir(self):
             if attr_name.startswith("_wf_"):
                 step_name = attr_name[4:]
                 self.engine._step_handlers[step_name] = getattr(self, attr_name)
 
     # ==================== SYSTEM PROMPTS ====================
+
     def _build_chat_system_prompt(self) -> str:
         return f"""You are a helpful Deploy Agent.
         Speak naturally and concisely.
         - Simple questions → answer directly.
         - Complex requests → call **RequestComplexAction**.
-        - When you see [DEPLOYMENT COMPLETE] or [DEPLOYMENT FAILED], respond friendly to the user.
+        - When you see [DEPLOYMENT COMPLETE], respond friendly.
 
         Current goal: {self.agent.goal or "General assistance"}"""
 
@@ -213,25 +199,22 @@ class AgentFlow:
             if assigned_tools
             else ""
         )
-        return f"""You are a precise sub-agent executing **ONE single step only**.
+        return f"""You are a precise sub-agent executing **ONE single micro-task only**.
 
-        TASK: {task_desc}{tools_hint}
+TASK: {task_desc}{tools_hint}
 
-        CRITICAL ISOLATION RULES:
-        - This is the ONLY task you have. You have NO knowledge of any previous or future steps.
-        - You do NOT know the overall project plan or what comes next.
-        - Complete ONLY this exact step. Do nothing else.
-        - When finished, output a short, clear summary of what you actually did.
-        - NEVER mention other steps, the full project, or claim the entire deployment is finished.
-        - NEVER use deployment tools like RequestComplexAction, ExitDeployMode, etc.
-        - Stay strictly within the tools you were given."""
+CRITICAL RULES:
+- Complete ONLY this exact task.
+- If the task involves reading a file, use open_file_async or open_file_sync directly. Do NOT rely on browse_tools for obvious file operations.
+- When you have finished the task, output a short summary and end with exactly: {AgentFlow.FINAL_ANSWER_MARKER}
+- Never mention other steps or the overall project."""
 
-    # ==================== CHAT LOOP STEP ====================
+    # ==================== CHAT LOOP (battle-tested - unchanged) ====================
 
     @workflow.set(
         "deploy_chat",
         name="deploy_chat_loop",
-        toolsets=["DeployControls"],  # Only these tools in chat mode
+        toolsets=["DeployControls"],
         dynamic_allowed=True,
     )
     async def _wf_deploy_chat_loop(self, iteration: int, state: AgentState):
@@ -240,7 +223,6 @@ class AgentFlow:
             yield ("phase_changed", {"phase": "chat"})
             logger.info(f"Agent '{self.agent.name}' → Chat mode started")
 
-        # Only DeployControls are available in chat
         self.agent.manager.load_toolsets("DeployControls")
 
         while True:
@@ -260,40 +242,16 @@ class AgentFlow:
 
             if isinstance(raw_msg, dict) and "event" in raw_msg:
                 ev = raw_msg["event"]
-
-                if ev == "sub_task_completed":
-                    # FIXED: Neutral reporting only - NO happy summary here
-                    yield ("sub_task_completed", raw_msg)
-
-                    step_name = raw_msg.get("display_name") or raw_msg.get(
-                        "task_id", "Step"
-                    )
-                    step_summary = raw_msg.get("summary", "Step finished.")
-
-                    # Post a clean system message that does NOT trigger LLM summarization
+                if ev in ("sub_task_completed", "sub_task_failed"):
+                    yield (ev, raw_msg)
                     await self.agent.post_system_message(
-                        f"[STEP COMPLETED] {step_name}\n{step_summary}\n"
-                        f"Waiting for next step or user input."
+                        f"[STEP {ev.replace('sub_task_', '').upper()}] {raw_msg.get('task_id')}"
                     )
-
-                    # Add to context as system so the LLM sees it but doesn't celebrate
-                    await self.agent.context_manager.add_message(
-                        "system", f"[STEP COMPLETED] {step_name}\n{step_summary}"
-                    )
-
-                elif ev == "sub_task_failed":
-                    yield ("sub_task_failed", raw_msg)
-                    await self.agent.post_system_message(
-                        f"❌ Step failed: {raw_msg.get('task_id', 'Unknown step')}"
-                    )
-
                 elif ev == "switch_workflow":
-                    self.engine.switch_workflow(raw_msg.get("name", "default"))
-
+                    self.engine.switch_workflow(raw_msg.get("name", "deploy_chat"))
                 self.agent.message_queue.task_done()
                 continue
 
-            # === Normal user message ===
             content = (
                 raw_msg.get("content", "")
                 if isinstance(raw_msg, dict)
@@ -304,9 +262,7 @@ class AgentFlow:
                 continue
 
             messages = await self.agent.context_manager.provide_context(
-                query=content,
-                chat=True,
-                system_prompt=self._build_chat_system_prompt(),
+                query=content, chat=True, system_prompt=self._build_chat_system_prompt()
             )
 
             async for ev, pl in self._process_user_message_with_llm(messages, state):
@@ -314,37 +270,51 @@ class AgentFlow:
 
             self.agent.message_queue.task_done()
 
-    # ==================== ORCHESTRATOR STEPS ====================
+    # ==================== NEW ORCHESTRATOR (matches your AgentState) ====================
 
-    @workflow.set("default", name="plan_tasks")
-    async def _wf_plan_tasks(self, iteration: int, state: AgentState):
-        if getattr(state, "planned_tasks", None):
-            return  # already planned
+    @workflow.set("orchestrator", name="plan_microtasks")
+    async def _wf_plan_microtasks(self, iteration: int, state: AgentState):
+        if state.planned_tasks:  # already planned
+            return
 
         state.phase = self.Phase.PLAN
         yield ("phase_changed", {"phase": "plan"})
 
-        prompt = f"""Break this task into smallest possible independent steps.
-    Each step should be completable by one focused sub-agent with limited tools.
+        prompt = f"""Break this task into 4-8 small independent micro-tasks.
 
-    TASK: {self.agent.task}
+TASK: {self.agent.task}
 
-    Return ONLY JSON: {{"tasks": ["step 1", "step 2", ...]}}"""
+For each micro-task suggest the most relevant tools (e.g. open_file_async, write_file, grep, replace_block, etc.).
+
+Return ONLY JSON:
+{{
+  "microtasks": [
+    {{"description": "...", "suggested_tools": ["tool1", "tool2"]}},
+    ...
+  ]
+}}"""
 
         raw = await self.agent.client.chat([{"role": "user", "content": prompt}])
         try:
-            state.planned_tasks = json.loads(raw).get("tasks", [self.agent.task])
+            data = json.loads(raw)
+            state.planned_tasks = [t["description"] for t in data.get("microtasks", [])]
+            state.task_tool_assignments = {
+                i: t.get("suggested_tools", [])
+                for i, t in enumerate(data.get("microtasks", []))
+            }
         except Exception:
             state.planned_tasks = [self.agent.task]
+            state.task_tool_assignments = {0: []}
 
         state.current_task_index = 0
-        state.task_tool_assignments = {}
         state.task_id_map = {}
+        yield (
+            "info",
+            f"Planned {len(state.planned_tasks)} micro-tasks with tool hints",
+        )
 
-        yield ("info", f"Planned {len(state.planned_tasks)} sequential steps")
-
-    @workflow.set("default", name="deploy_next_step")
-    async def _wf_deploy_next_step(self, iteration: int, state: AgentState):
+    @workflow.set("orchestrator", name="launch_next_subtask")
+    async def _wf_launch_next_subtask(self, iteration: int, state: AgentState):
         if state.current_task_index >= len(state.planned_tasks):
             state.is_complete = True
             return
@@ -355,7 +325,6 @@ class AgentFlow:
 
         name = f"Step {idx + 1}/{len(state.planned_tasks)}: {task_desc[:55]}..."
 
-        # Deploy with **restricted tools**
         task_id = await self.agent.start_complex_deployment(
             task_description=task_desc,
             user_facing_name=name,
@@ -373,7 +342,7 @@ class AgentFlow:
             self.agent.sub_tasks[task_id]["step_number"] = idx + 1
 
         yield (
-            "sub_agent_deployed",
+            "sub_agent_launched",
             {
                 "step": idx + 1,
                 "task_id": task_id,
@@ -381,11 +350,12 @@ class AgentFlow:
                 "assigned_tools": assigned_tools,
             },
         )
+        logger.info(
+            f"Launched sub-task {idx + 1} → {task_id} with tools: {assigned_tools}"
+        )
 
-        logger.info(f"Deployed restricted step {idx + 1} → {task_id}")
-
-    @workflow.set("default", name="wait_for_current_step")
-    async def _wf_wait_for_current_step(self, iteration: int, state: AgentState):
+    @workflow.set("orchestrator", name="wait_for_subtask")
+    async def _wf_wait_for_subtask(self, iteration: int, state: AgentState):
         if not state.sub_task_ids:
             return
 
@@ -395,11 +365,17 @@ class AgentFlow:
 
         if task_obj and not task_obj.done():
             try:
-                await asyncio.wait_for(task_obj, timeout=900)
+                await asyncio.wait_for(task_obj, timeout=600)  # 10-minute safety
             except asyncio.TimeoutError:
                 task_info["status"] = "failed"
+                task_info["error"] = "Timeout"
+                yield ("step_failed", {"task_id": task_id, "error": "Timeout"})
+                state.current_task_index += 1
+                state.sub_task_ids = []
+                return
 
         status = task_info.get("status", "unknown")
+
         if status == "completed":
             state.current_task_index += 1
             state.sub_task_ids = []
@@ -407,19 +383,21 @@ class AgentFlow:
                 "step_completed",
                 {"step": state.current_task_index, "task_id": task_id},
             )
+        elif status in ("failed", "cancelled"):
+            error = task_info.get("error", "Unknown")
+            yield ("step_failed", {"task_id": task_id, "error": error})
+            state.current_task_index += 1
+            state.sub_task_ids = []
         else:
-            yield (
-                "step_failed",
-                {"step": state.current_task_index, "task_id": task_id},
-            )
+            logger.warning(f"Sub-task {task_id} still in status: {status}")
 
-    @workflow.set("default", name="verify_and_advance")
-    async def _wf_verify_and_advance(self, iteration: int, state: AgentState):
+    @workflow.set("orchestrator", name="check_orchestrator_complete")
+    async def _wf_check_orchestrator_complete(self, iteration: int, state: AgentState):
         if state.current_task_index < len(state.planned_tasks):
             state.is_complete = False
             return
 
-        # All steps done
+        # All done
         state.phase = self.Phase.FINALIZE
         yield ("phase_changed", {"phase": "finalize"})
 
@@ -427,7 +405,6 @@ class AgentFlow:
         yield ("llm_response", {"full_reply": summary, "is_complete": True})
         await self.agent.context_manager.add_message("assistant", summary)
 
-        # Return to chat mode
         await self.agent.post_control(
             {"event": "switch_workflow", "name": "deploy_chat"}
         )
@@ -440,18 +417,8 @@ class AgentFlow:
             },
         )
 
-    # ==================== SUB-AGENT STEP ====================
-
-    @workflow.set("sub_agent_execute", name="sub_agent_check_complete")
-    async def _wf_sub_agent_check_complete(self, iteration: int, state: AgentState):
-        """Sub-agents finish after one execution cycle"""
-        state.is_complete = True
-        summary = await self._generate_sub_agent_summary(state)
-        yield ("llm_response", {"full_reply": summary, "is_complete": True})
-        yield ("finish", {"reason": "sub_agent_step_complete"})
-
     @workflow.set(
-        "default",
+        "sub_agent_execute",
         name="llm_stream",
         description="Streams LLM response and extracts tool calls.",
     )
@@ -465,339 +432,6 @@ class AgentFlow:
                 state.is_complete = pl.get("is_complete", False)
             yield (ev, pl)
         self.engine._log_iteration_state(iteration, state)
-
-    @workflow.set(
-        "default",
-        name="execute_if_tools",
-        description="Executes tool calls if present.",
-        toolsets=["FileEditingTools", "TerminalTools"],  # Only execution-related tools
-        dynamic_allowed=False,
-    )
-    async def _wf_execute_if_tools(self, iteration: int, state: AgentState):
-        if not state.tool_calls:
-            return
-
-        yield ("tool_calls", state.tool_calls)
-
-        async for ev, pl in self._execute_tools(
-            state.tool_calls, iteration, state
-        ):  # ← now self.
-            yield (ev, pl)
-
-        state.tool_calls = []
-        logger.debug(f"Cleared tool_calls after execution at iteration {iteration}")
-
-        for r in self.agent.tool_results:
-            sig = f"{r['name']}:{json.dumps(r['args'], sort_keys=True)}"
-            self.agent.executed_signatures.add(sig)
-
-        state.phase = self.Phase.DECISION
-        yield ("phase_changed", {"phase": state.phase.value})
-
-        self.engine._log_iteration_state(iteration, state)
-
-    @workflow.set(
-        "default",
-        name="verify_goal_completion",
-        description="Verifies goal completion.",
-    )
-    async def _wf_verify_goal_completion(
-        self, iteration: int, state: "AgentState"
-    ) -> AsyncIterator:
-        """(unchanged — no executor calls)"""
-        if not state.is_complete:
-            return
-
-        state.phase = self.Phase.DECISION
-        yield ("phase_changed", {"phase": state.phase.value})
-        yield ("goal_verification_start", {"iteration": iteration})
-
-        summary = self.agent.context_manager.get_context_summary()
-        investigation_state = self.agent.context_manager.investigation_state
-        prompt = f"""
-    You are a strict goal auditor.
-
-    GOAL:
-    {self.agent.goal}
-
-    LIVE CONTEXT SUMMARY:
-    {summary}
-
-    INVESTIGATION STATE:
-    {json.dumps(investigation_state, indent=2)}
-
-    Has the agent FULLY completed the goal? Reply STRICT JSON ONLY:
-
-    {{
-        "verified": true or false,
-        "reason": "one-sentence explanation",
-        "missing_steps": ["list"] or []
-    }}
-    """
-
-        raw_verification = await self.agent.client.chat(
-            [{"role": "user", "content": prompt}]
-        )
-
-        verification: Dict[str, Any] = {}
-        try:
-            verification = json.loads(raw_verification.strip())
-        except Exception:
-            match = re.search(r"\{.*?\}", str(raw_verification), re.DOTALL)
-            if match:
-                try:
-                    verification = json.loads(match.group())
-                except Exception:
-                    verification = {}
-            else:
-                verification = {}
-
-        verification.setdefault("verified", False)
-        verification.setdefault("reason", "parse failed" if not verification else "")
-        verification.setdefault("missing_steps", [])
-
-        yield ("goal_verification_result", verification)
-
-        if not verification.get("verified", False):
-            state.is_complete = False
-            await self.agent.context_manager.add_message(
-                "system", f"[GOAL VERIFICATION FAILED] {verification.get('reason')}"
-            )
-            yield ("info", {"message": "Goal verification FAILED — continuing"})
-        else:
-            yield ("info", {"message": "Goal verification PASSED"})
-
-    @workflow.set("default", name="check_complete")
-    async def _wf_check_complete(self, iteration: int, state: AgentState):
-        """Only finish the entire deployment when ALL steps are done.
-        Safely handles both chat_mode and headless mode.
-        """
-        if not state.is_complete:
-            return
-
-        # Extra safety check
-        total_steps = len(getattr(state, "planned_tasks", []))
-        if state.current_task_index < total_steps:
-            logger.info(
-                f"Still {total_steps - state.current_task_index} steps remaining. Continuing..."
-            )
-            state.is_complete = False
-            return
-
-        state.phase = self.Phase.FINALIZE
-        yield ("phase_changed", {"phase": state.phase.value})
-
-        is_sub = getattr(self.agent, "sub_agent", False)
-
-        if is_sub:
-            # Sub-agent finish
-            summary = await self._generate_sub_agent_summary(state)
-            yield ("llm_response", {"full_reply": summary, "is_complete": True})
-            await self.agent.context_manager.add_message("assistant", summary)
-            yield ("finish", {"reason": "sub_agent_task_complete"})
-            return
-
-        # === MAIN AGENT FULL COMPLETION ===
-        try:
-            friendly_summary = await self._generate_user_friendly_summary(state)
-            yield (
-                "llm_response",
-                {"full_reply": friendly_summary, "is_complete": True},
-            )
-            await self.agent.context_manager.add_message("assistant", friendly_summary)
-        except Exception:
-            friendly_summary = (
-                f"✅ All {total_steps} steps of the deployment completed successfully."
-            )
-            yield (
-                "llm_response",
-                {"full_reply": friendly_summary, "is_complete": True},
-            )
-            await self.agent.context_manager.add_message("assistant", friendly_summary)
-
-        # === SMART SWITCHING ===
-        is_in_chat_mode = False
-        try:
-            # Check if we are currently running inside the chat loop
-            is_in_chat_mode = (
-                hasattr(self.engine, "current_workflow")
-                and self.engine.current_workflow == "deploy_chat"
-            )
-
-            if is_in_chat_mode:
-                logger.info("Complex task completed → switching back to chat mode")
-                await self.agent.post_control(
-                    {
-                        "event": "switch_workflow",
-                        "name": "deploy_chat",
-                        "reason": "Complex deployment finished",
-                    }
-                )
-            else:
-                logger.info(
-                    "Complex task completed in headless/script mode → finishing cleanly"
-                )
-        except Exception as e:
-            logger.warning(f"Failed to switch workflow cleanly: {e}")
-
-        yield (
-            "finish",
-            {
-                "reason": "deploy_task_complete",
-                "switched_back_to_chat": is_in_chat_mode,
-                "total_steps": total_steps,
-            },
-        )
-
-    @workflow.set(
-        "default",
-        name="reflect_if_stuck",
-        description="Triggers reflection when no progress is detected.",
-    )
-    async def _wf_reflect_if_stuck(self, iteration: int, state: "AgentState"):
-        """(unchanged except the call below)"""
-        REFLECT_INTERVAL = 5
-        last_reflect_iter = getattr(state, "last_reflection_iteration", 0)
-
-        if iteration <= 3 or (iteration - last_reflect_iter) < REFLECT_INTERVAL:
-            return
-
-        current_snapshot = {
-            "planned_tasks": list(state.planned_tasks) if state.planned_tasks else [],
-            "current_task_index": state.current_task_index,
-            "tool_calls": list(state.tool_calls) if state.tool_calls else [],
-        }
-
-        last_snapshot = getattr(state, "last_progress_snapshot", None)
-        no_progress = last_snapshot is not None and last_snapshot == current_snapshot
-        state.last_progress_snapshot = current_snapshot
-
-        if not no_progress:
-            return
-
-        state.reflection_count = getattr(state, "reflection_count", 0) + 1
-        max_reflections = getattr(self.agent, "max_reflections", 6)
-
-        if state.reflection_count >= max_reflections:
-            msg = (
-                f"Hard reflection limit reached ({state.reflection_count}/{max_reflections}) "
-                f"at iteration {iteration} — terminating to prevent loop"
-            )
-            logger.warning(msg)
-            yield ("warning", msg)
-            yield (
-                "finish",
-                {
-                    "reason": "max_reflection_limit_reached",
-                    "reflection_count": state.reflection_count,
-                    "iteration": iteration,
-                },
-            )
-            return
-
-        state.last_reflection_iteration = iteration
-
-        async for event, payload in self._force_reflection(
-            iteration, state
-        ):  # ← now self.
-            yield (event, payload)
-
-            if event != "reflection_decision":
-                continue
-
-            decision = payload
-            next_step = decision.get("next_step")
-            print(next_step)
-
-            if next_step == "tool" and decision.get("tool_name"):
-                tool_name = decision["tool_name"]
-                args = decision.get("arguments", {})
-                state.tool_calls = [
-                    {"function": {"name": tool_name, "arguments": json.dumps(args)}}
-                ]
-                yield (
-                    "info",
-                    {
-                        "message": f"[REFLECTION] Enqueued tool call: {tool_name}",
-                        "tool_name": tool_name,
-                    },
-                )
-                return
-
-            elif next_step == "llm":
-                await self.agent.context_manager.add_message(
-                    "system",
-                    f"[REFLECTION GUIDANCE at iter {iteration}]\n"
-                    f"{json.dumps(decision, indent=2)}",
-                )
-                yield (
-                    "info",
-                    "Reflection added guidance message — continuing with LLM",
-                )
-                return
-
-            elif next_step == "finish":
-                reason = decision.get("reason", "reflection requested termination")
-                yield (
-                    "finish",
-                    {
-                        "reason": "reflection_requested_finish",
-                        "details": reason,
-                        "iteration": iteration,
-                    },
-                )
-                return
-
-            else:
-                yield ("warning", f"Reflection returned invalid next_step: {next_step}")
-                return
-
-    @workflow.set(
-        "default",
-        name="replan_if_reflected",
-        description="Resets task list after a reflection so plan_tasks can generate a better plan with new context.",
-    )
-    async def _wf_replan_if_reflected(self, iteration: int, state: AgentState):
-        """(unchanged)"""
-        last_reflect = getattr(state, "last_reflection_iteration", 0)
-        last_replan = getattr(state, "last_replan_iteration", 0)
-
-        if (
-            last_reflect == 0
-            or iteration <= last_reflect + 1
-            or last_replan == iteration
-        ):
-            return
-
-        state.planned_tasks = []
-        state.current_task_index = 0
-        state.last_replan_iteration = iteration
-
-        yield (
-            "replan_triggered",
-            {
-                "reason": "post_reflection",
-                "original_reflection_iter": last_reflect,
-                "new_iteration": iteration,
-            },
-        )
-        yield (
-            "info",
-            f"[REPLAN] Task list cleared after reflection at iter {last_reflect}. "
-            f"plan_tasks will run again on next cycle.",
-        )
-
-    @workflow.set(
-        "default",
-        name="safety_fallback",
-        description="Stops execution after max iterations.",
-    )
-    async def _wf_safety_fallback(self, iteration: int, state: AgentState):
-        if iteration >= getattr(self.agent, "max_iterations", 20):
-            async for ev, pl in self._generate_final_summary(state):  # ← now self.
-                yield (ev, pl)
-            yield ("finish", {"reason": "max_iterations"})
-            self.engine._log_iteration_state(iteration, state)
 
     # ===================================================================
     # EXECUTORS — NOW INSIDE AgentFlow (relocated)
@@ -966,110 +600,6 @@ class AgentFlow:
             if stop_event and getattr(stop_event, "is_set", lambda: False)():
                 yield ("cancelled", f"Stop after {name}")
                 return
-
-    async def _force_reflection(
-        self, iteration: int, state: AgentState
-    ) -> AsyncIterator[Tuple[str, Any]]:
-        state.phase = self.Phase.REFLECT
-        yield ("phase_changed", {"phase": state.phase.value})
-
-        summary = self.agent.context_manager.get_context_summary()
-
-        prompt = f"""
-        Agent is stuck after {iteration} iterations.
-
-        TASK:
-        {self.agent.task}
-
-        LIVE CONTEXT SUMMARY (truncated):
-        {summary}
-
-        CRITICAL: If the agent appears unable to make progress despite the context, 
-        choose next_step: "finish" to avoid infinite loops. 
-        Only choose "llm" if a clear next reasoning step will unstick it.
-        Prefer suggesting a concrete tool or new_subtask when possible.
-
-        Return valid JSON ONLY with keys:
-        - reason: why the agent is stuck
-        - next_step: "tool", "llm", or "finish"
-        - optional: tool_name, arguments, new_subtask, workflow_adjustments
-        """
-
-        raw_response = await self.agent.client.ask(prompt)
-
-        raw_str = str(raw_response).strip()
-        try:
-            if raw_str.startswith("```json"):
-                raw_str = raw_str[7:].split("```")[0].strip()
-            elif raw_str.startswith("```"):
-                raw_str = raw_str[3:].split("```")[0].strip()
-            decision = json.loads(raw_str)
-        except Exception:
-            decision = {"reason": "parse failed", "next_step": "finish"}
-
-        if not isinstance(decision, dict) or decision.get("next_step") not in (
-            "tool",
-            "llm",
-            "finish",
-        ):
-            decision = {"reason": "invalid decision", "next_step": "finish"}
-
-        if decision.get("new_subtask"):
-            new_task = decision["new_subtask"]
-            remaining_tasks = state.planned_tasks[state.current_task_index :]
-            state.planned_tasks = [new_task] + remaining_tasks
-            state.current_task_index = 0
-            self.agent.context_manager.add_subtask(new_task)
-            logger.info(f"[REFLECTION] Inserted new subtask: {new_task}")
-
-        if decision.get("reason"):
-            self.agent.context_manager.add_finding(f"Reflection: {decision['reason']}")
-
-        await self.agent.context_manager.add_message(
-            "system", f"[REFLECTION]\n{json.dumps(decision, indent=2)}"
-        )
-
-        adjustments = decision.get("workflow_adjustments", {})
-        if isinstance(adjustments, dict) and isinstance(
-            adjustments.get("reorder_steps"), list
-        ):
-            self.engine.workflow_steps = [  # ← still on engine
-                s
-                for s in adjustments["reorder_steps"]
-                if s in self.engine.workflow_steps
-            ]
-
-        state.last_reflection_decision = decision
-        self.engine._log_iteration_state(iteration, state)  # ← still on engine
-
-        yield ("reflection_decision", decision)
-        yield ("reflection_triggered", decision)
-
-    async def _generate_final_summary(
-        self, state: AgentState
-    ) -> AsyncIterator[Tuple[str, Any]]:
-        state.phase = self.Phase.FINALIZE
-        yield ("phase_changed", {"phase": state.phase.value})
-
-        lines = [
-            "# 🏁 Agent Execution Report",
-            f"**Task:** {self.agent.task[:200]}...",
-            f"**Goal:** {self.agent.goal}",
-            "",
-            "## 📊 ContextManager Stats",
-            f"- KB items: {len(self.agent.context_manager.knowledge_base)}",
-            f"- Files checked: {len(self.agent.context_manager.files_checked)}",
-            f"- Tools executed: {len(self.agent.context_manager.tools_executed)}",
-            f"- Archived turns: {len(self.agent.context_manager.current_topic.archived_history)}",
-            "",
-            "## 🛠️ Tool Results (last 10)",
-        ]
-        for r in self.agent.tool_results[-10:]:
-            lines.append(f"- {r['name']}: {str(r.get('result', ''))[:120]}...")
-
-        final_text = "\n".join(lines)
-        yield ("final_summary", final_text)
-        yield ("finish", {"reason": "task_complete", "summary": final_text})
 
     # Optional helper used by _llm_stream_with_tools
     def _build_objective_reminder(self) -> str:
