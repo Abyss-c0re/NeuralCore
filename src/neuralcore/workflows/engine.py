@@ -28,7 +28,7 @@ class WorkflowEngine:
         self.registered_workflows: Dict[str, Dict[str, Any]] = {}
         self._step_handlers: Dict[str, Optional[Callable]] = {}
 
-        self.current_workflow_name: str = "default"
+        self.current_workflow_name: str = "orchestrator"
         self.workflow_steps: List[Union[str, Dict[str, Any]]] = []
         self.workflow_description: str = ""
         self._custom_conditions: Dict[
@@ -48,13 +48,20 @@ class WorkflowEngine:
     # REGISTRATION & LOADER (stays in WorkflowEngine)
     # ===================================================================
     def register_workflow(
-        self, name: str, description: str, steps: List[Union[str, Dict[str, Any]]]
+        self, 
+        name: str, 
+        description: str, 
+        steps: List[Union[str, Dict[str, Any]]],
+        hidden_toolsets: Optional[Union[str, List[str]]] = None
     ):
         self.registered_workflows[name] = {
             "description": description,
             "steps": steps.copy(),
+            "hidden_toolsets": hidden_toolsets,   # store at workflow level
         }
         logger.info(f"✅ Registered workflow '{name}': {description}")
+        if hidden_toolsets:
+            logger.info(f"   → Hidden toolsets: {hidden_toolsets}")
 
     def register_step(self, name: str, handler: Callable):
         self._step_handlers[name] = handler
@@ -693,13 +700,29 @@ class WorkflowEngine:
                     continue
 
                 # =============================================================
-                # NEW: Configure tools for this specific step using @workflow.set
+                # Configure tools for this specific step
                 # =============================================================
                 if hasattr(self.agent, "manager"):
-                    self.agent.manager.configure_for_step(step_name)
+                    # Only call configure_for_step for steps that explicitly want it via decorator
+                    # Sub-agents rely more on assigned_tools + manual loading in start_complex_deployment
+                    if not (
+                        getattr(self.agent, "sub_agent", False)
+                        and self.current_workflow_name == "sub_agent_execute"
+                    ):
+                        self.agent.manager.configure_for_step(step_name,self)
+                    else:
+                        # For sub-agents: very light touch
+                        if step_name == "llm_stream":
+                            logger.debug(
+                                "Sub-agent llm_stream: preserving tools (assigned_tools take precedence)"
+                            )
+                            self.agent.manager.unload_tools(
+                                ["browse_tools"]
+                            )  # only remove discovery tool
+                        # Do NOT call full configure_for_step — it would unload assigned tools
                 else:
                     logger.warning(
-                        f"Agent has no manager. Skipping tool configuration for step '{step_name}'."
+                        f"Agent has no manager. Skipping tool config for '{step_name}'."
                     )
 
                 # Keep backward compatibility with old "toolset" override in step config
@@ -765,7 +788,6 @@ class WorkflowEngine:
                                 yield emitted
 
                             if result["switch_workflow"]:
-                                # already switched above
                                 pass
 
                             if result["go_to_target"] is not None:
@@ -838,6 +860,7 @@ class WorkflowEngine:
                     },
                 )
 
+                # Handle control messages
                 control = await self._drain_control(control_queue)
                 if control:
                     event, payload = control

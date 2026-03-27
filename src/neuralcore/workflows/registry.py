@@ -16,17 +16,18 @@ logger = Logger.get_logger()
 
 class Workflow:
     """
-    Enhanced Workflow Registry with per-step tool (action set) assignment.
+    Enhanced Workflow Registry with per-step tool control.
 
-    This is the recommended way to control which tools are available
-    for each step in a workflow.
+    Supports:
+      - toolsets: which toolsets to load
+      - tools: specific individual tools
+      - hidden_toolsets: toolsets to explicitly hide/unload for this step
+      - dynamic_allowed: whether browse_tools is permitted
     """
 
     def __init__(self):
         self.handlers: Dict[str, Callable] = {}
-        self.workflows: Dict[
-            str, Dict[str, Any]
-        ] = {}  # workflow_name → workflow metadata
+        self.workflows: Dict[str, Dict[str, Any]] = {}  # workflow_name → metadata
         self.metadata: Dict[str, Dict[str, Any]] = {}  # step_name → step metadata
 
     def set(
@@ -35,78 +36,64 @@ class Workflow:
         *,
         toolsets: Union[str, List[str], None] = None,
         tools: Union[str, List[str], None] = None,
+        hidden_toolsets: Union[str, List[str], None] = None,  # ← NEW
         dynamic_allowed: bool = True,
-        workflow_description: Optional[str] = None,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
         **kwargs,
     ):
         """
         Decorator to register a workflow step with explicit tool configuration.
-
-        Args:
-            workflow_name: Name of the workflow this step belongs to
-            toolsets: Toolsets (ActionSets) to load for this step (recommended)
-            tools: Specific individual tool names to load
-            dynamic_allowed: Whether to allow 'browse_tools' for dynamic discovery
-            workflow_description: Optional description for the entire workflow
-
-        Example:
-            @workflow.set("ResearchWorkflow",
-                          toolsets=["web_search", "browse_page", "knowledge"],
-                          name="gather_information",
-                          description="Search and collect relevant data")
-            async def _wf_gather_information(agent, query: str):
-                ...
-
-            @workflow.set("WritingWorkflow",
-                          toolsets=["writing", "editor"],
-                          tools=["format_markdown"],
-                          dynamic_allowed=False)  # strict mode
-            def _wf_write_section(agent, content: str):
-                ...
         """
 
         def decorator(fn: Callable):
-            # Resolve step name
-            step_name = kwargs.get("name") or fn.__name__
+            step_name = name or kwargs.get("name") or fn.__name__
             if step_name.startswith("_wf_"):
                 step_name = step_name[4:]
 
-            # Resolve description
-            description = kwargs.get(
-                "description", fn.__doc__ or f"Workflow step: {step_name}"
+            desc = (
+                description
+                or kwargs.get("description")
+                or fn.__doc__
+                or f"Step: {step_name}"
             )
 
-            # Normalize toolsets and tools
-            normalized_toolsets = self._normalize_list(toolsets)
-            normalized_tools = self._normalize_list(tools)
+            # Normalize all lists
+            norm_toolsets = self._normalize_list(toolsets)
+            norm_tools = self._normalize_list(tools)
+            norm_hidden = self._normalize_list(hidden_toolsets)
 
-            # Register the handler
+            # Register handler
             self.handlers[step_name] = fn
 
-            # Auto-create workflow group
+            # Auto-create workflow entry
             if workflow_name not in self.workflows:
                 self.workflows[workflow_name] = {
-                    "description": workflow_description or f"Workflow: {workflow_name}",
+                    "description": kwargs.get(
+                        "workflow_description", f"Workflow: {workflow_name}"
+                    ),
                     "steps": [],
                 }
 
             if step_name not in self.workflows[workflow_name]["steps"]:
                 self.workflows[workflow_name]["steps"].append(step_name)
 
-            # Store rich metadata for this step
+            # Store rich metadata
             self.metadata[step_name] = {
-                "description": description,
+                "description": desc,
                 "workflow": workflow_name,
-                "toolsets": normalized_toolsets,
-                "tools": normalized_tools,
+                "toolsets": norm_toolsets,
+                "tools": norm_tools,
+                "hidden_toolsets": norm_hidden,  # ← NEW
                 "dynamic_allowed": dynamic_allowed,
                 "full_name": fn.__name__,
             }
 
             logger.info(
                 f"✅ Step '{step_name}' registered to workflow '{workflow_name}' "
-                f"(toolsets={normalized_toolsets or 'None'}, "
-                f"tools={normalized_tools or 'None'}, "
+                f"(toolsets={norm_toolsets or '-'}, "
+                f"hidden={norm_hidden or '-'}, "
+                f"tools={norm_tools or '-'}, "
                 f"dynamic_allowed={dynamic_allowed})"
             )
 
@@ -115,7 +102,7 @@ class Workflow:
         return decorator
 
     def _normalize_list(self, value: Union[str, List[str], None]) -> List[str]:
-        """Convert string or list input into a clean list of strings."""
+        """Convert string, list, or None into a clean list of strings."""
         if value is None:
             return []
         if isinstance(value, str):
@@ -127,91 +114,58 @@ class Workflow:
     # ====================== Public Query Methods ======================
 
     def get_step_metadata(self, step_name: str) -> Optional[Dict[str, Any]]:
-        """Return metadata for a specific step (including tool configuration)."""
+        """Return full metadata for a step (including hidden_toolsets)."""
         return self.metadata.get(step_name)
 
     def get_workflow_steps(self, workflow_name: str) -> List[str]:
-        """Return list of all step names in a given workflow."""
         return self.workflows.get(workflow_name, {}).get("steps", [])
 
     def get_workflow_metadata(self, workflow_name: str) -> Optional[Dict[str, Any]]:
-        """Return metadata for an entire workflow."""
         return self.workflows.get(workflow_name)
 
     def list_all_steps(self) -> List[Dict[str, Any]]:
-        """Debug helper: List all registered steps with their tool settings."""
+        """Debug helper."""
         steps = []
         for step_name, meta in self.metadata.items():
             steps.append(
                 {
                     "step": step_name,
-                    "workflow": meta["workflow"],
-                    "description": meta["description"],
-                    "toolsets": meta["toolsets"],
-                    "tools": meta["tools"],
-                    "dynamic_allowed": meta["dynamic_allowed"],
+                    "workflow": meta.get("workflow"),
+                    "toolsets": meta.get("toolsets"),
+                    "hidden_toolsets": meta.get("hidden_toolsets"),
+                    "tools": meta.get("tools"),
+                    "dynamic_allowed": meta.get("dynamic_allowed", True),
                 }
             )
         return sorted(steps, key=lambda x: (x["workflow"], x["step"]))
 
-    def register_to(self, agent, step_source: Union[type, object]):
-        """
-        Register all _wf_* methods from a class or instance into the agent's workflow.
-        Note: Tool configuration (toolsets/tools) must still be defined using @workflow.set
-        """
-        count = 0
-        source_class = (
-            step_source if isinstance(step_source, type) else step_source.__class__
-        )
-        workflow_name = getattr(
-            source_class, "__workflow_name__", source_class.__name__.lower()
-        )
-
-        instance = step_source(agent) if isinstance(step_source, type) else step_source
-
-        for attr_name in dir(instance):
-            if attr_name.startswith("_wf_"):
-                method = getattr(instance, attr_name)
-                if callable(method):
-                    step_name = attr_name[4:]
-                    # Assuming your engine has _step_handlers
-                    if hasattr(agent, "workflow") and hasattr(
-                        agent.workflow, "_step_handlers"
-                    ):
-                        agent.workflow._step_handlers[step_name] = method
-                    count += 1
-
-        logger.info(
-            f"✅ Registered {count} steps from {instance.__class__.__name__} "
-            f"into workflow '{workflow_name}'"
-        )
-
     def debug_print(self):
-        """Print a nice overview of all registered workflows and steps."""
-        print("\n" + "=" * 90)
-        print("📋 WORKFLOW REGISTRY")
-        print("=" * 90)
+        """Nice debug output."""
+        print("\n" + "=" * 100)
+        print("📋 WORKFLOW REGISTRY (with hidden_toolsets support)")
+        print("=" * 100)
 
         for wf_name, wf_meta in self.workflows.items():
             print(f"\n🔹 Workflow: {wf_name}")
-            print(f"   Description: {wf_meta['description']}")
+            print(f"   Description: {wf_meta.get('description', '')}")
             print(f"   Steps: {len(wf_meta['steps'])}")
 
             for step_name in wf_meta["steps"]:
                 meta = self.metadata.get(step_name, {})
                 ts = meta.get("toolsets", [])
+                hidden = meta.get("hidden_toolsets", [])
                 tl = meta.get("tools", [])
                 dyn = "✓" if meta.get("dynamic_allowed", True) else "✗"
 
                 print(
-                    f"     • {step_name:25} | toolsets={ts or '-':30} | "
-                    f"tools={tl or '-':20} | dynamic={dyn}"
+                    f"     • {step_name:30} | toolsets={ts or '-':25} | "
+                    f"hidden={hidden or '-':25} | tools={tl or '-':20} | dynamic={dyn}"
                 )
 
         print(
             f"\n✅ Total Workflows: {len(self.workflows)} | Total Steps: {len(self.metadata)}"
         )
-        print("=" * 90 + "\n")
+        print("=" * 100 + "\n")
 
 
 class Condition:

@@ -216,64 +216,6 @@ class DynamicActionManager:
             f"Added tool '{action.name}' to DynamicCore (origin: {origin_set or 'manual'})"
         )
 
-    def load_tools(self, tool_names: Union[str, List[str]]):
-        """Load specific tools by name (manual / one-off loading)."""
-        if isinstance(tool_names, str):
-            tool_names = [tool_names]
-
-        loaded = []
-        for name in tool_names:
-            if name in self._loaded_tools:
-                continue
-            if name not in self.registry.all_actions:
-                logger.warning(f"Tool '{name}' not found in registry")
-                continue
-
-            action, origin_set = self.registry.all_actions[name]
-            self.add(action, origin_set=origin_set)
-            loaded.append(name)
-
-        if loaded:
-            logger.info(f"Loaded {len(loaded)} individual tools: {', '.join(loaded)}")
-
-    def load_toolsets(self, toolset_names: Union[str, List[str]]) -> int:
-        """Load all actions from one or more named ActionSets."""
-        if isinstance(toolset_names, str):
-            toolset_names = [n.strip() for n in toolset_names.split(",") if n.strip()]
-
-        loaded_count = 0
-        loaded_tools_list = []
-
-        for set_name in toolset_names:
-            if set_name not in self.registry.sets:
-                logger.warning(f"Toolset '{set_name}' not found in registry")
-                continue
-
-            action_set = self.registry.sets[set_name]
-            newly_loaded = []
-
-            for action in action_set.actions:
-                if action.name in self._loaded_tools:
-                    continue
-                # Skip persistent tools if already loaded
-                if action.name in self._persistent_tools:
-                    continue
-
-                self.add(action, origin_set=set_name)
-                newly_loaded.append(action.name)
-                loaded_count += 1
-                loaded_tools_list.append(action.name)
-
-            if newly_loaded:
-                logger.info(
-                    f"Loaded {len(newly_loaded)} tools from set '{set_name}': {', '.join(newly_loaded)}"
-                )
-
-        if loaded_count > 0:
-            logger.info(f"Total new tools loaded from toolsets: {loaded_count}")
-
-        return loaded_count
-
     def select_toolset(self, toolset_names: Union[str, List[str]]) -> int:
         """
         Select one or more toolsets as active.
@@ -302,14 +244,92 @@ class DynamicActionManager:
             logger.warning(f"ActionSet '{set_name}' not found in registry")
         return action_set
 
+    def load_tools(self, tool_names: Union[str, List[str], None] = None):
+        """Load specific tools by name. Safely handles None or empty input."""
+        if not tool_names:
+            return
+
+        if isinstance(tool_names, str):
+            tool_names = [tool_names]
+
+        if not isinstance(tool_names, list):
+            logger.warning(f"Invalid tool_names type: {type(tool_names)}. Skipping.")
+            return
+
+        loaded = []
+        for name in tool_names:
+            if not name or not isinstance(name, str):
+                continue
+            if name in self._loaded_tools:
+                continue
+            if name not in self.registry.all_actions:
+                logger.warning(f"Tool '{name}' not found in registry")
+                continue
+
+            action, origin_set = self.registry.all_actions[name]
+            self.add(action, origin_set=origin_set)
+            loaded.append(name)
+
+        if loaded:
+            logger.info(f"Loaded {len(loaded)} individual tools: {', '.join(loaded)}")
+
+    def load_toolsets(self, toolset_names: Union[str, List[str], None] = None) -> int:
+        """Load all actions from one or more named ActionSets. Safely handles None."""
+        if not toolset_names:
+            return 0
+
+        if isinstance(toolset_names, str):
+            toolset_names = [toolset_names]
+
+        if not isinstance(toolset_names, list):
+            logger.warning(
+                f"Invalid toolset_names type: {type(toolset_names)}. Skipping."
+            )
+            return 0
+
+        loaded_count = 0
+        loaded_tools_list: List[str] = []
+
+        for set_name in toolset_names:
+            if not isinstance(set_name, str) or not set_name.strip():
+                continue
+
+            set_name = set_name.strip()
+            if set_name not in self.registry.sets:
+                logger.warning(f"Toolset '{set_name}' not found in registry")
+                continue
+
+            action_set = self.registry.sets[set_name]
+            newly_loaded = []
+
+            for action in action_set.actions:
+                if action.name in self._loaded_tools:
+                    continue
+                if action.name in self._persistent_tools:
+                    continue
+
+                self.add(action, origin_set=set_name)
+                newly_loaded.append(action.name)
+                loaded_count += 1
+                loaded_tools_list.append(action.name)
+
+            if newly_loaded:
+                logger.info(
+                    f"Loaded {len(newly_loaded)} tools from set '{set_name}': {', '.join(newly_loaded)}"
+                )
+
+        if loaded_count > 0:
+            logger.info(f"Total new tools loaded from toolsets: {loaded_count}")
+
+        return loaded_count
+
     def configure_for_step(
-        self, step_name: str, workflow: Optional["Workflow"] = None
+        self, step_name: str, engine, workflow: Optional["Workflow"] = None
     ) -> int:
         """
-        Configure the dynamic tool set exactly according to the @workflow.set decorator
-        for the current workflow step.
+        Configure tools for a workflow step based on @workflow.set decorator.
+        Supports workflow-level and step-level hidden_toolsets.
         """
-        # If no workflow instance was passed, use the global singleton
         if workflow is None:
             from neuralcore.workflows.registry import workflow as global_workflow
 
@@ -317,46 +337,83 @@ class DynamicActionManager:
 
         if workflow is None:
             logger.warning(
-                f"No Workflow instance available for step '{step_name}'. Unloading all tools."
+                f"No Workflow instance for step '{step_name}'. Unloading all."
             )
             self.unload_all()
             return 0
 
         meta = workflow.get_step_metadata(step_name)
         if not meta:
-            logger.warning(
-                f"No metadata found for step '{step_name}'. Unloading all tools."
-            )
+            logger.warning(f"No metadata for step '{step_name}'. Unloading all.")
             self.unload_all()
             return 0
 
         logger.info(f"🔧 Configuring tools for workflow step: '{step_name}'")
 
-        # 1. Start clean - unload everything non-persistent
-        self.unload_all()
+        # Determine context
+        workflow_name = getattr(workflow, "current_workflow_name", "") or getattr(
+            workflow, "name", ""
+        )
+        is_sub_workflow = workflow_name == "sub_agent_execute"
+
+        # === Smart Sub-Agent Handling ===
+        if is_sub_workflow and step_name == "llm_stream":
+            logger.debug(
+                "Sub-agent llm_stream: preserving assigned tools (flexible mode)"
+            )
+            self.unload_tools(["browse_tools"])
+        else:
+            self.unload_all()
 
         loaded_count = 0
 
-        # 2. Load assigned toolsets (primary recommendation)
-        if meta.get("toolsets"):
-            loaded_count += self.load_toolsets(meta["toolsets"])
+        # 1. Load explicitly allowed toolsets
+        toolsets = meta.get("toolsets")
+        if toolsets:
+            loaded_count += self.load_toolsets(toolsets)
 
-        # 3. Load specific individual tools
-        if meta.get("tools"):
-            self.load_tools(meta["tools"])
-            loaded_count += len(meta["tools"])
+        # 2. Load specific individual tools
+        tools = meta.get("tools")
+        if tools:
+            self.load_tools(tools)
+            loaded_count += len(tools) if isinstance(tools, (list, tuple)) else 1
 
-        # 4. Handle dynamic tool browsing
+        # === 3. Hide unwanted toolsets (workflow-level + step-level) ===
+        hidden_toolsets: List[str] = []
+
+        # Try to get workflow-level hidden_toolsets from the registry via workflow object
+        if engine:
+            wf_meta = engine.registered_workflows.get(workflow_name)
+            if wf_meta and wf_meta.get("hidden_toolsets"):
+                hidden = wf_meta["hidden_toolsets"]
+                if isinstance(hidden, str):
+                    hidden_toolsets.append(hidden)
+                elif isinstance(hidden, (list, tuple)):
+                    hidden_toolsets.extend(hidden)
+
+        # Step-level hidden_toolsets (higher priority)
+        step_hidden = meta.get("hidden_toolsets")
+        if step_hidden:
+            if isinstance(step_hidden, str):
+                hidden_toolsets.append(step_hidden)
+            elif isinstance(step_hidden, (list, tuple)):
+                hidden_toolsets.extend(step_hidden)
+
+        if hidden_toolsets:
+            self.unload_toolsets(hidden_toolsets)
+            logger.info(f"Hidden toolsets for step '{step_name}': {hidden_toolsets}")
+
+        # 4. Dynamic browsing control
         if not meta.get("dynamic_allowed", True):
-            if "browse_tools" in self._loaded_tools:
-                self.unload_tools("browse_tools")
-                logger.debug(f"Disabled 'browse_tools' for strict step '{step_name}'")
+            self.unload_tools(["browse_tools"])
+            logger.debug(f"browse_tools disabled for step '{step_name}'")
 
         current_tools = len(self.current_set.actions)
         logger.info(
             f"✅ Step '{step_name}' configured with {current_tools} tools "
-            f"(toolsets={meta.get('toolsets', [])}, "
-            f"specific_tools={meta.get('tools', [])}, "
+            f"(toolsets={toolsets or '-'}, "
+            f"hidden={hidden_toolsets or '-'}, "
+            f"tools={tools or '-'}, "
             f"dynamic_allowed={meta.get('dynamic_allowed', True)})"
         )
 
