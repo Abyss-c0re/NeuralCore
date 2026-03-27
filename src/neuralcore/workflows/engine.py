@@ -382,10 +382,6 @@ class WorkflowEngine:
     # ===================================================================
 
     async def _drain_control(self, control_queue) -> Optional[Tuple[str, Any]]:
-        """Non-blocking drain of one control message (if any)."""
-        if not control_queue:
-            return None
-
         try:
             msg = await asyncio.wait_for(control_queue.get(), timeout=0.02)
         except asyncio.TimeoutError:
@@ -393,6 +389,8 @@ class WorkflowEngine:
 
         if isinstance(msg, dict):
             event = msg.get("event") or msg.get("action") or msg.get("control")
+
+            # Include sub-agent events
             if event in {
                 "switch_workflow",
                 "go_to",
@@ -403,6 +401,9 @@ class WorkflowEngine:
                 "needs_confirmation",
                 "cancelled",
                 "finish",
+                "sub_agent_progress",
+                "sub_task_completed",
+                "sub_task_failed",
             }:
                 payload = msg.get("payload") or msg.get("data") or msg
                 control_queue.task_done()
@@ -411,6 +412,7 @@ class WorkflowEngine:
         await control_queue.put(msg)
         control_queue.task_done()
         return None
+
 
     async def _iter_handler_events(
         self,

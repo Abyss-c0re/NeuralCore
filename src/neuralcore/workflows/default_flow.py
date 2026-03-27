@@ -58,6 +58,16 @@ async def request_complex_action(agent, reason: str):
 
 @tool("DeployControls", name="GetDeploymentStatus")
 async def get_deployment_status(agent, task_id: Optional[str] = None):
+    # Auto-detect current active task if no ID provided
+    if not task_id:
+        if hasattr(agent, "state") and getattr(agent.state, "sub_task_ids", None):
+            # Pick the first active sub-task (or most recent)
+            task_id = agent.state.sub_task_ids[0]
+        else:
+            # Fall back to last launched task in task_id_map
+            if hasattr(agent.state, "task_id_map") and agent.state.task_id_map:
+                task_id = list(agent.state.task_id_map.values())[-1]
+
     if task_id:
         status = agent.sub_tasks.get(task_id)
         if not status:
@@ -86,7 +96,7 @@ async def get_deployment_status(agent, task_id: Optional[str] = None):
 
         return "\n".join(output)
 
-    # Full overview
+    # Full overview if no specific task is found
     tasks = agent.get_sub_tasks()
     if not tasks:
         return "No background deployments running at the moment."
@@ -315,81 +325,93 @@ Return ONLY JSON:
 
     @workflow.set("orchestrator", name="launch_next_subtask")
     async def _wf_launch_next_subtask(self, iteration: int, state: AgentState):
+        """
+        Launch one or more sub-tasks in parallel for the current task index.
+        Each micro-task is mapped to a sub-agent.
+        """
         if state.current_task_index >= len(state.planned_tasks):
             state.is_complete = True
             return
 
-        idx = state.current_task_index
-        task_desc = state.planned_tasks[idx]
-        assigned_tools = state.task_tool_assignments.get(idx, [])
-
-        name = f"Step {idx + 1}/{len(state.planned_tasks)}: {task_desc[:55]}..."
-
-        task_id = await self.agent.start_complex_deployment(
-            task_description=task_desc,
-            user_facing_name=name,
-            assigned_tools=assigned_tools or None,
-            temperature=0.25,
-            custom_system_prompt=self._build_sub_agent_system_prompt(
-                task_desc, assigned_tools
-            ),
+        # Determine which tasks to launch in this batch
+        # For full parallel: launch all remaining tasks
+        tasks_to_launch = list(
+            enumerate(
+                state.planned_tasks[state.current_task_index :],
+                start=state.current_task_index,
+            )
         )
 
-        state.sub_task_ids = [task_id]
-        state.task_id_map[idx] = task_id
+        launched_ids = []
 
-        if task_id in self.agent.sub_tasks:
-            self.agent.sub_tasks[task_id]["step_number"] = idx + 1
+        for idx, task_desc in tasks_to_launch:
+            assigned_tools = state.task_tool_assignments.get(idx, [])
+            name = f"Step {idx + 1}/{len(state.planned_tasks)}: {task_desc[:55]}..."
 
-        yield (
-            "sub_agent_launched",
-            {
-                "step": idx + 1,
-                "task_id": task_id,
-                "description": task_desc,
-                "assigned_tools": assigned_tools,
-            },
-        )
-        logger.info(
-            f"Launched sub-task {idx + 1} → {task_id} with tools: {assigned_tools}"
-        )
+            task_id = await self.agent.start_complex_deployment(
+                task_description=task_desc,
+                user_facing_name=name,
+                assigned_tools=assigned_tools or None,
+                temperature=0.25,
+                custom_system_prompt=self._build_sub_agent_system_prompt(
+                    task_desc, assigned_tools
+                ),
+            )
+
+            launched_ids.append(task_id)
+            state.task_id_map[idx] = task_id
+
+            if task_id in self.agent.sub_tasks:
+                self.agent.sub_tasks[task_id]["step_number"] = idx + 1
+
+            yield (
+                "sub_agent_launched",
+                {
+                    "step": idx + 1,
+                    "task_id": task_id,
+                    "description": task_desc,
+                    "assigned_tools": assigned_tools,
+                },
+            )
+            logger.info(
+                f"Launched sub-task {idx + 1} → {task_id} with tools: {assigned_tools}"
+            )
+
+        # Store all launched sub-task IDs so wait_for_subtask can track them
+        state.sub_task_ids = launched_ids
+
+        # Move the index to the end since all remaining tasks are launched
+        state.current_task_index = len(state.planned_tasks)
 
     @workflow.set("orchestrator", name="wait_for_subtask")
     async def _wf_wait_for_subtask(self, iteration: int, state: AgentState):
+        """
+        Wait for all currently launched sub-tasks in state.sub_task_ids to complete.
+        Handles multiple sub-tasks running in parallel.
+        """
         if not state.sub_task_ids:
             return
 
-        task_id = state.sub_task_ids[0]
-        task_info = self.agent.sub_tasks.get(task_id, {})
-        task_obj = task_info.get("task_obj")
+        pending_tasks = set(state.sub_task_ids)
 
-        if task_obj and not task_obj.done():
-            try:
-                await asyncio.wait_for(task_obj, timeout=600)  # 10-minute safety
-            except asyncio.TimeoutError:
-                task_info["status"] = "failed"
-                task_info["error"] = "Timeout"
-                yield ("step_failed", {"task_id": task_id, "error": "Timeout"})
-                state.current_task_index += 1
-                state.sub_task_ids = []
-                return
+        while pending_tasks:
+            for task_id in list(pending_tasks):
+                task = self.agent.sub_tasks.get(task_id)
+                if task and task.get("status") in ("completed", "failed", "cancelled"):
+                    yield (
+                        "subtask_done",
+                        {"task_id": task_id, "status": task.get("status")},
+                    )
+                    pending_tasks.remove(task_id)
+                else:
+                    yield ("waiting_for_subtask", {"task_id": task_id})
+            await asyncio.sleep(0.1)
 
-        status = task_info.get("status", "unknown")
+        # Once all sub-tasks are done, clear the sub_task_ids list
+        state.sub_task_ids = []
 
-        if status == "completed":
-            state.current_task_index += 1
-            state.sub_task_ids = []
-            yield (
-                "step_completed",
-                {"step": state.current_task_index, "task_id": task_id},
-            )
-        elif status in ("failed", "cancelled"):
-            error = task_info.get("error", "Unknown")
-            yield ("step_failed", {"task_id": task_id, "error": error})
-            state.current_task_index += 1
-            state.sub_task_ids = []
-        else:
-            logger.warning(f"Sub-task {task_id} still in status: {status}")
+        # Current task index can now advance to the end of the batch
+        state.current_task_index = len(state.planned_tasks)
 
     @workflow.set("orchestrator", name="check_orchestrator_complete")
     async def _wf_check_orchestrator_complete(self, iteration: int, state: AgentState):
