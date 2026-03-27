@@ -228,7 +228,12 @@ class AgentFlow:
 
     # ==================== CHAT LOOP STEP ====================
 
-    @workflow.set("deploy_chat", name="deploy_chat_loop")
+    @workflow.set(
+        "deploy_chat",
+        name="deploy_chat_loop",
+        toolsets=["DeployControls"],  # Only these tools in chat mode
+        dynamic_allowed=True,
+    )
     async def _wf_deploy_chat_loop(self, iteration: int, state: AgentState):
         if iteration == 0:
             state.phase = self.Phase.CHAT
@@ -465,6 +470,8 @@ class AgentFlow:
         "default",
         name="execute_if_tools",
         description="Executes tool calls if present.",
+        toolsets=["FileEditingTools", "TerminalTools"],  # Only execution-related tools
+        dynamic_allowed=False,
     )
     async def _wf_execute_if_tools(self, iteration: int, state: AgentState):
         if not state.tool_calls:
