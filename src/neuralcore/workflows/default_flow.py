@@ -58,21 +58,21 @@ async def request_complex_action(agent, reason: str):
 
 @tool("DeployControls", name="GetDeploymentStatus")
 async def get_deployment_status(agent, task_id: Optional[str] = None):
-    # Auto-detect current active task if no ID provided
+    # Auto-detect current task if no ID provided
     if not task_id:
         if hasattr(agent, "state") and getattr(agent.state, "sub_task_ids", None):
-            # Pick the first active sub-task (or most recent)
-            task_id = agent.state.sub_task_ids[0]
-        else:
-            # Fall back to last launched task in task_id_map
-            if hasattr(agent.state, "task_id_map") and agent.state.task_id_map:
-                task_id = list(agent.state.task_id_map.values())[-1]
+            task_id = agent.state.sub_task_ids[0] if agent.state.sub_task_ids else None
+        elif hasattr(agent.state, "task_id_map") and agent.state.task_id_map:
+            task_id = list(agent.state.task_id_map.values())[-1]
 
-    if task_id:
-        status = agent.sub_tasks.get(task_id)
-        if not status:
-            return f"❌ Task ID `{task_id}` not found."
+    # Lookup in sub_tasks
+    status = agent.sub_tasks.get(task_id) if task_id else None
 
+    # Fallback: task_id exists in task_id_map but not yet in sub_tasks
+    if not status and task_id:
+        return f"⚠ Task ID `{task_id}` registered but not yet active. Try again in a few seconds."
+
+    if status:
         output = [
             f"**Task ID:** `{task_id}`",
             f"**Step:** {status.get('step_number', '?')}",
@@ -88,15 +88,14 @@ async def get_deployment_status(agent, task_id: Optional[str] = None):
                 f"**Assigned Tools:** {', '.join(status['assigned_tools'][:10])}..."
             )
 
-        if status.get("status") in ("completed", "failed"):
-            if status.get("result"):
-                output.append(f"\n**Result:**\n{status['result']}")
-            if status.get("error"):
-                output.append(f"\n**Error:** {status['error']}")
+        if status.get("status") in ("completed", "failed") and status.get("result"):
+            output.append(f"\n**Result:**\n{status['result']}")
+        if status.get("error"):
+            output.append(f"\n**Error:** {status['error']}")
 
         return "\n".join(output)
 
-    # Full overview if no specific task is found
+    # Full overview if no specific task found
     tasks = agent.get_sub_tasks()
     if not tasks:
         return "No background deployments running at the moment."
@@ -110,13 +109,10 @@ async def get_deployment_status(agent, task_id: Optional[str] = None):
     )
 
     lines.append(
-        f"**Progress:** {completed}/{total} steps completed | "
-        f"Running: {running} | Failed: {failed}"
+        f"**Progress:** {completed}/{total} steps completed | Running: {running} | Failed: {failed}"
     )
-
     if hasattr(agent, "task") and agent.task:
         lines.append(f"\n**Main Task:** {agent.task}")
-
     if hasattr(agent.workflow, "current_workflow"):
         lines.append(f"**Current Stage:** {agent.workflow.current_workflow}")
 
@@ -326,15 +322,14 @@ Return ONLY JSON:
     @workflow.set("orchestrator", name="launch_next_subtask")
     async def _wf_launch_next_subtask(self, iteration: int, state: AgentState):
         """
-        Launch one or more sub-tasks in parallel for the current task index.
+        Launch all remaining micro-tasks in parallel for the current task index.
         Each micro-task is mapped to a sub-agent.
+        Ensures tasks are registered in self.agent.sub_tasks before continuing.
         """
         if state.current_task_index >= len(state.planned_tasks):
             state.is_complete = True
             return
 
-        # Determine which tasks to launch in this batch
-        # For full parallel: launch all remaining tasks
         tasks_to_launch = list(
             enumerate(
                 state.planned_tasks[state.current_task_index :],
@@ -358,9 +353,20 @@ Return ONLY JSON:
                 ),
             )
 
+            # Wait for the task to appear in sub_tasks
+            wait_time = 0.0
+            while task_id not in self.agent.sub_tasks and wait_time < 5.0:
+                await asyncio.sleep(0.05)
+                wait_time += 0.05
+
+            if task_id not in self.agent.sub_tasks:
+                logger.warning(f"Task {task_id} not registered in sub_tasks after 5s.")
+
+            # Register in orchestrator state
             launched_ids.append(task_id)
             state.task_id_map[idx] = task_id
 
+            # Update step number safely
             if task_id in self.agent.sub_tasks:
                 self.agent.sub_tasks[task_id]["step_number"] = idx + 1
 
@@ -377,10 +383,7 @@ Return ONLY JSON:
                 f"Launched sub-task {idx + 1} → {task_id} with tools: {assigned_tools}"
             )
 
-        # Store all launched sub-task IDs so wait_for_subtask can track them
         state.sub_task_ids = launched_ids
-
-        # Move the index to the end since all remaining tasks are launched
         state.current_task_index = len(state.planned_tasks)
 
     @workflow.set("orchestrator", name="wait_for_subtask")
