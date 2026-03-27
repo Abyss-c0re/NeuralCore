@@ -75,6 +75,13 @@ class Agent:
         self.task_context: Optional["ContextManager.TaskContext"] = None
         self.assigned_tools: Optional[List[str]] = None
 
+        # === UPGRADE: Current task/role, default workflow, background support ===
+        self.current_task: str = ""
+        self.current_role: str = self.config.get("role", "general_assistant")
+        self.default_workflow: str = self.config.get("default_workflow", "default")
+        self._status: str = "idle"
+        self._background_task: Optional[asyncio.Task] = None
+
         # Production-ready: every Agent (main or sub) starts with clean internal state
         self._reset_state()
 
@@ -119,6 +126,10 @@ class Agent:
         self.executed_signatures: set[tuple] = set()
         self.steps: List[str] = []
         self._stop_event: Optional[asyncio.Event] = None
+
+        # UPGRADE: reset runtime state
+        self.current_task = ""
+        self._status = "idle"
 
     # ---------------- PUBLIC API ----------------
 
@@ -167,6 +178,133 @@ class Agent:
         await self.message_queue.put(item)
         logger.debug(f"Agent '{self.name}' ← control posted: {str(control)[:80]}...")
 
+    async def get_agent_status(self) -> Dict[str, Any]:
+        """Retrieve current agent status with rich LLM-generated summary.
+        Uses ContextManager.get_context_summary() as requested."""
+        try:
+            # Use the rich summary already available in ContextManager
+            context_summary = self.context_manager.get_context_summary(
+                max_messages=8, max_chars=1200
+            )
+
+            status_prompt = f"""You are a status reporter for an AI agent.
+
+            Agent: {self.name} (ID: {self.agent_id})
+            Role: {self.current_role}
+            Current Task: {self.current_task or "None / Idle"}
+            Status: {self._status}
+            Default Workflow: {self.default_workflow}
+            Background Mode: {"Yes" if self._background_task and not self._background_task.done() else "No"}
+            Active Sub-tasks: {len(self.sub_tasks)}
+
+            === CONTEXT SUMMARY ===
+            {context_summary}
+
+            Provide a clear, friendly 4-7 sentence status report for the user. 
+            Include what the agent is working on, any progress, and next expected steps."""
+
+            summary = await self.client.chat(
+                [{"role": "user", "content": status_prompt}],
+                temperature=0.3,
+                max_tokens=700,
+            )
+
+            return {
+                "agent_id": self.agent_id,
+                "name": self.name,
+                "role": self.current_role,
+                "task": self.current_task,
+                "status": self._status,
+                "default_workflow": self.default_workflow,
+                "background_running": bool(
+                    self._background_task and not self._background_task.done()
+                ),
+                "sub_tasks_count": len(self.sub_tasks),
+                "sub_tasks": self.get_sub_tasks(),
+                "context_summary": context_summary[:800] + "..."
+                if len(context_summary) > 800
+                else context_summary,
+                "llm_summary": summary.strip(),
+                "timestamp": asyncio.get_event_loop().time(),
+            }
+
+        except Exception as e:
+            logger.warning(f"get_agent_status failed for {self.name}: {e}")
+            return {
+                "agent_id": self.agent_id,
+                "name": self.name,
+                "status": self._status,
+                "task": self.current_task,
+                "error": str(e),
+                "llm_summary": "Status summary generation failed.",
+            }
+
+    async def run_background(
+        self,
+        user_prompt: Optional[str] = None,
+        system_prompt: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        workflow: Optional[str] = None,
+        **kwargs,
+    ) -> asyncio.Task:
+        """Run the agent fully in the background.
+        Bidirectional communication:
+          • Input  → post_message / post_system_message / post_control
+          • Output → events are automatically forwarded as control messages
+        Returns the background task so it can be awaited/cancelled.
+        """
+        if self._background_task and not self._background_task.done():
+            logger.warning(f"Background task already active for agent '{self.name}'")
+            return self._background_task
+
+        self.current_task = user_prompt or "background processing"
+        self._status = "running_background"
+
+        async def _background_consumer():
+            try:
+                async for event, payload in self.run(
+                    user_prompt=user_prompt,
+                    system_prompt=system_prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    workflow=workflow,
+                    chat_mode=False,
+                    **kwargs,
+                ):
+                    # Forward every workflow event as a control message (bidirectional comms)
+                    control_msg = {
+                        "event": "background_event",
+                        "type": event,
+                        "payload": payload
+                        if isinstance(payload, dict)
+                        else {"content": str(payload)},
+                    }
+                    await self.post_control(control_msg)
+                    logger.debug(f"[BG] {self.name} → {event}")
+
+            except asyncio.CancelledError:
+                logger.info(f"Background run for '{self.name}' was cancelled")
+                raise
+            except Exception as exc:
+                logger.error(f"Background run error in '{self.name}'", exc_info=True)
+                await self.post_control(
+                    {"event": "background_error", "error": str(exc)}
+                )
+            finally:
+                self._status = "idle"
+                self.current_task = ""
+                self._background_task = None
+                logger.info(f"Agent '{self.name}' background run finished")
+
+        self._background_task = asyncio.create_task(
+            _background_consumer(), name=f"bg_{self.agent_id}"
+        )
+        logger.info(
+            f"Agent '{self.name}' started in BACKGROUND mode (task={self._background_task.get_name()})"
+        )
+        return self._background_task
+
     async def run(
         self,
         user_prompt: Optional[str] = None,
@@ -185,6 +323,10 @@ class Agent:
         if stop_event is None:
             stop_event = asyncio.Event()
 
+        # UPGRADE: track current task + use default workflow
+        self.current_task = user_prompt or "headless processing"
+        self._status = "running"
+
         if chat_mode:
             logger.info(
                 f"Agent '{self.name}' → Starting CHAT mode with workflow 'deploy_chat'"
@@ -201,10 +343,11 @@ class Agent:
                 workflow="deploy_chat",
             ):
                 yield event, payload
+            self._status = "idle"
             return
 
         logger.info(f"Agent '{self.name}' → Starting HEADLESS mode")
-        target_workflow = workflow or "default"
+        target_workflow = workflow or self.default_workflow
 
         try:
             if user_prompt and str(user_prompt).strip():
@@ -225,7 +368,7 @@ class Agent:
                     logger.debug(f"Headless received control: {event}")
 
                     if event == "switch_workflow":
-                        wf_name = msg.get("name", "default")
+                        wf_name = msg.get("name", self.default_workflow)
                         logger.info(f"Headless switching to workflow: {wf_name}")
                         try:
                             self.workflow.switch_workflow(wf_name)
@@ -272,6 +415,8 @@ class Agent:
             logger.error(f"Headless run error: {e}", exc_info=True)
             raise
         finally:
+            self._status = "idle"
+            self.current_task = ""
             logger.info(f"Agent '{self.name}' headless run finished")
 
     async def start_complex_deployment(
@@ -319,6 +464,9 @@ class Agent:
 
             sub_agent.task = task_description
             sub_agent.goal = task_description
+            # UPGRADE: propagate current task to sub-agent
+            sub_agent.current_task = task_description
+            sub_agent.current_role = f"sub-agent:{display_name}"
 
             coro = self._run_sub_agent_internal(sub_agent, task_id, task_description)
             background_task = asyncio.create_task(coro, name=task_id)
@@ -343,18 +491,33 @@ class Agent:
 
         try:
             assigned = getattr(sub_agent, "assigned_tools", None)
-            tool_hint = (
-                f"\n\nAvailable tools: {', '.join(assigned[:15])}{', ...' if assigned and len(assigned) > 15 else ''}"
-                if assigned
-                else ""
-            )
 
-            sub_system = f"""You are a precise sub-agent working on one specific step.
-            Task: {task_description}{tool_hint}
+            # === FORCE STRICT ISOLATION + TOOL RESTRICTION ===
+            if assigned:
+                logger.info(
+                    f"[SUB-AGENT ISOLATION] Restricting to {len(assigned)} tools: {assigned[:10]}"
+                )
+                sub_agent.manager.unload_all()
+                sub_agent.manager.load_tools(assigned)
+                # Safe core tools only
+                for t in ["GetContext", "GetDeploymentStatus"]:
+                    if (
+                        t in sub_agent.registry.all_actions
+                        and not sub_agent.manager.is_loaded(t)
+                    ):
+                        sub_agent.manager.load_tools([t])
+            else:
+                logger.warning(
+                    "[SUB-AGENT] No assigned_tools - using minimal core only"
+                )
+                sub_agent.manager.unload_all()
+                sub_agent.manager.load_tools(["GetContext", "GetDeploymentStatus"])
 
-            Complete ONLY this step. Be thorough but focused.
-            When done, output a clear summary of what you accomplished.
-            Do NOT claim the entire project is finished."""
+            # Strong isolated prompt - sub-agent knows NOTHING about other steps
+            sub_system = f"""You are a precise sub-agent executing **ONE single step only**.
+
+            TASK: {task_description}
+            """
 
             async for event, payload in sub_agent.workflow.run(
                 user_prompt=task_description,
@@ -372,6 +535,9 @@ class Agent:
                             source=payload.get("name", "tool"),
                             metadata=payload.get("args", {}),
                         )
+
+            # === CLEAN NOISE: Keep only important data added via add_external_content ===
+            self.context_manager.prune_sub_agent_noise()
 
             summary = await self._generate_deployment_summary(
                 sub_agent, task_description
