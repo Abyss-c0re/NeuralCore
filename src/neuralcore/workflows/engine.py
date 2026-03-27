@@ -123,34 +123,123 @@ class WorkflowEngine:
         return resolved
 
     def _get_state_value(self, key: str, state: AgentState) -> Any:
-        key = key.lower().replace(" ", "_").replace("-", "_")
+        """Core state accessor with rich built-in conditions for reflection, sub-tasks, and safety."""
+        key = key.lower().replace(" ", "_").replace("-", "_").replace(":", "_")
 
-        # Direct state attributes
+        # Direct attribute or property access (safe handling)
         if hasattr(state, key):
-            return getattr(state, key)
+            value = getattr(state, key)
+            # Safely resolve properties
+            if isinstance(value, property):
+                try:
+                    return value.__get__(state, type(state))
+                except Exception:
+                    return None
+            return value
 
-        # Computed helpers
         history = getattr(state, "iteration_history", [])
+
+        # Basic iteration & reflection
         if key == "iteration":
             return len(history)
-        if key == "has_tools":
-            return bool(getattr(state, "tool_calls", None))
-        if key == "is_complete":
-            return bool(getattr(state, "is_complete", False))
         if key == "reflection_count":
             return getattr(state, "reflection_count", 0)
-        if key == "no_tools_recently" or key == "no_tools_last_5":
-            return self._has_no_tools_recently(state, 5)
-        if key == "tool_count":
-            return len(getattr(state, "tool_calls", []))
+        if key == "max_reflections_reached":
+            return getattr(state, "reflection_count", 0) >= getattr(
+                self.agent, "max_reflections", 3
+            )
 
-        # ContextManager helpers
-        if hasattr(self.agent, "context_manager"):
-            cm = self.agent.context_manager
-            if hasattr(cm, key):
-                return getattr(cm, key)
-            if key in ("knowledge_items", "kb_size"):
-                return len(getattr(cm, "knowledge_base", []))
+        # Sub-task / Multi-agent conditions
+        if hasattr(self.agent, "get_sub_tasks"):
+            sub_tasks = self.agent.get_sub_tasks()
+
+            if key in ("sub_task_count", "sub_tasks_total"):
+                return len(sub_tasks)
+            if key == "active_sub_tasks_count":
+                return sum(
+                    1 for t in sub_tasks.values() if t.get("status") == "running"
+                )
+            if key == "sub_tasks_completed":
+                return sum(
+                    1 for t in sub_tasks.values() if t.get("status") == "completed"
+                )
+            if key == "sub_tasks_failed":
+                return sum(1 for t in sub_tasks.values() if t.get("status") == "failed")
+
+            if key == "all_sub_tasks_completed":
+                return len(sub_tasks) > 0 and all(
+                    t.get("status") in ("completed", "failed", "cancelled")
+                    for t in sub_tasks.values()
+                )
+            if key == "any_sub_task_failed":
+                return any(t.get("status") == "failed" for t in sub_tasks.values())
+            if key == "all_sub_tasks_successful":
+                return len(sub_tasks) > 0 and all(
+                    t.get("status") == "completed" for t in sub_tasks.values()
+                )
+            if key == "sub_tasks_success_rate":
+                completed = sum(
+                    1 for t in sub_tasks.values() if t.get("status") == "completed"
+                )
+                total = len(sub_tasks)
+                return completed / total if total > 0 else 0.0
+
+        # Reflection & Self-correction
+        if key == "needs_reflection":
+            reflection_count = getattr(state, "reflection_count", 0)
+            max_ref = getattr(self.agent, "max_reflections", 3)
+            if reflection_count >= max_ref:
+                return False
+
+            tool_results = (
+                getattr(state, "tool_results", [])
+                if hasattr(state, "tool_results")
+                else []
+            )
+            if tool_results:
+                last = str(tool_results[-1].get("result", "")).lower()
+                if any(
+                    w in last
+                    for w in ["error", "failed", "uncertain", "incomplete", "try again"]
+                ):
+                    return True
+
+            recent = history[-3:] if history else []
+            return all(not h.get("executed_functions") for h in recent)
+
+        # Progress detection
+        if key == "no_progress_last_n":
+            n = 3
+            recent = history[-n:] if history else []
+            return all(
+                not h.get("executed_functions") and not h.get("tool_calls")
+                for h in recent
+            )
+
+        if key == "error_rate_high":
+            results = (
+                getattr(state, "tool_results", [])[-10:]
+                if hasattr(state, "tool_results")
+                else []
+            )
+            errors = sum(
+                1
+                for r in results
+                if "error" in str(r.get("result", "")).lower()
+                or "failed" in str(r.get("result", "")).lower()
+            )
+            return errors >= 3
+
+        # Human-in-the-loop
+        if key in ("needs_human_approval", "pending_approval", "needs_approval"):
+            return getattr(state, "needs_approval", False)
+
+        # Last step
+        if key == "last_step_was":
+            if history:
+                last_steps = history[-1].get("workflow_steps_run", [])
+                return last_steps[-1] if last_steps else None
+            return None
 
         return None
 
@@ -204,13 +293,21 @@ class WorkflowEngine:
         return False
 
     def _evaluate_condition(self, cond: Any, state: AgentState) -> bool:
+        """Enhanced condition evaluator with support for string shorthand."""
         if cond is None:
             return True
         if isinstance(cond, bool):
             return cond
+
+        # NEW: Support simple string conditions like "needs_reflection", "all_sub_tasks_completed"
+        if isinstance(cond, str):
+            value = self._get_state_value(cond, state)
+            return bool(value) if value is not None else False
+
         if not isinstance(cond, dict):
             return bool(cond)
 
+        # Keep your original custom condition support (in case you still want it for very advanced cases)
         if "custom" in cond:
             custom = cond["custom"]
             if isinstance(custom, str):
@@ -232,6 +329,7 @@ class WorkflowEngine:
 
             return False
 
+        # Logical combinators
         if "and" in cond and isinstance(cond["and"], (list, tuple)):
             return all(self._evaluate_condition(item, state) for item in cond["and"])
         if "or" in cond and isinstance(cond["or"], (list, tuple)):
@@ -239,6 +337,7 @@ class WorkflowEngine:
         if "not" in cond:
             return not self._evaluate_condition(cond["not"], state)
 
+        # Standard key-operator-value conditions
         for key, val in cond.items():
             actual = self._get_state_value(key, state)
             if isinstance(val, dict):
