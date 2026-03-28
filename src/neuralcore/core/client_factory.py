@@ -5,6 +5,7 @@ from neuralcore.core.client import LLMClient
 from neuralcore.actions.actions import Action, ActionSet
 
 from neuralcore.utils.config import ConfigLoader, get_loader
+from neuralcore.actions.manager import registry
 
 
 class ClientFactory:
@@ -28,6 +29,8 @@ class ClientFactory:
 
         for name in clients_cfg:
             self.clients[name] = self._create(name)
+
+        self.register_tool_clients()
 
         return self.clients
 
@@ -107,7 +110,7 @@ class ClientFactory:
 
     # ----------------------
     # Tool registration
-    def register_tool_clients(self, registry):
+    def register_tool_clients(self):
         """
         Register clients marked with `register_as_tool: true` as tools.
         Supports method-level overrides from config.
