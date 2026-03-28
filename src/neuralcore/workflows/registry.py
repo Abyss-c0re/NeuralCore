@@ -22,7 +22,7 @@ class Workflow:
       - toolsets: which toolsets to load
       - tools: specific individual tools
       - hidden_toolsets: toolsets to explicitly hide/unload for this step
-      - dynamic_allowed: whether browse_tools is permitted
+      - dynamic_allowed: whether BrowseTools is permitted
     """
 
     def __init__(self):

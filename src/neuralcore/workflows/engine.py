@@ -719,7 +719,7 @@ class WorkflowEngine:
                                 "Sub-agent llm_stream: preserving tools (assigned_tools take precedence)"
                             )
                             self.agent.manager.unload_tools(
-                                ["browse_tools"]
+                                ["BrowseTools"]
                             )  # only remove discovery tool
                         # Do NOT call full configure_for_step — it would unload assigned tools
                 else:

@@ -194,8 +194,8 @@ class DynamicActionManager:
             str, Set[str]
         ] = {}  # set_name → {tool_names loaded from it}
 
-        # Always keep browse_tools available
-        self._persistent_tools: Set[str] = {"browse_tools"}
+        # Always keep BrowseTools available
+        self._persistent_tools: Set[str] = {"BrowseTools"}
 
         logger.debug("DynamicActionManager initialized")
 
@@ -230,15 +230,9 @@ class DynamicActionManager:
         return self.load_toolsets(toolset_names)
 
     def get_action_set(self, set_name: str) -> Optional[ActionSet]:
-        """
-        Retrieve an ActionSet object by its name.
+        if set_name == "DynamicCore":
+            return self.current_set
 
-        Args:
-            set_name (str): Name of the ActionSet.
-
-        Returns:
-            ActionSet or None: The ActionSet object if found, else None.
-        """
         action_set = self.registry.sets.get(set_name)
         if not action_set:
             logger.warning(f"ActionSet '{set_name}' not found in registry")
@@ -361,7 +355,7 @@ class DynamicActionManager:
             logger.debug(
                 "Sub-agent llm_stream: preserving assigned tools (flexible mode)"
             )
-            self.unload_tools(["browse_tools"])
+            self.unload_tools(["BrowseTools"])
         else:
             self.unload_all()
 
@@ -405,8 +399,8 @@ class DynamicActionManager:
 
         # 4. Dynamic browsing control
         if not meta.get("dynamic_allowed", True):
-            self.unload_tools(["browse_tools"])
-            logger.debug(f"browse_tools disabled for step '{step_name}'")
+            self.unload_tools(["BrowseTools"])
+            logger.debug(f"BrowseTools disabled for step '{step_name}'")
 
         current_tools = len(self.current_set.actions)
         logger.info(
@@ -486,7 +480,7 @@ class DynamicActionManager:
 
         self._set_to_tools.clear()  # all dynamic origins gone
 
-        # Re-add persistent tools (e.g. browse_tools)
+        # Re-add persistent tools (e.g. BrowseTools)
         for p_name in self._persistent_tools:
             if p_name in self.registry.all_actions:
                 action, _ = self.registry.all_actions[p_name]
@@ -531,7 +525,7 @@ class DynamicActionManager:
 class ToolBrowser(Action):
     def __init__(self, registry: "ActionRegistry", manager: DynamicActionManager):
         super().__init__(
-            name="browse_tools",
+            name="BrowseTools",
             description=(
                 "Find and load tools not currently available. "
                 "Provide a short action query (e.g. 'open file', 'edit file')."
