@@ -13,6 +13,7 @@ from neuralcore.actions.manager import (
 from neuralcore.workflows.engine import WorkflowEngine
 from neuralcore.cognition.memory import ContextManager
 from neuralcore.core.client_factory import get_clients
+from neuralcore.actions.manager import tool
 
 logger = Logger.get_logger()
 
@@ -130,6 +131,7 @@ class Agent:
         # UPGRADE: reset runtime state
         self.current_task = ""
         self._status = "idle"
+
 
     # ---------------- PUBLIC API ----------------
 
@@ -609,7 +611,7 @@ class Agent:
                     "GetContext",
                     "RequestComplexAction",
                     "GetDeploymentStatus",
-                    "browse_tools",
+                    "BrowseTools",
                 ]
                 self.manager.load_tools(
                     [t for t in core_tools if t in self.registry.all_actions]
@@ -630,7 +632,7 @@ class Agent:
             "GetContext",
             "RequestComplexAction",
             "GetDeploymentStatus",
-            "browse_tools",
+            "BrowseTools",
         ]
         for tool_name in critical_tools:
             if tool_name in self.registry.all_actions and not self.manager.is_loaded(
@@ -751,6 +753,123 @@ class Agent:
             return summary.strip()
         except Exception:
             return f"✅ The deployment task **{task}** has been completed successfully."
+
+    # ================================ TOOLS =======================================
+    # Enabling agent to use own methods as tools (search context. deploy sub agents)
+
+
+    @tool("ContextManager", name="GetContext", description="Search your own memory")
+    async def provide_context(self, query: str):
+        return await self.context_manager.provide_context(query)
+
+
+    @tool(
+        "DeployControls",
+        name="RequestComplexAction",
+        description="Use when user request requires planning, tools, multiple steps, research or code changes.",
+    )
+    async def request_complex_action(self, reason: str):
+        logger.info(f"[RequestComplexAction] Complex task: {reason[:100]}...")
+        self.task = reason
+        self.goal = reason
+
+        # Switch orchestrator
+        try:
+            self.workflow.switch_workflow("orchestrator")
+        except Exception:
+            await self.post_control({"event": "switch_workflow", "name": "orchestrator"})
+
+        task_id = await self.start_complex_deployment(
+            task_description=reason,
+            user_facing_name=reason[:60] + "...",
+            assigned_tools=None,
+            temperature=0.3,
+        )
+
+        return (
+            f"✅ Starting **multi-step orchestration** for:\n"
+            f"**{reason}**\n\n"
+            f"Task ID: `{task_id}` — breaking it down into focused steps..."
+        )
+
+
+    @tool("DeployControls", name="GetDeploymentStatus")
+    async def get_deployment_status(self, task_id: Optional[str] = None):
+        # Auto-detect current task if no ID provided
+        # if not task_id:
+        #     if hasattr(self, "state") and getattr(self.state, "sub_task_ids", None):
+        #         task_id = self.state.sub_task_ids[0] if self.state.sub_task_ids else None
+        #     elif hasattr(self.state, "task_id_map") and self.state.task_id_map:
+        #         task_id = list(self.state.task_id_map.values())[-1]
+
+        # Lookup in sub_tasks
+        status = self.sub_tasks.get(task_id) if task_id else None
+
+        # Fallback: task_id exists in task_id_map but not yet in sub_tasks
+        if not status and task_id:
+            return f"⚠ Task ID `{task_id}` registered but not yet active. Try again in a few seconds."
+
+        if status:
+            output = [
+                f"**Task ID:** `{task_id}`",
+                f"**Step:** {status.get('step_number', '?')}",
+                f"**Name:** {status.get('display_name', 'Unnamed Task')}",
+                f"**Status:** {status.get('status', 'unknown').upper()}",
+                f"**Runtime:** {status.get('runtime_seconds', 0):.1f} seconds",
+                f"**Progress:** {status.get('progress', 0)}%",
+                f"**Description:** {status.get('description', '')[:280]}...",
+            ]
+
+            if status.get("assigned_tools"):
+                output.append(
+                    f"**Assigned Tools:** {', '.join(status['assigned_tools'][:10])}..."
+                )
+
+            if status.get("status") in ("completed", "failed") and status.get("result"):
+                output.append(f"\n**Result:**\n{status['result']}")
+            if status.get("error"):
+                output.append(f"\n**Error:** {status['error']}")
+
+            return "\n".join(output)
+
+        # Full overview if no specific task found
+        tasks = self.get_sub_tasks()
+        if not tasks:
+            return "No background deployments running at the moment."
+
+        lines = ["# 📊 **Deployment Status Overview**"]
+        total = len(tasks)
+        running = sum(1 for t in tasks.values() if t.get("status") == "running")
+        completed = sum(1 for t in tasks.values() if t.get("status") == "completed")
+        failed = sum(
+            1 for t in tasks.values() if t.get("status") in ("failed", "cancelled")
+        )
+
+        lines.append(
+            f"**Progress:** {completed}/{total} steps completed | Running: {running} | Failed: {failed}"
+        )
+        if hasattr(self, "task") and self.task:
+            lines.append(f"\n**Main Task:** {self.task}")
+        if hasattr(self.workflow, "current_workflow"):
+            lines.append(f"**Current Stage:** {self.workflow.current_workflow_name}")
+
+        lines.append("\n**Steps:**")
+        for t in sorted(tasks.values(), key=lambda x: x.get("started_at", 0)):
+            emoji = {
+                "running": "🔄",
+                "completed": "✅",
+                "failed": "❌",
+                "pending": "⏳",
+            }.get(t.get("status", "").lower(), "•")
+            line = f"{emoji} `{t['id']}` → **{t.get('status', 'unknown').upper()}** — {t.get('display_name', '')}"
+            if t.get("runtime_seconds", 0) > 5:
+                line += f" ({t['runtime_seconds']:.1f}s)"
+            lines.append(line)
+
+        if completed == total and total > 0:
+            lines.append("\n✅ **All steps completed successfully.**")
+
+        return "\n".join(lines)
 
 
 # --- SubAgent constructor (isolated queue + controlled reporting) ---

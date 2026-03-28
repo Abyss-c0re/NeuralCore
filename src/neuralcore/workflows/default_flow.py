@@ -3,136 +3,17 @@
 # While not yet part of the core framework, it is scheduled for migration into NeuralVoid.
 # Use this for validation and exploration; its structure may change as it is finalized for integration into the new system.
 
-import re
 import asyncio
 import json
 from enum import Enum
 from neuralcore.agents.state import AgentState
 from neuralcore.actions.actions import ActionSet
-from neuralcore.actions.manager import tool
 from neuralcore.workflows.registry import workflow
 from neuralcore.utils.logger import Logger
 
 from typing import AsyncIterator, Dict, Any, List, Optional, Tuple
 
 logger = Logger.get_logger()
-
-
-# ==================== TOOLS ====================
-
-
-@tool("ContextManager", name="GetContext", description="Search your own memory")
-async def provide_context(agent, query: str):
-    return await agent.context_manager.provide_context(query)
-
-
-@tool(
-    "DeployControls",
-    name="RequestComplexAction",
-    description="Use when user request requires planning, tools, multiple steps, research or code changes.",
-)
-async def request_complex_action(agent, reason: str):
-    logger.info(f"[RequestComplexAction] Complex task: {reason[:100]}...")
-    agent.task = reason
-    agent.goal = reason
-
-    # Switch orchestrator
-    try:
-        agent.workflow.engine.switch_workflow("orchestrator")
-    except Exception:
-        await agent.post_control({"event": "switch_workflow", "name": "orchestrator"})
-
-    task_id = await agent.start_complex_deployment(
-        task_description=reason,
-        user_facing_name=reason[:60] + "...",
-        assigned_tools=None,
-        temperature=0.3,
-    )
-
-    return (
-        f"✅ Starting **multi-step orchestration** for:\n"
-        f"**{reason}**\n\n"
-        f"Task ID: `{task_id}` — breaking it down into focused steps..."
-    )
-
-
-@tool("DeployControls", name="GetDeploymentStatus")
-async def get_deployment_status(agent, task_id: Optional[str] = None):
-    # Auto-detect current task if no ID provided
-    if not task_id:
-        if hasattr(agent, "state") and getattr(agent.state, "sub_task_ids", None):
-            task_id = agent.state.sub_task_ids[0] if agent.state.sub_task_ids else None
-        elif hasattr(agent.state, "task_id_map") and agent.state.task_id_map:
-            task_id = list(agent.state.task_id_map.values())[-1]
-
-    # Lookup in sub_tasks
-    status = agent.sub_tasks.get(task_id) if task_id else None
-
-    # Fallback: task_id exists in task_id_map but not yet in sub_tasks
-    if not status and task_id:
-        return f"⚠ Task ID `{task_id}` registered but not yet active. Try again in a few seconds."
-
-    if status:
-        output = [
-            f"**Task ID:** `{task_id}`",
-            f"**Step:** {status.get('step_number', '?')}",
-            f"**Name:** {status.get('display_name', 'Unnamed Task')}",
-            f"**Status:** {status.get('status', 'unknown').upper()}",
-            f"**Runtime:** {status.get('runtime_seconds', 0):.1f} seconds",
-            f"**Progress:** {status.get('progress', 0)}%",
-            f"**Description:** {status.get('description', '')[:280]}...",
-        ]
-
-        if status.get("assigned_tools"):
-            output.append(
-                f"**Assigned Tools:** {', '.join(status['assigned_tools'][:10])}..."
-            )
-
-        if status.get("status") in ("completed", "failed") and status.get("result"):
-            output.append(f"\n**Result:**\n{status['result']}")
-        if status.get("error"):
-            output.append(f"\n**Error:** {status['error']}")
-
-        return "\n".join(output)
-
-    # Full overview if no specific task found
-    tasks = agent.get_sub_tasks()
-    if not tasks:
-        return "No background deployments running at the moment."
-
-    lines = ["# 📊 **Deployment Status Overview**"]
-    total = len(tasks)
-    running = sum(1 for t in tasks.values() if t.get("status") == "running")
-    completed = sum(1 for t in tasks.values() if t.get("status") == "completed")
-    failed = sum(
-        1 for t in tasks.values() if t.get("status") in ("failed", "cancelled")
-    )
-
-    lines.append(
-        f"**Progress:** {completed}/{total} steps completed | Running: {running} | Failed: {failed}"
-    )
-    if hasattr(agent, "task") and agent.task:
-        lines.append(f"\n**Main Task:** {agent.task}")
-    if hasattr(agent.workflow, "current_workflow"):
-        lines.append(f"**Current Stage:** {agent.workflow.current_workflow}")
-
-    lines.append("\n**Steps:**")
-    for t in sorted(tasks.values(), key=lambda x: x.get("started_at", 0)):
-        emoji = {
-            "running": "🔄",
-            "completed": "✅",
-            "failed": "❌",
-            "pending": "⏳",
-        }.get(t.get("status", "").lower(), "•")
-        line = f"{emoji} `{t['id']}` → **{t.get('status', 'unknown').upper()}** — {t.get('display_name', '')}"
-        if t.get("runtime_seconds", 0) > 5:
-            line += f" ({t['runtime_seconds']:.1f}s)"
-        lines.append(line)
-
-    if completed == total and total > 0:
-        lines.append("\n✅ **All steps completed successfully.**")
-
-    return "\n".join(lines)
 
 
 class AgentFlow:
@@ -157,7 +38,7 @@ class AgentFlow:
             name="deploy_chat",
             description="Natural chat → RequestComplexAction switches to orchestrator",
             steps=["deploy_chat_loop"],
-            hidden_toolsets=["DeployControls"],
+            # hidden_toolsets=["DeployControls"],
         )
 
         # Battle-tested: Sub-agent micro-task execution
@@ -207,20 +88,20 @@ class AgentFlow:
         )
         return f"""You are a precise sub-agent executing **ONE single micro-task only**.
 
-TASK: {task_desc}{tools_hint}
+        TASK: {task_desc}{tools_hint}
 
-CRITICAL RULES:
-- Complete ONLY this exact task.
-- If the task involves reading a file, use open_file_async or open_file_sync directly. Do NOT rely on browse_tools for obvious file operations.
-- When you have finished the task, output a short summary and end with exactly: {AgentFlow.FINAL_ANSWER_MARKER}
-- Never mention other steps or the overall project."""
+        CRITICAL RULES:
+        - Complete ONLY this exact task.
+        - If the task involves reading a file, use open_file_async or open_file_sync directly. Do NOT rely on BrowseTools for obvious file operations.
+        - When you have finished the task, output a short summary and end with exactly: {AgentFlow.FINAL_ANSWER_MARKER}
+        - Never mention other steps or the overall project."""
 
     # ==================== CHAT LOOP (battle-tested - unchanged) ====================
 
     @workflow.set(
         "deploy_chat",
         name="deploy_chat_loop",
-        toolsets=["DeployControls"],
+        toolsets=["DeployControls", "ContextManager"],
         dynamic_allowed=True,
     )
     async def _wf_deploy_chat_loop(self, iteration: int, state: AgentState):
@@ -229,7 +110,7 @@ CRITICAL RULES:
             yield ("phase_changed", {"phase": "chat"})
             logger.info(f"Agent '{self.agent.name}' → Chat mode started")
 
-        self.agent.manager.load_toolsets("DeployControls")
+        # self.agent.manager.load_toolsets("DeployControls")
 
         while True:
             try:
@@ -558,75 +439,6 @@ Return ONLY JSON:
 
         await self.agent.context_manager.add_message("assistant", final_reply)
 
-    async def _execute_tools(
-        self, tool_calls: List[Dict], iteration: int, state: AgentState
-    ) -> AsyncIterator[Tuple[str, Any]]:
-        """
-        Executes tool calls (now only used for tools that needed ConfirmationRequired).
-        ConfirmationRequired is already handled by the client, so this is a clean pass-through.
-        Phase change is emitted and per-tool events are yielded exactly as before.
-        """
-        state.phase = self.Phase.EXECUTE
-        yield (
-            "phase_changed",
-            {"phase": state.phase.value},
-        )  # ← ensure phase is always signalled
-
-        for call in tool_calls or []:
-            # Support both old raw tool_calls and the new "needs_confirmation" payload
-            if "function" in call:  # old format from legacy tool_calls
-                name = call["function"]["name"]
-                try:
-                    args = json.loads(call["function"]["arguments"])
-                except Exception:
-                    args = {}
-            else:  # new needs_confirmation payload from client
-                name = call.get("tool_name")
-                args = call.get("details", {}).get(
-                    "args", {}
-                )  # assuming ConfirmationRequired stores args
-
-            if not name:
-                yield ("tool_skipped", {"name": "unknown", "reason": "no_name"})
-                continue
-
-            sig = f"{name}:{json.dumps(args, sort_keys=True)}"
-            if sig in self.agent.executed_signatures:
-                continue
-            self.agent.executed_signatures.add(sig)
-
-            executor = self.agent.manager.get_executor(name, self.agent)
-            if not executor:
-                yield ("tool_skipped", {"name": name, "reason": "no_executor"})
-                continue
-
-            yield ("tool_start", {"name": name, "args": args})
-
-            try:
-                maybe = executor(**args)
-                result = await maybe if asyncio.iscoroutine(maybe) else maybe
-
-                await self.agent.context_manager.record_tool_outcome(
-                    name, str(result), args
-                )
-                await self.agent.context_manager.add_message("tool", str(result))
-
-                self.agent.tool_results.append(
-                    {"name": name, "result": result, "args": args}
-                )
-                yield ("tool_result", {"name": name, "result": result})
-
-            except Exception as exc:
-                result = f"Tool '{name}' failed: {exc}"
-                await self.agent.context_manager.record_tool_outcome(name, result, args)
-                yield ("tool_result", {"name": name, "result": result, "error": True})
-
-            stop_event = getattr(self.agent.client, "_current_stop_event", None)
-            if stop_event and getattr(stop_event, "is_set", lambda: False)():
-                yield ("cancelled", f"Stop after {name}")
-                return
-
-    # Optional helper used by _llm_stream_with_tools
     def _build_objective_reminder(self) -> str:
         """You can keep or move this helper if it exists elsewhere."""
         return f"Current goal: {self.agent.goal}"
@@ -655,7 +467,7 @@ Return ONLY JSON:
 
         queue = await self.agent.client.stream_with_tools(
             messages=messages,
-            tools=self.agent.manager.get_action_set("DeployControls"),
+            tools=self.agent.manager.get_action_set("DynamicCore"),
             temperature=self.agent.temperature,
             max_tokens=self.agent.max_tokens,
             tool_choice="auto",
@@ -688,6 +500,32 @@ Return ONLY JSON:
                             complex_reason = payload.get("args", {}).get("reason", "")
 
                         result = payload.get("result") or payload.get("output")
+
+                        # --- Add external content for any tool result ---
+                        if result:
+                            try:
+                                title = f"{tool_name} result"
+
+                                if isinstance(result, dict):
+                                    summary = (
+                                        result.get("summary")
+                                        or result.get("message")
+                                        or str(result)
+                                    )
+                                    metadata = result
+                                else:
+                                    summary = str(result)
+                                    metadata = {}
+
+                                await self.agent.context_manager.add_external_content(
+                                    source_type=f"task_result_{tool_name}",
+                                    content=f"[{title}] {summary}\nMetadata: {metadata}",
+                                    metadata={"task": tool_name, **(metadata or {})},
+                                )
+                            except Exception as e:
+                                logger.warning(f"Failed to store external content: {e}")
+
+                        # existing behavior for streaming
                         if isinstance(result, str) and result.strip():
                             tool_results.append(result.strip())
 
