@@ -27,7 +27,7 @@ class WorkflowEngine:
         self.registered_workflows: Dict[str, Dict[str, Any]] = {}
         self._step_handlers: Dict[str, Optional[Callable]] = {}
 
-        self.current_workflow_name: str = "orchestrator"
+        self.current_workflow_name: str = "default"
         self.workflow_steps: List[Union[str, Dict[str, Any]]] = []
         self.workflow_description: str = ""
         self._custom_conditions: Dict[

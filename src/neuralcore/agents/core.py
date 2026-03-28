@@ -79,7 +79,7 @@ class Agent:
         # === UPGRADE: Current task/role, default workflow, background support ===
         self.current_task: str = ""
         self.current_role: str = self.config.get("role", "general_assistant")
-        self.default_workflow: str = self.config.get("orchestrator", "orchestrator")
+        self.default_workflow: str = self.config.get("default", "default")
         self._status: str = "idle"
         self._background_task: Optional[asyncio.Task] = None
 
@@ -787,12 +787,12 @@ class Agent:
         self.task = reason
         self.goal = reason
 
-        # Switch orchestrator
+        # Switch default
         try:
-            self.workflow.switch_workflow("orchestrator")
+            self.workflow.switch_workflow("default")
         except Exception:
             await self.post_control(
-                {"event": "switch_workflow", "name": "orchestrator"}
+                {"event": "switch_workflow", "name": "default"}
             )
 
         task_id = await self.start_complex_deployment(
