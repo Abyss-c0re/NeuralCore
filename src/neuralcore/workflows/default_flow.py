@@ -404,7 +404,42 @@ Return ONLY JSON:
 
                 elif kind in ("tool_delta", "tool_complete", "needs_confirmation"):
                     if isinstance(payload, dict):
+                        tool_name = payload.get("tool_name") or payload.get("name")
                         result = payload.get("result") or payload.get("output")
+
+                        # --- ADD: store tool result in internal context ---
+                        if result:
+                            try:
+                                title = f"{tool_name} result"
+
+                                if isinstance(result, dict):
+                                    summary = result.get("summary") or result.get("message") or str(result)
+                                    metadata = result
+                                else:
+                                    summary = str(result)
+                                    metadata = {}
+
+                                # Internal context
+                                await self.agent.context_manager.add_external_content(
+                                    source_type=f"task_result_{tool_name}",
+                                    content=f"[{title}] {summary}\nMetadata: {metadata}",
+                                    metadata={"task": tool_name, **(metadata or {})},
+                                )
+
+                                # If sub-agent, also store in parent context
+                                if getattr(self.agent, "sub_agent", False):
+                                    parent_agent = getattr(self.agent, "parent", None)
+                                    if parent_agent:
+                                        await parent_agent.context_manager.add_external_content(
+                                            source_type=f"sub_task_result_{tool_name}",
+                                            content=f"[{title}] {summary}\nMetadata: {metadata}",
+                                            metadata={"task": tool_name, "origin": self.agent.agent_id, **(metadata or {})},
+                                        )
+
+                            except Exception as e:
+                                logger.warning(f"Failed to store external content: {e}")
+
+                        # existing collection for reply
                         if isinstance(result, str) and result.strip():
                             tool_results.append(result.strip())
 
@@ -437,7 +472,23 @@ Return ONLY JSON:
             },
         )
 
+        # Add final reply internally
         await self.agent.context_manager.add_message("assistant", final_reply)
+
+        # If sub-agent, also store final reply in parent as external content
+        if getattr(self.agent, "sub_agent", False):
+            parent_agent = getattr(self.agent, "parent", None)
+            if parent_agent:
+                try:
+                    await parent_agent.context_manager.add_external_content(
+                        source_type="sub_task_final_reply",
+                        content=final_reply,
+                        metadata={"origin": self.agent.agent_id},
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to store final reply in parent context: {e}")
+
+
 
     def _build_objective_reminder(self) -> str:
         """You can keep or move this helper if it exists elsewhere."""

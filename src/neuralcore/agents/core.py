@@ -86,6 +86,14 @@ class Agent:
         # Production-ready: every Agent (main or sub) starts with clean internal state
         self._reset_state()
 
+    def is_sub_agent(self) -> bool:
+        """Return True if this agent is a sub-agent."""
+        return getattr(self, "sub_agent", False)
+
+    def get_parent_agent(self) -> Optional["Agent"]:
+        """Return parent agent if sub-agent, else None."""
+        return getattr(self, "parent", None)
+
     def _load_agent_config(self, agent_id: str, config_file: Optional[Path]) -> dict:
         logger.debug(f"Loading config for agent_id='{agent_id}'")
         if config_file:
@@ -131,7 +139,6 @@ class Agent:
         # UPGRADE: reset runtime state
         self.current_task = ""
         self._status = "idle"
-
 
     # ---------------- PUBLIC API ----------------
 
@@ -757,9 +764,16 @@ class Agent:
     # ================================ TOOLS =======================================
     # Enabling agent to use own methods as tools (search context. deploy sub agents)
 
-
     @tool("ContextManager", name="GetContext", description="Search your own memory")
-    async def provide_context(self, query: str):
+    async def provide_context(self, query: str, *, agent_metadata: Optional[dict] = None):
+        agent_metadata = agent_metadata or {}
+        agent_metadata.setdefault("is_sub_agent", getattr(self, "sub_agent", False))
+        agent_metadata.setdefault("agent_id", getattr(self, "agent_id", "unknown"))
+
+        # Only use parent if it exists
+        parent_agent = getattr(self, "parent", None)
+        if getattr(self, "sub_agent", False) and parent_agent:
+            return await parent_agent.context_manager.provide_context(query)
         return await self.context_manager.provide_context(query)
 
 
@@ -777,7 +791,9 @@ class Agent:
         try:
             self.workflow.switch_workflow("orchestrator")
         except Exception:
-            await self.post_control({"event": "switch_workflow", "name": "orchestrator"})
+            await self.post_control(
+                {"event": "switch_workflow", "name": "orchestrator"}
+            )
 
         task_id = await self.start_complex_deployment(
             task_description=reason,
@@ -791,7 +807,6 @@ class Agent:
             f"**{reason}**\n\n"
             f"Task ID: `{task_id}` — breaking it down into focused steps..."
         )
-
 
     @tool("DeployControls", name="GetDeploymentStatus")
     async def get_deployment_status(self, task_id: Optional[str] = None):
@@ -912,7 +927,6 @@ class SubAgent(Agent):
             config_override=template,
             sub_agent=True,
         )
-        
 
         # --- ISOLATED queue for this sub-agent ---
         self.message_queue = asyncio.Queue()
@@ -920,8 +934,8 @@ class SubAgent(Agent):
         self.assigned_tools = assigned_tools or []
 
         # --- Shared context ---
-        self.context_manager = parent.context_manager
-        self.task_context = self.context_manager.create_task_context(task_name)
+        # self.context_manager = parent.context_manager
+        self.task_context = parent.context_manager.create_task_context(task_name)
 
         # --- Sub-agent tuned defaults ---
         self.temperature = temperature or self.config.get("temperature", 0.25)
