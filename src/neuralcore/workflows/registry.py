@@ -1,4 +1,5 @@
 from typing import Any, Dict, Callable, List, Union, Optional
+from neuralcore.workflows.engine import WorkflowEngine
 
 
 from neuralcore.utils.logger import Logger
@@ -29,6 +30,21 @@ class Workflow:
         self.handlers: Dict[str, Callable] = {}
         self.workflows: Dict[str, Dict[str, Any]] = {}  # workflow_name → metadata
         self.metadata: Dict[str, Dict[str, Any]] = {}  # step_name → step metadata
+
+    def bind_to_engine(self, engine: "WorkflowEngine", instance=None):
+        """
+        Register all decorated steps to the engine's step handler map.
+        If 'instance' is provided, bind all step handlers to it.
+        """
+        for step_name, handler in self.handlers.items():
+            bound_handler = handler
+            if instance is not None:
+                bound_handler = handler.__get__(instance, instance.__class__)
+            engine.register_step(step_name, bound_handler)
+            logger.info(
+                f"🔗 Bound step '{step_name}' to engine of agent '{engine.agent.name}'"
+            )
+
 
     def set(
         self,
