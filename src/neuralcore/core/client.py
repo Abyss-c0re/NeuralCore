@@ -8,6 +8,11 @@ from neuralcore.utils.exceptions_handler import ConfirmationRequired
 from neuralcore.actions.actions import Action, ActionSet
 from neuralcore.actions.manager import DynamicActionManager
 from neuralcore.utils.text_tokenizer import TextTokenizer
+from neuralcore.utils.formatting import (
+    is_valid_json,
+    prepare_chat_messages,
+    drain_queue_to_string,
+)
 from typing import AsyncIterator, Callable, Tuple
 
 import numpy as np
@@ -26,82 +31,6 @@ ToolExecutorGetter = Optional[Callable[[str], Optional["Action"]]]
 logger = Logger.get_logger()
 
 
-async def drain_queue_to_string(queue: asyncio.Queue) -> str:
-    chunks = []
-    while True:
-        item = await queue.get()
-        if item is None:
-            break
-        chunks.append(item)
-    return "".join(chunks)
-
-
-def is_valid_json(s: str) -> bool:
-    try:
-        json.loads(s)
-        return True
-    except json.JSONDecodeError:
-        return False
-
-
-def prepare_messages_for_stream(messages, enable_thinking=False):
-    # Copy
-    msgs = [m.copy() for m in messages]
-
-    # 1. Merge system messages
-    sys_parts = []
-    cleaned = []
-
-    for m in msgs:
-        if m.get("role") == "system":
-            content = (m.get("content") or "").strip()
-            if content:
-                sys_parts.append(content)
-        else:
-            cleaned.append(m)
-
-    if sys_parts:
-        cleaned.insert(0, {"role": "system", "content": "\n\n".join(sys_parts)})
-
-    # 2. REMOVE assistant→assistant loops
-    deduped = []
-    prev_role = None
-
-    for m in cleaned:
-        role = m.get("role")
-
-        # drop consecutive assistant messages
-        if role == "assistant" and prev_role == "assistant":
-            continue
-
-        deduped.append(m)
-        prev_role = role
-
-    cleaned = deduped
-
-    # 3. Ensure last message is not assistant when thinking
-    if enable_thinking and cleaned:
-        last = cleaned[-1]
-
-        if last.get("role") == "assistant":
-            has_content = bool(last.get("content") and last["content"].strip())
-            has_tool_calls = bool(last.get("tool_calls"))
-
-            if has_content:
-                if has_tool_calls:
-                    # keep tool calls but remove visible text
-                    last["content"] = ""
-                else:
-                    # remove it entirely (prevents self-loop + API error)
-                    cleaned.pop()
-
-    # 4. FINAL GUARD: never end on assistant in thinking mode
-    if enable_thinking and cleaned and cleaned[-1].get("role") == "assistant":
-        cleaned.pop()
-
-    return cleaned
-
-
 async def embed_single_chunk(
     client: AsyncOpenAI,
     chunk: str,
@@ -114,22 +43,6 @@ async def embed_single_chunk(
     except Exception as e:
         logger.error(f"Embedding chunk failed: {str(e)[:180]}...")
         return None
-
-
-@staticmethod
-def build_messages(
-    user_content: Optional[Union[str, List[Dict]]] = None,
-    system_prompt: Optional[str] = None,
-    history: Optional[List[Dict]] = None,
-) -> List[Dict[str, Any]]:
-    if history is not None:
-        return history[:]
-    msgs = []
-    if system_prompt:
-        msgs.append({"role": "system", "content": system_prompt})
-    if user_content:
-        msgs.append({"role": "user", "content": user_content})
-    return msgs
 
 
 class LLMClient:
@@ -222,7 +135,7 @@ class LLMClient:
         merged_extra = {**self.extra_body_default, **(extra_body or {})}
 
         if messages:
-            messages = prepare_messages_for_stream(messages)
+            messages = prepare_chat_messages(messages)
 
         params = {
             "model": self.model,
@@ -341,7 +254,7 @@ class LLMClient:
 
         # Make sure messages content is always str
         if messages:
-            messages = prepare_messages_for_stream(messages)
+            messages = prepare_chat_messages(messages)
 
         params = {
             "model": self.model,
@@ -402,7 +315,7 @@ class LLMClient:
         ]
 
         if messages:
-            messages = prepare_messages_for_stream(messages)
+            messages = prepare_chat_messages(messages)
 
         # logger.debug(f"Describing image | tokens ≈ {count_message_tokens(messages)}")
 
@@ -463,7 +376,7 @@ class LLMClient:
         merged_extra = {**self.extra_body_default, **(extra_body or {})}
 
         if messages:
-            messages = prepare_messages_for_stream(messages)
+            messages = prepare_chat_messages(messages)
 
         params = {
             "model": self.model,
@@ -530,7 +443,7 @@ class LLMClient:
         merged_extra = {**self.extra_body_default, **(extra_body or {})}
 
         if messages:
-            messages = prepare_messages_for_stream(messages)
+            messages = prepare_chat_messages(messages)
 
         params = {
             "model": self.model,
@@ -550,13 +463,6 @@ class LLMClient:
         tool_call_buffer: Dict[int, Dict] = {}
         tool_meta: Dict[int, Dict] = {}
         last_chunk = None
-
-        def is_valid_json(s: str) -> bool:
-            try:
-                json.loads(s)
-                return True
-            except json.JSONDecodeError:
-                return False
 
         # ── Streaming task ─────────────────────────────
         async def _run_stream():
@@ -748,7 +654,7 @@ class LLMClient:
         stream: bool = False,
         **kwargs,
     ) -> Union[str, asyncio.Queue]:
-        messages = build_messages(user_content=prompt, system_prompt=system)
+        messages = prepare_chat_messages(user_content=prompt, system_prompt=system)
 
         if stream:
             # Return the raw streaming queue
