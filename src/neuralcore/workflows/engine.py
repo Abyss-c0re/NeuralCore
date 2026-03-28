@@ -5,7 +5,6 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Callable, Un
 from neuralcore.agents.state import AgentState
 from neuralcore.utils.logger import Logger
 
-from neuralcore.workflows.default_flow import AgentFlow
 from neuralcore.actions.sequence import SequenceRegistry
 from neuralcore.utils.config import get_loader
 
@@ -37,7 +36,6 @@ class WorkflowEngine:
 
         # === LOAD AgentFlow (now contains all _wf_* methods) ===
         self.sequence_registry = SequenceRegistry(self)
-        AgentFlow(self)
         self.load_workflow_from_config()
 
         logger.info(
