@@ -128,6 +128,21 @@ class Agent:
         for action_name in self.registry.all_actions:
             self.manager.load_tools([action_name])
 
+    def _resolve_workflow(
+        self, chat_mode: bool = False, workflow_override: Optional[str] = None
+    ) -> str:
+        """
+        Return the workflow to use:
+        1. Use explicit override if provided
+        2. Use chat workflow if chat_mode and defined
+        3. Fallback to default workflow in config
+        """
+        if workflow_override:
+            return workflow_override
+        if chat_mode:
+            return self.config.get("workflow_chat") or self.default_workflow
+        return self.default_workflow
+
     def _reset_state(self):
         self.task = ""
         self.goal = ""
@@ -324,21 +339,30 @@ class Agent:
         chat_mode: bool = False,
         workflow: Optional[str] = None,
     ) -> AsyncIterator[Tuple[str, Any]]:
+        """
+        Run the agent in chat or headless mode.
+
+        - Uses workflow selection via self._resolve_workflow()
+        - Supports stop_event to cancel
+        - Handles message queue asynchronously
+        """
         system_prompt = system_prompt or self.system_prompt
         temperature = temperature if temperature is not None else self.temperature
         max_tokens = max_tokens if max_tokens is not None else self.max_tokens
 
         self._reset_state()
-        if stop_event is None:
-            stop_event = asyncio.Event()
-
-        # UPGRADE: track current task + use default workflow
+        stop_event = stop_event or asyncio.Event()
         self.current_task = user_prompt or "headless processing"
         self._status = "running"
 
+        # Resolve which workflow to use
+        workflow_name = self._resolve_workflow(
+            chat_mode=chat_mode, workflow_override=workflow
+        )
+
         if chat_mode:
             logger.info(
-                f"Agent '{self.name}' → Starting CHAT mode with workflow 'deploy_chat'"
+                f"Agent '{self.name}' → Starting CHAT mode with workflow '{workflow_name}'"
             )
             if user_prompt and str(user_prompt).strip():
                 await self.post_message(user_prompt)
@@ -349,15 +373,16 @@ class Agent:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 stop_event=stop_event,
-                workflow="deploy_chat",
+                workflow=workflow_name,
             ):
                 yield event, payload
+
             self._status = "idle"
             return
 
-        logger.info(f"Agent '{self.name}' → Starting HEADLESS mode")
-        target_workflow = workflow or self.default_workflow
-
+        logger.info(
+            f"Agent '{self.name}' → Starting HEADLESS mode with workflow '{workflow_name}'"
+        )
         try:
             if user_prompt and str(user_prompt).strip():
                 await self.post_message(user_prompt)
@@ -372,33 +397,33 @@ class Agent:
                 except asyncio.TimeoutError:
                     continue
 
+                # Handle control events
                 if isinstance(msg, dict) and "event" in msg:
                     event = msg.get("event")
                     logger.debug(f"Headless received control: {event}")
 
                     if event == "switch_workflow":
                         wf_name = msg.get("name", self.default_workflow)
-                        logger.info(f"Headless switching to workflow: {wf_name}")
+                        logger.info(f"Switching workflow to: {wf_name}")
                         try:
                             self.workflow.switch_workflow(wf_name)
                         except Exception as e:
-                            logger.warning(f"Switch failed: {e}")
+                            logger.warning(f"Workflow switch failed: {e}")
                         self.message_queue.task_done()
                         continue
 
                     elif event in ("finish", "cancelled", "break"):
-                        logger.info(f"Headless received termination signal: {event}")
+                        logger.info(f"Termination signal received: {event}")
                         self.message_queue.task_done()
                         break
 
                     self.message_queue.task_done()
                     continue
 
-                if isinstance(msg, dict):
-                    content = msg.get("content") or str(msg)
-                else:
-                    content = str(msg).strip()
-
+                # Extract content
+                content = (
+                    msg.get("content") if isinstance(msg, dict) else str(msg).strip()
+                )
                 if not content:
                     self.message_queue.task_done()
                     continue
@@ -411,7 +436,7 @@ class Agent:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     stop_event=stop_event,
-                    workflow=target_workflow,
+                    workflow=workflow_name,
                 ):
                     yield event, payload
 
@@ -764,19 +789,6 @@ class Agent:
     # ================================ TOOLS =======================================
     # Enabling agent to use own methods as tools (search context. deploy sub agents)
 
-    @tool("ContextManager", name="GetContext", description="Search your own memory")
-    async def provide_context(self, query: str, *, agent_metadata: Optional[dict] = None):
-        agent_metadata = agent_metadata or {}
-        agent_metadata.setdefault("is_sub_agent", getattr(self, "sub_agent", False))
-        agent_metadata.setdefault("agent_id", getattr(self, "agent_id", "unknown"))
-
-        # Only use parent if it exists
-        parent_agent = getattr(self, "parent", None)
-        if getattr(self, "sub_agent", False) and parent_agent:
-            return await parent_agent.context_manager.provide_context(query)
-        return await self.context_manager.provide_context(query)
-
-
     @tool(
         "DeployControls",
         name="RequestComplexAction",
@@ -787,12 +799,21 @@ class Agent:
         self.task = reason
         self.goal = reason
 
-        # Switch default
+        # --- DYNAMIC WORKFLOW: use agent's configured workflow, fallback to default_workflow attr ---
+        workflow_to_use = self.config.get("workflow") or getattr(
+            self, "default_workflow", None
+        )
+        if not workflow_to_use:
+            raise ValueError(
+                f"Agent '{self.name}' has no workflow configured for complex actions."
+            )
+
         try:
-            self.workflow.switch_workflow("default")
+            self.workflow.switch_workflow(workflow_to_use)
         except Exception:
+            # fallback to sending a control event if direct switch fails
             await self.post_control(
-                {"event": "switch_workflow", "name": "default"}
+                {"event": "switch_workflow", "name": workflow_to_use}
             )
 
         task_id = await self.start_complex_deployment(

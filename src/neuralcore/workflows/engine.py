@@ -46,16 +46,16 @@ class WorkflowEngine:
     # REGISTRATION & LOADER (stays in WorkflowEngine)
     # ===================================================================
     def register_workflow(
-        self, 
-        name: str, 
-        description: str, 
+        self,
+        name: str,
+        description: str,
         steps: List[Union[str, Dict[str, Any]]],
-        hidden_toolsets: Optional[Union[str, List[str]]] = None
+        hidden_toolsets: Optional[Union[str, List[str]]] = None,
     ):
         self.registered_workflows[name] = {
             "description": description,
             "steps": steps.copy(),
-            "hidden_toolsets": hidden_toolsets,   # store at workflow level
+            "hidden_toolsets": hidden_toolsets,  # store at workflow level
         }
         logger.info(f"✅ Registered workflow '{name}': {description}")
         if hidden_toolsets:
@@ -356,8 +356,14 @@ class WorkflowEngine:
 
     def switch_workflow(self, name: str) -> bool:
         if name not in self.registered_workflows:
-            logger.warning(f"Workflow '{name}' not found")
-            return False
+            logger.warning(
+                f"Workflow '{name}' not found, attempting to reload workflows"
+            )
+            self.load_workflow_from_config()  # reload all workflows
+            if name not in self.registered_workflows:
+                logger.error(f"Workflow '{name}' still not found after reload")
+                return False  # give up if still missing
+
         wf = self.registered_workflows[name]
         self.workflow_steps = self._resolve_steps(wf["steps"])
         self.workflow_description = wf["description"]
@@ -410,7 +416,6 @@ class WorkflowEngine:
         await control_queue.put(msg)
         control_queue.task_done()
         return None
-
 
     async def _iter_handler_events(
         self,
@@ -709,7 +714,7 @@ class WorkflowEngine:
                         getattr(self.agent, "sub_agent", False)
                         and self.current_workflow_name == "sub_agent_execute"
                     ):
-                        self.agent.manager.configure_for_step(step_name,self)
+                        self.agent.manager.configure_for_step(step_name, self)
                     else:
                         # For sub-agents: very light touch
                         if step_name == "llm_stream":
