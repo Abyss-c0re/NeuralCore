@@ -42,18 +42,16 @@ class Action:
             lambda kwargs: f"Executing {name} with {kwargs}"
         )
 
-        self._agent = None  # hidden runtime binding
+        self._bound_agent = None  # Only stores validated agent instances
 
-        params_schema: Dict[str, Any] = {
-            "type": "object",
-            "properties": {
-                k: v for k, v in parameters.items() if k not in ("agent", "self")
-            },
-        }
+        # Build schema (exclude self/agent from LLM parameters)
+        props = {k: v for k, v in parameters.items() if k not in ("agent", "self")}
+        params_schema: Dict[str, Any] = {"type": "object", "properties": props}
 
         if required:
-            required = [r for r in required if r not in ("agent", "self")]
-            params_schema["required"] = required
+            filtered_required = [r for r in required if r not in ("agent", "self")]
+            if filtered_required:
+                params_schema["required"] = filtered_required
 
         if strict:
             params_schema["additionalProperties"] = False
@@ -68,13 +66,51 @@ class Action:
             [self.name, self.description, " ".join(self.tags)]
         ).lower()
 
+        # Detect if first parameter requires binding
         sig = signature(executor)
         params = list(sig.parameters.values())
-        self._needs_agent = bool(params and params[0].name in ("self", "agent"))
+        self._first_param_name = params[0].name if params else None
+        self._needs_agent = self._first_param_name in ("self", "agent")
 
-    def bind_agent(self, agent):
-        self._agent = agent
+    # ====================== BINDING ======================
+
+    def bind_agent(self, agent: Any) -> "Action":
+        """Bind agent instance with proper validation based on parameter name."""
+        if agent is None:
+            raise ValueError(f"Cannot bind None as agent to action '{self.name}'")
+
+        if self._first_param_name == "self":
+            # Strict validation: when declared as 'self', it MUST be a real Agent
+            if not self._is_valid_agent(agent):
+                raise TypeError(
+                    f"Action '{self.name}' is defined with 'self' as first parameter. "
+                    f"It must be bound to an Agent instance (has .agent_id), "
+                    f"but got {type(agent).__name__} instead.\n"
+                    f"→ Use parameter name 'agent' instead of 'self' if binding non-Agent classes."
+                )
+
+        # For parameter name 'agent', we are more permissive (but still require agent_id)
+        elif self._first_param_name == "agent":
+            if not self._is_valid_agent(agent):
+                logger.warning(
+                    f"Action '{self.name}' bound to object without .agent_id "
+                    f"(type: {type(agent).__name__}). This may cause issues."
+                )
+
+        self._bound_agent = agent
+        logger.debug(
+            f"[ACTION BIND] {self.name} → {type(agent).__name__} (agent_id={getattr(agent, 'agent_id', 'N/A')})"
+        )
         return self
+
+    def _is_valid_agent(self, obj: Any) -> bool:
+        """Validate that the object is an Agent instance by checking for .agent_id attribute."""
+        if obj is None:
+            return False
+        # Primary check: Agent class always has .agent_id
+        return hasattr(obj, "agent_id") and isinstance(getattr(obj, "agent_id"), str)
+
+    # ====================== EXECUTION ======================
 
     async def __call__(self, **kwargs) -> Any:
         logger.info(f"[ACTION START] {self.name}")
@@ -89,25 +125,23 @@ class Action:
             call_args = []
 
             if self._needs_agent:
-                if self._agent is None:
+                if self._bound_agent is None:
                     raise RuntimeError(
-                        f"Action '{self.name}' expects agent/self, but no agent is bound"
+                        f"Action '{self.name}' expects agent/self as first parameter, "
+                        f"but no agent was bound."
                     )
-                call_args.append(self._agent)
+                call_args.append(self._bound_agent)
 
             result = self.executor(*call_args, **kwargs)
 
             if asyncio.iscoroutine(result) or isinstance(result, Awaitable):
-                logger.debug(f"[ACTION AWAITING] {self.name} awaiting async result")
+                logger.debug(f"[ACTION AWAITING] {self.name}")
                 result = await result
 
             self.usage_count += 1
 
-            logger.debug(
-                f"[ACTION RAW RESULT] {self.name} type={type(result).__name__} result={str(result)[:500]}"
-            )
-
-            if result is None or result == "" or result == {}:
+            # Normalize empty results
+            if result in (None, "", {}):
                 normalized = {
                     "status": "success",
                     "action": self.name,
@@ -115,16 +149,13 @@ class Action:
                     "args": kwargs,
                 }
                 logger.info(f"[ACTION NORMALIZED EMPTY RESULT] {self.name}")
-                logger.debug(f"[ACTION OUTPUT] {self.name} result={normalized}")
                 return normalized
 
             logger.info(f"[ACTION SUCCESS] {self.name}")
-            logger.debug(f"[ACTION OUTPUT] {self.name} result={str(result)[:500]}")
             return result
 
         except ConfirmationRequired:
             raise
-
         except Exception as exc:
             logger.error(f"[ACTION ERROR] {self.name} error={exc}", exc_info=True)
             return {
@@ -134,7 +165,7 @@ class Action:
                 "args": kwargs,
             }
         finally:
-            self._agent = None
+            self._bound_agent = None  # Reset binding after each call
 
 
 class ActionSet:
