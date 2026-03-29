@@ -6,7 +6,7 @@ from typing import Tuple, List, Dict, Any
 from neuralcore.utils.logger import Logger
 from neuralcore.utils.prompt_builder import PromptBuilder as PromptHelper
 from neuralcore.utils.config import get_loader
-from neuralcore.core.client_factory import get_clients
+from neuralcore.clients.factory import get_clients
 from neuralcore.utils.text_tokenizer import TextTokenizer
 from neuralcore.utils.search import keyword_score, cosine_sim
 

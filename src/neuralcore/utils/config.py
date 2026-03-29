@@ -360,7 +360,7 @@ class ConfigLoader:
             raise ValueError(f"No agent config found for '{agent_id}'")
 
         # --- Client config ---
-        from neuralcore.core.client_factory import get_clients
+        from neuralcore.clients.factory import get_clients
 
         clients = get_clients()
         client_name = agent_cfg.get("client")

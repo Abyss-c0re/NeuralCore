@@ -12,7 +12,7 @@ from neuralcore.actions.manager import (
 )
 from neuralcore.workflows.engine import WorkflowEngine
 from neuralcore.cognition.memory import ContextManager
-from neuralcore.core.client_factory import get_clients
+from neuralcore.clients.factory import get_clients
 from neuralcore.actions.manager import tool
 
 logger = Logger.get_logger()

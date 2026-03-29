@@ -4,7 +4,7 @@ import pytest
 import asyncio
 import numpy as np
 
-from neuralcore.core.client_factory import get_clients
+from neuralcore.clients.factory import get_clients
 
 
 from neuralcore.cognition.memory import (

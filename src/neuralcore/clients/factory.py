@@ -1,7 +1,7 @@
 import inspect
 from typing import Dict, Any
 
-from neuralcore.core.client import LLMClient
+from neuralcore.clients.client import LLMClient
 from neuralcore.actions.actions import Action, ActionSet
 
 from neuralcore.utils.config import ConfigLoader, get_loader
