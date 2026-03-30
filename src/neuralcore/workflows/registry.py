@@ -1,5 +1,7 @@
+from functools import wraps
 from typing import Any, Dict, Callable, List, Union, Optional
 from neuralcore.workflows.engine import WorkflowEngine
+from inspect import signature, iscoroutinefunction
 
 
 from neuralcore.utils.logger import Logger
@@ -45,7 +47,6 @@ class Workflow:
                 f"🔗 Bound step '{step_name}' to engine of agent '{engine.agent.name}'"
             )
 
-
     def set(
         self,
         workflow_name: str = "default",
@@ -79,8 +80,66 @@ class Workflow:
             norm_tools = self._normalize_list(tools)
             norm_hidden = self._normalize_list(hidden_toolsets)
 
-            # Register handler
-            self.handlers[step_name] = fn
+            # ====================== AGENT BINDING LOGIC ======================
+            sig = signature(fn)
+            param_list = list(sig.parameters.items())
+
+            # Check if first parameter is 'agent' or 'self'
+            skip_first = bool(param_list and param_list[0][0] in ("agent", "self"))
+
+            if skip_first:
+                if iscoroutinefunction(fn):
+
+                    @wraps(fn)
+                    async def async_step_wrapper(*args, **kwargs):
+                        # If agent is already passed as first positional arg, use it
+                        if args and (
+                            hasattr(args[0], "agent_id") or args[0] is not None
+                        ):
+                            return await fn(*args, **kwargs)
+
+                        # Otherwise, try to get agent from workflow/engine context
+                        agent = getattr(self, "_current_agent", None)
+                        if agent is None:
+                            # Fallback: look for agent in kwargs (for manual calls)
+                            agent = kwargs.pop("agent", None)
+
+                        if agent is None:
+                            raise RuntimeError(
+                                f"Step '{step_name}' expects 'agent' as first parameter "
+                                f"but no agent instance was provided or bound."
+                            )
+
+                        return await fn(agent, *args, **kwargs)
+
+                    executor = async_step_wrapper
+                else:
+
+                    @wraps(fn)
+                    def sync_step_wrapper(*args, **kwargs):
+                        if args and (
+                            hasattr(args[0], "agent_id") or args[0] is not None
+                        ):
+                            return fn(*args, **kwargs)
+
+                        agent = getattr(self, "_current_agent", None)
+                        if agent is None:
+                            agent = kwargs.pop("agent", None)
+
+                        if agent is None:
+                            raise RuntimeError(
+                                f"Step '{step_name}' expects 'agent' as first parameter "
+                                f"but no agent instance was provided or bound."
+                            )
+
+                        return fn(agent, *args, **kwargs)
+
+                    executor = sync_step_wrapper
+            else:
+                executor = fn
+
+            # Register the (possibly wrapped) handler
+            self.handlers[step_name] = executor
 
             # Auto-create workflow entry
             if workflow_name not in self.workflows:
@@ -100,20 +159,20 @@ class Workflow:
                 "workflow": workflow_name,
                 "toolsets": norm_toolsets,
                 "tools": norm_tools,
-                "hidden_toolsets": norm_hidden,  # ← NEW
+                "hidden_toolsets": norm_hidden,
                 "dynamic_allowed": dynamic_allowed,
                 "full_name": fn.__name__,
+                "requires_agent": skip_first,  # ← Useful for debugging / introspection
             }
 
             logger.info(
                 f"✅ Step '{step_name}' registered to workflow '{workflow_name}' "
-                f"(toolsets={norm_toolsets or '-'}, "
-                f"hidden={norm_hidden or '-'}, "
-                f"tools={norm_tools or '-'}, "
-                f"dynamic_allowed={dynamic_allowed})"
+                f"(toolsets={norm_toolsets or '-'}, hidden={norm_hidden or '-'}, "
+                f"tools={norm_tools or '-'}, dynamic={dynamic_allowed}, "
+                f"agent_bound={skip_first})"
             )
 
-            return fn
+            return fn  # Return original function (decorator transparency)
 
         return decorator
 
