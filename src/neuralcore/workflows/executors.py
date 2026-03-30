@@ -24,8 +24,6 @@ class AgentExecutors:
         self.Phase = phase_enum  # Receive Phase enum from AgentFlow
         self.engine = agent.workflow  # For convenience
 
-    # ====================== EXECUTOR CALLBACK ======================
-
     async def _execute_tool(self, name: str, args: dict):
         """Unified tool executor callback."""
         executor = self.agent.manager.get_executor(name, self.agent)
@@ -35,7 +33,7 @@ class AgentExecutors:
         result = executor(**args)
         return await result if asyncio.iscoroutine(result) else result
 
-    # ====================== CORE AGENTIC LOOP ======================
+    # ====================== CORE AGENTIC LOOP (UPDATED) ======================
 
     async def agentic_loop(
         self,
@@ -43,23 +41,29 @@ class AgentExecutors:
         state: AgentState,
         tools: Optional[ActionSet] = None,
     ) -> AsyncIterator[Tuple[str, Any]]:
-        """Main execution loop for sub-agents / complex tasks."""
+        """Improved agentic loop - now much closer to chat_loop behavior."""
 
         state.phase = self.Phase.EXECUTE
         yield ("phase_changed", {"phase": state.phase.value})
 
-        messages = await self.agent.context_manager.provide_context(
-            query=state.current_task or "Continue",
-            max_input_tokens=self.agent.max_tokens,
-            reserved_for_output=12000,
-            system_prompt=self._build_objective_reminder(),
-            include_logs=True,
-        )
+        max_loops = 15
+        loop_count = 0
+        final_answer_marker = "[FINAL_ANSWER_COMPLETE]"  # Import if needed, or hardcode
 
-        while True:  # Allow restart for ToolBrowser
+        while loop_count < max_loops:
+            loop_count += 1
             tool_browser_detected = False
             text_buffer = ""
-            tool_results = []
+            tool_results: List[str] = []
+            assistant_message = ""
+
+            messages = await self.agent.context_manager.provide_context(
+                query=state.current_task or "Continue and complete the task",
+                max_input_tokens=self.agent.max_tokens,
+                reserved_for_output=12000,
+                system_prompt=self._build_sub_agent_objective_reminder(),  # We'll add this
+                include_logs=True,
+            )
 
             queue = await self.agent.client.stream_with_tools(
                 messages=messages,
@@ -80,24 +84,30 @@ class AgentExecutors:
                     kind, payload = item
 
                     if kind == "content":
-                        text_buffer += payload
-                        yield ("content_delta", payload)
+                        content = str(payload) if payload is not None else ""
+                        text_buffer += content
+                        assistant_message += content
+                        yield ("content_delta", content)
 
                     elif kind in ("tool_delta", "tool_complete", "needs_confirmation"):
                         if isinstance(payload, dict):
-                            tool_name = payload.get("tool_name") or payload.get("name")
+                            tool_name = (
+                                payload.get("tool_name")
+                                or payload.get("name")
+                                or "unknown"
+                            )
                             result = payload.get("result") or payload.get("output")
 
-                            if tool_name and "BrowseTools" in tool_name:
+                            if "BrowseTools" in tool_name:
                                 tool_browser_detected = True
                                 logger.info(
-                                    f"ToolBrowser detected ({tool_name}). Restarting stream."
+                                    f"[BrowseTools] detected. Restarting agentic loop {loop_count}"
                                 )
                                 break
 
-                            if result:
+                            # Store result
+                            if result is not None:
                                 try:
-                                    title = f"{tool_name} result"
                                     summary = (
                                         result.get("summary")
                                         or result.get("message")
@@ -110,17 +120,20 @@ class AgentExecutors:
                                     await (
                                         self.agent.context_manager.add_external_content(
                                             source_type=f"task_result_{tool_name}",
-                                            content=f"[{title}] {summary}",
-                                            metadata={"task": tool_name},
+                                            content=f"[{tool_name}] {summary}",
+                                            metadata={"loop": loop_count},
                                         )
                                     )
                                 except Exception as e:
-                                    logger.warning(
-                                        f"Failed to store external content: {e}"
-                                    )
+                                    logger.warning(f"Failed to store tool result: {e}")
 
-                            if isinstance(result, str) and result.strip():
-                                tool_results.append(result.strip())
+                            content_str = (
+                                json.dumps(result, ensure_ascii=False, default=str)
+                                if isinstance(result, dict)
+                                else str(result or "No output")
+                            )
+                            if content_str.strip():
+                                tool_results.append(content_str.strip())
 
                     elif kind == "finish":
                         break
@@ -128,9 +141,6 @@ class AgentExecutors:
                         yield (kind, payload)
                         return
 
-            except asyncio.CancelledError:
-                yield ("cancelled", "Task cancelled")
-                return
             except Exception as e:
                 logger.error(f"Stream error in agentic_loop: {e}", exc_info=True)
                 yield ("error", str(e))
@@ -139,25 +149,27 @@ class AgentExecutors:
             if tool_browser_detected:
                 continue
 
-            # Normal completion
+            # === NEW: Check for explicit final answer marker ===
             final_reply = text_buffer.strip()
+            if final_answer_marker in final_reply:
+                # Clean the marker out of the visible reply
+                final_reply = final_reply.replace(final_answer_marker, "").strip()
+                logger.info("Final answer marker detected in sub-agent output")
+
+            # === Synthesis fallback (critical for consistency with chat_loop) ===
             if not final_reply and tool_results:
                 final_reply = "\n\n".join(tool_results)
+                logger.info(
+                    f"Synthesizing final reply from {len(tool_results)} tool results"
+                )
+
             if not final_reply:
-                final_reply = "✅ Tool executed successfully."
+                final_reply = "✅ Task completed."
 
-            yield (
-                "llm_response",
-                {
-                    "full_reply": final_reply,
-                    "tool_calls": [],
-                    "is_complete": True,
-                },
-            )
-
+            # Persist only the final reply (avoid flooding)
             await self.agent.context_manager.add_message("assistant", final_reply)
 
-            # Sub-agent → parent context propagation
+            # Sub-agent propagation
             if getattr(self.agent, "sub_agent", False):
                 parent = getattr(self.agent, "parent", None)
                 if parent:
@@ -168,9 +180,36 @@ class AgentExecutors:
                             metadata={"origin": self.agent.agent_id},
                         )
                     except Exception as e:
-                        logger.warning(f"Failed to propagate to parent: {e}")
+                        logger.warning(f"Parent propagation failed: {e}")
 
-            break
+            yield (
+                "llm_response",
+                {
+                    "full_reply": final_reply,
+                    "tool_calls": [],
+                    "is_complete": True,
+                },
+            )
+            break  # Success → exit loop
+
+        else:
+            # Max loops reached
+            logger.warning(f"agentic_loop reached max iterations ({max_loops})")
+            yield (
+                "llm_response",
+                {
+                    "full_reply": "⚠️ Maximum iterations reached while executing sub-task.",
+                    "is_complete": True,
+                },
+            )
+
+    # Add this helper
+    def _build_sub_agent_objective_reminder(self) -> str:
+        base = f"Current goal: {self.agent.goal or 'Complete the assigned micro-task'}"
+        return (
+            base
+            + "\n\nWhen you have fully completed the task, end your response with exactly: [FINAL_ANSWER_COMPLETE]"
+        )
 
     # ====================== CHAT LOOP ======================
 
