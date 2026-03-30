@@ -96,29 +96,65 @@ class Agent:
 
     def _load_agent_config(self, agent_id: str, config_file: Optional[Path]) -> dict:
         logger.debug(f"Loading config for agent_id='{agent_id}'")
+
+        cfg: Dict[str, Any] = {}
+
         if config_file:
             logger.debug(f"Using config file: {config_file}")
+
             if config_file.exists():
                 with open(config_file, "r") as f:
-                    full_cfg = yaml.safe_load(f)
+                    raw = yaml.safe_load(f)
+
+                if not isinstance(raw, dict):
+                    logger.warning("Config root is not a dict")
+                    raw = {}
+
                 logger.debug(
-                    f"Config file loaded, keys at top level: {list(full_cfg.keys())}"
+                    f"Config file loaded, keys at top level: {list(raw.keys())}"
                 )
-                cfg = full_cfg.get("agents", {}).get(agent_id, {})
+
+                agents = raw.get("agents")
+                if not isinstance(agents, dict):
+                    logger.warning("'agents' section is missing or not a dict")
+                    agents = {}
+
+                agent_cfg = agents.get(agent_id)
+                if isinstance(agent_cfg, dict):
+                    cfg = agent_cfg
+                else:
+                    logger.warning(
+                        f"Agent config for '{agent_id}' is missing or invalid"
+                    )
+
             else:
                 logger.warning(f"Config file does not exist: {config_file}")
-                cfg = {}
+
         else:
             logger.debug("Using loader.config")
-            loader_config_agents = getattr(self.loader, "config", {}).get("agents", {})
-            logger.debug(
-                f"Agents in loader.config: {list(loader_config_agents.keys())}"
-            )
-            cfg = loader_config_agents.get(agent_id, {})
+            loader_cfg = getattr(self.loader, "config", {})
+
+            if not isinstance(loader_cfg, dict):
+                logger.warning("loader.config is not a dict")
+                loader_cfg = {}
+
+            loader_agents = loader_cfg.get("agents")
+            if not isinstance(loader_agents, dict):
+                logger.warning("'agents' in loader.config is not a dict")
+                loader_agents = {}
+
+            logger.debug(f"Agents in loader.config: {list(loader_agents.keys())}")
+
+            agent_cfg = loader_agents.get(agent_id)
+            if isinstance(agent_cfg, dict):
+                cfg = agent_cfg
+            else:
+                logger.warning(f"Agent config for '{agent_id}' is missing or invalid")
 
         if not cfg:
             logger.error(f"Agent '{agent_id}' not found in config")
             raise ValueError(f"Agent '{agent_id}' not found")
+
         logger.debug(f"Loaded config for agent '{agent_id}': {list(cfg.keys())}")
         return cfg
 
