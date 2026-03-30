@@ -61,7 +61,12 @@ class WorkflowEngine:
         if hidden_toolsets:
             logger.info(f"   → Hidden toolsets: {hidden_toolsets}")
 
-    def register_step(self, name: str, handler: Callable):
+    def register_step(self, name: str, handler: Optional[Callable]) -> None:
+        """Register a step handler. Skips if handler is None."""
+        if handler is None:
+            logger.warning(f"Attempted to register step '{name}' with None handler")
+            return
+
         self._step_handlers[name] = handler
         logger.info(f"Registered external step: {name}")
 
@@ -355,14 +360,24 @@ class WorkflowEngine:
         return True
 
     def switch_workflow(self, name: str) -> bool:
+
         if name not in self.registered_workflows:
-            logger.warning(
-                f"Workflow '{name}' not found, attempting to reload workflows"
-            )
-            self.load_workflow_from_config()  # reload all workflows
+            logger.warning(f"Workflow '{name}' not found, attempting to reload")
+            self.load_workflow_from_config()
+
+            # If still missing, try to inherit again from parent (in case parent loaded late)
+            if name not in self.registered_workflows and hasattr(
+                self.agent, "get_parent_agent"
+            ):
+                parent = self.agent.get_parent_agent()
+                if parent and hasattr(parent, "workflow"):
+                    self.inherit_workflows_from_parent(parent.workflow)
+
             if name not in self.registered_workflows:
-                logger.error(f"Workflow '{name}' still not found after reload")
-                return False  # give up if still missing
+                logger.error(
+                    f"Workflow '{name}' still not found after reload and inheritance"
+                )
+                return False
 
         wf = self.registered_workflows[name]
         self.workflow_steps = self._resolve_steps(wf["steps"])
@@ -598,6 +613,45 @@ class WorkflowEngine:
             handler, iteration, state, timeout_sec
         ):
             yield event, payload
+
+    def inherit_workflows_from_parent(self, parent_engine: "WorkflowEngine"):
+        """
+        Sub-agents call this to copy all workflows and step handlers from the parent.
+        This is the clean way when AgentFlow lives in the external app.
+        """
+        if not parent_engine or not hasattr(parent_engine, "registered_workflows"):
+            logger.warning("Cannot inherit workflows: invalid parent engine")
+            return
+
+        inherited_wf = 0
+        inherited_steps = 0
+
+        # Inherit workflows
+        for name, wf_data in parent_engine.registered_workflows.items():
+            if name not in self.registered_workflows:
+                self.register_workflow(
+                    name=name,
+                    description=wf_data.get("description", f"Inherited: {name}"),
+                    steps=wf_data.get("steps", []).copy(),
+                    hidden_toolsets=wf_data.get("hidden_toolsets"),
+                )
+                inherited_wf += 1
+                logger.debug(f"Inherited workflow '{name}' from parent")
+
+        # Inherit step handlers (the _wf_* functions from AgentFlow)
+        for step_name, handler in parent_engine._step_handlers.items():
+            if step_name not in self._step_handlers:
+                self.register_step(step_name, handler)
+                inherited_steps += 1
+                logger.debug(f"Inherited step handler '{step_name}' from parent")
+
+        if inherited_wf > 0 or inherited_steps > 0:
+            logger.info(
+                f"✅ Sub-agent inherited {inherited_wf} workflows and "
+                f"{inherited_steps} steps from parent engine"
+            )
+        else:
+            logger.warning("No new workflows/steps were inherited from parent")
 
     async def run(
         self,

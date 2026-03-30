@@ -35,9 +35,10 @@ class Workflow:
 
     def bind_to_engine(self, engine: "WorkflowEngine", instance=None):
         """
-        Register all decorated steps to the engine's step handler map.
-        If 'instance' is provided, bind all step handlers to it.
+        Register ALL steps + ALL workflows into the engine.
+        This is the key fix for sub-agents and switch_workflow.
         """
+        # 1. Register individual step handlers (existing logic)
         for step_name, handler in self.handlers.items():
             bound_handler = handler
             if instance is not None:
@@ -45,6 +46,25 @@ class Workflow:
             engine.register_step(step_name, bound_handler)
             logger.info(
                 f"🔗 Bound step '{step_name}' to engine of agent '{engine.agent.name}'"
+            )
+
+        # 2. NEW: Register the workflows themselves from decorators
+        registered_count = 0
+        for wf_name, wf_meta in self.workflows.items():
+            if wf_name not in engine.registered_workflows:
+                engine.register_workflow(
+                    name=wf_name,
+                    description=wf_meta.get("description", f"Workflow: {wf_name}"),
+                    steps=wf_meta.get("steps", []),
+                )
+                registered_count += 1
+                logger.info(
+                    f"✅ Registered decorator-defined workflow '{wf_name}' into engine"
+                )
+
+        if registered_count > 0:
+            logger.info(
+                f"✅ Synced {registered_count} workflows from @workflow.set decorators"
             )
 
     def set(

@@ -841,11 +841,11 @@ class Agent:
 
     @tool(
         "DeployControls",
-        name="RequestComplexAction",
+        name="DeploySubAgent",
         description="Use when user request requires planning, tools, multiple steps, research or code changes.",
     )
-    async def request_complex_action(self, reason: str):
-        logger.info(f"[RequestComplexAction] Complex task: {reason[:100]}...")
+    async def deploy__sub_agent(self, reason: str):
+        logger.info(f"[DeploySubAgent] Complex task: {reason[:100]}...")
         self.task = reason
         self.goal = reason
 
@@ -1025,6 +1025,15 @@ class SubAgent(Agent):
 
         # --- Load assigned tools only ---
         self.attach_tools(assigned_tools=assigned_tools)
+
+        # === CRITICAL: Inherit workflows and steps from parent ===
+        # Because AgentFlow is in the external app and not instantiated here
+        if hasattr(parent, "workflow") and parent.workflow is not None:
+            self.workflow.inherit_workflows_from_parent(parent.workflow)
+        else:
+            logger.warning(
+                f"Parent agent has no workflow engine - sub-agent '{self.name}' may miss workflows"
+            )
 
         logger.info(
             f"[SUB-AGENT] '{self.name}' created successfully | "
