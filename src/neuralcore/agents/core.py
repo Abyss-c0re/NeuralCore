@@ -825,6 +825,20 @@ class Agent:
     # ================================ TOOLS =======================================
     # Enabling agent to use own methods as tools (search context. deploy sub agents)
 
+    @tool("ContextManager", name="GetContext", description="Search your own memory")
+    async def provide_context(
+        self, query: str, *, agent_metadata: Optional[dict] = None
+    ):
+        agent_metadata = agent_metadata or {}
+        agent_metadata.setdefault("is_sub_agent", getattr(self, "sub_agent", False))
+        agent_metadata.setdefault("agent_id", getattr(self, "agent_id", "unknown"))
+
+        # Only use parent if it exists
+        parent_agent = getattr(self, "parent", None)
+        if getattr(self, "sub_agent", False) and parent_agent:
+            return await parent_agent.context_manager.provide_context(query)
+        return await self.context_manager.provide_context(query)
+
     @tool(
         "DeployControls",
         name="RequestComplexAction",
