@@ -677,7 +677,7 @@ class Agent:
                 )
                 core_tools = [
                     "GetContext",
-                    "RequestComplexAction",
+                    "DeploySubAgent",
                     "GetDeploymentStatus",
                     "BrowseTools",
                 ]
@@ -698,7 +698,7 @@ class Agent:
 
         critical_tools = [
             "GetContext",
-            "RequestComplexAction",
+            "DeploySubAgent",
             "GetDeploymentStatus",
             "BrowseTools",
         ]
