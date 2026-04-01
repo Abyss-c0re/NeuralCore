@@ -368,9 +368,10 @@ class Agent:
 
     async def execute_loop(
         self, loop_name: str, initial_state: Optional[dict] = None, **kwargs
-    ) -> dict:
-        """Delegate loop execution to the WorkflowEngine"""
-        return await self.workflow.execute_loop(loop_name, initial_state, **kwargs)
+    ) -> AsyncIterator[Tuple[str, Any]]:
+        """Delegate loop execution to the WorkflowEngine and yield events"""
+        async for event, payload in self.workflow.execute_loop(loop_name, initial_state, **kwargs):
+            yield event, payload
 
     async def run(
         self,

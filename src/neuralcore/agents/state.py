@@ -32,6 +32,8 @@ class AgentState:
     # Sub-agent tracking
     sub_task_ids: List[str] = field(default_factory=list)
     task_id_map: Dict[int, str] = field(default_factory=dict)
+    complex_reason: str = ""
+    loop_count: int = 0
 
     # History / debugging
     executed_functions: List[Dict[str, Any]] = field(default_factory=list)
@@ -67,6 +69,8 @@ class AgentState:
         self.iteration_history.clear()
         self.last_reflection_decision.clear()
         self.last_progress_snapshot = None
+        self.complex_reason = ""
+        self.loop_count = 0
         self.start_time = time.time()
 
     def add_tool_result(self, tool_name: str, result: Any, success: bool = True):

@@ -30,15 +30,19 @@ class Workflow:
     # ===================================================================
     def condition(self, name: str, description: str = ""):
         """Decorator: @workflow.condition('name')"""
+
         def decorator(fn: Callable):
             self.conditions[name] = fn
             logger.info(
                 f"✅ Condition registered: '{name}' → {description or fn.__doc__ or 'No description'}"
             )
             return fn
+
         return decorator
 
-    def evaluate_condition(self, condition_name: str, state: Any, args: Optional[dict] = None) -> bool:
+    def evaluate_condition(
+        self, condition_name: str, state: Any, args: Optional[dict] = None
+    ) -> bool:
         """Evaluate condition registered with @workflow.condition"""
         if condition_name not in self.conditions:
             logger.warning(f"Condition '{condition_name}' not found.")
@@ -57,8 +61,11 @@ class Workflow:
                 return bool(handler(state, args))
 
         except Exception as e:
-            logger.error(f"Error evaluating condition '{condition_name}': {e}", exc_info=True)
+            logger.error(
+                f"Error evaluating condition '{condition_name}': {e}", exc_info=True
+            )
             return False
+
     # ===================================================================
     # LOOPS
     # ===================================================================
@@ -71,8 +78,6 @@ class Workflow:
         continue_condition: Optional[str] = None,
         description: Optional[str] = None,
     ):
-        """@workflow.loop('name', max_iterations=..., break_condition=...)"""
-
         def decorator(fn: Callable):
             self.loops[loop_name] = {
                 "name": loop_name,
@@ -83,7 +88,7 @@ class Workflow:
                 "description": description or fn.__doc__ or f"Loop: {loop_name}",
             }
 
-            # Register as hidden step for compatibility
+            # Register as hidden step
             step_name = f"_loop_{loop_name}"
             self.handlers[step_name] = fn
 

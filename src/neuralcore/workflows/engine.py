@@ -638,61 +638,45 @@ class WorkflowEngine:
 
     async def execute_loop(
         self, loop_name: str, initial_state: Optional[dict] = None, **kwargs
-    ) -> dict:
-        """
-        Execute a loop defined with @workflow.loop
-        """
+    ) -> AsyncIterator[Tuple[str, Any]]:
         if self.workflow is None:
-            raise RuntimeError("Workflow registry not attached to WorkflowEngine")
+            raise RuntimeError("Workflow registry not attached")
 
         loop_meta = self.workflow.get_loop_metadata(loop_name)
         if not loop_meta:
-            raise ValueError(
-                f"Loop '{loop_name}' not found. "
-                f"Make sure it's decorated with @workflow.loop()"
-            )
+            raise ValueError(f"Loop '{loop_name}' not found.")
 
-        state = initial_state or {}
+        state: AgentState = initial_state if isinstance(initial_state, AgentState) else AgentState()
+
         max_iter = loop_meta.get("max_iterations", 10)
         break_condition = loop_meta.get("break_condition")
-        continue_condition = loop_meta.get("continue_condition")
 
         logger.info(f"🔄 Starting loop '{loop_name}' (max {max_iter} iterations)")
-
-        iteration = 0  # ← Initialize here so it's always defined
 
         for iteration in range(1, max_iter + 1):
             logger.debug(f"[{loop_name}] iteration {iteration}/{max_iter}")
 
             handler = loop_meta["handler"]
 
-            if asyncio.iscoroutinefunction(handler):
-                state = await handler(self.agent, state, **kwargs)
-            else:
-                state = handler(self.agent, state, **kwargs)
+            async for event, payload in handler(self.agent, state, **kwargs):
+                yield event, payload
 
-            # Check break condition
-            if break_condition:
-                if self.evaluate_named_condition(break_condition, state):
-                    logger.info(
-                        f"Loop '{loop_name}' broke on condition '{break_condition}'"
-                    )
-                    break
+                # Update state from llm_response
+                if event == "llm_response" and isinstance(payload, dict):
+                    state.full_reply = payload.get("full_reply", state.full_reply)
+                    state.tool_calls = payload.get("tool_calls", state.tool_calls)
+                    state.is_complete = payload.get("is_complete", state.is_complete)
 
-            # Check continue condition
-            if continue_condition:
-                if not self.evaluate_named_condition(continue_condition, state):
-                    logger.info(
-                        f"Loop '{loop_name}' stopped (continue_condition failed)"
-                    )
-                    break
+                # ACTUAL condition check after every event
+                if break_condition and self.evaluate_named_condition(break_condition, state):
+                    logger.info(f"Loop '{loop_name}' broke on condition '{break_condition}'")
+                    yield ("loop_broken", {"condition": break_condition, "loop_name": loop_name})
+                    return   # Exit immediately
 
         else:
-            # This else runs only if the for loop completed normally (no break)
             logger.warning(f"Loop '{loop_name}' reached max iterations ({max_iter})")
 
-        logger.info(f"✅ Loop '{loop_name}' finished after {iteration} iterations")
-        return state
+        yield ("loop_completed", {"loop_name": loop_name})
 
     async def _run_step_handler(
         self,
