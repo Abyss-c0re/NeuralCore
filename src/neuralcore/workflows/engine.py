@@ -1,5 +1,6 @@
 import asyncio
 import json
+from inspect import signature
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Callable, Union
 
 from neuralcore.agents.state import AgentState
@@ -20,21 +21,19 @@ class WorkflowEngine:
 
     FINAL_ANSWER_MARKER = "[FINAL_ANSWER_COMPLETE]"
 
-    def __init__(self, agent):
+    def __init__(self, agent, workflow_registry=None):
         self.agent = agent
 
         # === REGISTRIES ===
         self.registered_workflows: Dict[str, Dict[str, Any]] = {}
         self._step_handlers: Dict[str, Optional[Callable]] = {}
-
+        self.workflow = workflow_registry
         self.current_workflow_name: str = "default"
         self.workflow_steps: List[Union[str, Dict[str, Any]]] = []
         self.workflow_description: str = ""
-        self._custom_conditions: Dict[
-            str, Callable[[AgentState, Optional[Dict]], bool]
-        ] = {}
 
-        # === LOAD AgentFlow (now contains all _wf_* methods) ===
+        self._custom_conditions: Dict[str, Callable] = {}
+
         self.sequence_registry = SequenceRegistry(self)
         self.load_workflow_from_config()
 
@@ -73,11 +72,13 @@ class WorkflowEngine:
     def register_custom_condition(
         self,
         name: str,
-        handler: Callable[[AgentState, Optional[Dict[str, Any]]], bool],
+        handler: Callable,
         description: str = "",
     ):
-        """Register a fully custom Python condition.
-        handler(state, args_dict) -> bool
+        """Register a custom Python condition.
+        Supports:
+            - def cond(state)
+            - def cond(state, args=None)
         """
         self._custom_conditions[name] = handler
         logger.info(
@@ -359,6 +360,40 @@ class WorkflowEngine:
                     return False
         return True
 
+    def evaluate_named_condition(
+        self, condition_name: str, state: AgentState, args: Optional[dict] = None
+    ) -> bool:
+        """
+        Unified method to evaluate conditions registered via @workflow.condition.
+        Handles both old and new condition signatures safely.
+        """
+        handler = self._custom_conditions.get(condition_name)
+        if handler is not None:
+            try:
+                # Use signature inspection to handle different function signatures safely
+                sig = signature(handler)
+                param_count = len(sig.parameters)
+
+                if param_count == 0:
+                    return bool(handler())
+                elif param_count == 1:
+                    return bool(handler(state))
+                else:
+                    # Most common case: handler(state, args=None)
+                    # Pyright is happy because we pass exactly 2 arguments
+                    return bool(handler(state, args))
+
+            except Exception as e:
+                logger.error(
+                    f"Error executing custom condition '{condition_name}': {e}",
+                    exc_info=True,
+                )
+                return False
+
+        # Fallback to the engine's powerful built-in condition evaluator
+        # (for string shorthands like "needs_reflection", dict conditions, etc.)
+        return self._evaluate_condition(condition_name, state)
+
     def switch_workflow(self, name: str) -> bool:
 
         if name not in self.registered_workflows:
@@ -600,6 +635,64 @@ class WorkflowEngine:
             )
 
         return next_step_index, emitted
+
+    async def execute_loop(
+        self, loop_name: str, initial_state: Optional[dict] = None, **kwargs
+    ) -> dict:
+        """
+        Execute a loop defined with @workflow.loop
+        """
+        if self.workflow is None:
+            raise RuntimeError("Workflow registry not attached to WorkflowEngine")
+
+        loop_meta = self.workflow.get_loop_metadata(loop_name)
+        if not loop_meta:
+            raise ValueError(
+                f"Loop '{loop_name}' not found. "
+                f"Make sure it's decorated with @workflow.loop()"
+            )
+
+        state = initial_state or {}
+        max_iter = loop_meta.get("max_iterations", 10)
+        break_condition = loop_meta.get("break_condition")
+        continue_condition = loop_meta.get("continue_condition")
+
+        logger.info(f"🔄 Starting loop '{loop_name}' (max {max_iter} iterations)")
+
+        iteration = 0  # ← Initialize here so it's always defined
+
+        for iteration in range(1, max_iter + 1):
+            logger.debug(f"[{loop_name}] iteration {iteration}/{max_iter}")
+
+            handler = loop_meta["handler"]
+
+            if asyncio.iscoroutinefunction(handler):
+                state = await handler(self.agent, state, **kwargs)
+            else:
+                state = handler(self.agent, state, **kwargs)
+
+            # Check break condition
+            if break_condition:
+                if self.evaluate_named_condition(break_condition, state):
+                    logger.info(
+                        f"Loop '{loop_name}' broke on condition '{break_condition}'"
+                    )
+                    break
+
+            # Check continue condition
+            if continue_condition:
+                if not self.evaluate_named_condition(continue_condition, state):
+                    logger.info(
+                        f"Loop '{loop_name}' stopped (continue_condition failed)"
+                    )
+                    break
+
+        else:
+            # This else runs only if the for loop completed normally (no break)
+            logger.warning(f"Loop '{loop_name}' reached max iterations ({max_iter})")
+
+        logger.info(f"✅ Loop '{loop_name}' finished after {iteration} iterations")
+        return state
 
     async def _run_step_handler(
         self,

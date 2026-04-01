@@ -11,6 +11,7 @@ from neuralcore.actions.manager import (
     registry,
 )
 from neuralcore.workflows.engine import WorkflowEngine
+from neuralcore.workflows.registry import workflow
 from neuralcore.cognition.memory import ContextManager
 from neuralcore.clients.factory import get_clients
 from neuralcore.actions.manager import tool
@@ -61,7 +62,7 @@ class Agent:
         self.context_manager = ContextManager(self.max_tokens)
 
         self.agent_tools = AgentActionHelper(self)
-        self.workflow = WorkflowEngine(self)
+        self.workflow = WorkflowEngine(self, workflow)
         ToolBrowser(registry, self.manager)
         logger.debug("ToolBrowser registered")
 
@@ -364,6 +365,12 @@ class Agent:
             f"Agent '{self.name}' started in BACKGROUND mode (task={self._background_task.get_name()})"
         )
         return self._background_task
+
+    async def execute_loop(
+        self, loop_name: str, initial_state: Optional[dict] = None, **kwargs
+    ) -> dict:
+        """Delegate loop execution to the WorkflowEngine"""
+        return await self.workflow.execute_loop(loop_name, initial_state, **kwargs)
 
     async def run(
         self,
