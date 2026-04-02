@@ -765,25 +765,28 @@ class ContextManager:
     ) -> List[Dict[str, Any]]:
         messages: List[Dict[str, Any]] = []
 
-        if chat:
-            await self.set_mode("chat")
-
-        # === CHAT MODE – STRICTLY MINIMAL (no KB, no summary, no logs) ===
+        # === CHAT MODE: Simple & direct (the version you preferred) ===
         if chat or self.mode == "chat":
             clean_system = system_prompt.strip()
             messages.append({"role": "system", "content": clean_system})
 
             user_content = query.strip()
+
+            # Handle continuation messages cleanly
             if any(
                 phrase in user_content.upper()
                 for phrase in ["CONTINUATION", "AFTER TOOL", "AFTER_TOOL"]
             ):
-                user_content = "Please give the final clean answer based on the tools you just used."
+                user_content = "Please give the clean final answer based on the tool results you just received."
 
             messages.append(
-                {"role": "user", "content": user_content or "[AUTONOMOUS CONTINUATION]"}
+                {
+                    "role": "user",
+                    "content": user_content or "[AUTONOMOUS CONTINUATION]",
+                }
             )
 
+            # Light pruning
             total_tokens = self.count_tokens(messages)
             if total_tokens > max_input_tokens - reserved_for_output:
                 self.prune_to_fit_context(
@@ -795,9 +798,10 @@ class ContextManager:
                     assistant_role="assistant",
                     tool_role="tool",
                 )
+
             return messages
 
-        # === NORMAL (agentic) MODE – full context (unchanged) ===
+        # === NORMAL / AGENTIC MODE (full RAG - unchanged) ===
         base_system = system_prompt.strip()
         summary = self.get_context_summary()
         full_system = base_system
@@ -808,9 +812,10 @@ class ContextManager:
             try:
                 log_lines = Logger.get_log_data(level="info", max_entries=100)
                 if log_lines:
-                    log_text = "\n".join(log_lines)
+                    log_text = "\n".join(log_lines)  # ← this was missing
                     full_system += (
-                        f"\n\n=== RECENT LOGS ===\n{log_text}\n=== END LOGS ==="
+                        f"\n\n=== RECENT LOGS (INFO, last {len(log_lines)} lines) ===\n"
+                        f"{log_text}\n=== END LOGS ==="
                     )
             except Exception:
                 pass
@@ -823,8 +828,11 @@ class ContextManager:
             if query.strip()
             else 0
         )
+
         target_context_tokens = max_input_tokens - reserved_for_output
-        remaining_tokens = max(0, target_context_tokens - tokens_used - query_tokens)
+        remaining_tokens = target_context_tokens - tokens_used - query_tokens
+        if remaining_tokens < 0:
+            remaining_tokens = 0
 
         kb_tokens = min(max_kb_tokens, remaining_tokens // 2)
         history_tokens_budget = max(remaining_tokens - kb_tokens, min_history_tokens)
@@ -839,9 +847,7 @@ class ContextManager:
                     }
                 )
                 tokens_used = self.count_tokens(messages)
-                remaining_tokens = max(
-                    0, target_context_tokens - tokens_used - query_tokens
-                )
+                remaining_tokens = target_context_tokens - tokens_used - query_tokens
                 history_tokens_budget = max(remaining_tokens, min_history_tokens)
 
         recent_msgs: List[Dict[str, str]] = []
@@ -880,9 +886,14 @@ class ContextManager:
         messages.append(
             {
                 "role": "system",
-                "content": f"⚠️ CONTEXT WINDOW STATUS: max tokens = {self.max_tokens}, current estimated usage = {tokens_used}.",
+                "content": (
+                    f"⚠️ CONTEXT WINDOW STATUS: max tokens = {self.max_tokens}, "
+                    f"current estimated usage = {tokens_used}. "
+                    "If you detect the context is too long, summarize or prune older content."
+                ),
             }
         )
+
         return messages
 
     # ─────────────────────────────────────────────────────────────
