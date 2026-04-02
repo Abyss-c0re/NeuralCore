@@ -2,6 +2,7 @@ import os
 import sys
 import yaml
 import importlib
+from typing import Any
 from pathlib import Path
 
 
@@ -53,14 +54,22 @@ class ConfigLoader:
         print("[WARNING] No config file found")
         return None
 
-    def _load_yaml(self, path: Path | None) -> dict:
+    def _load_yaml(self, path: Path | None) -> dict[str, Any]:
         if path is None or not path.exists():
             print(f"[DEBUG] No YAML found at path: {path}")
             return {}
+
         print(f"[DEBUG] Loading YAML from: {path}")
-        with open(path, "r") as f:
-            data = yaml.safe_load(f) or {}
-        return data
+        with open(path, "r", encoding="utf-8") as f:
+            data: Any = yaml.safe_load(f) or {}
+
+        if isinstance(data, dict):
+            return data
+        else:
+            print(
+                f"[WARNING] Expected dict from YAML, got {type(data).__name__} instead. Using empty dict."
+            )
+            return {}
 
     # --------------------------
     # Generic config getters
@@ -115,9 +124,8 @@ class ConfigLoader:
     # --------------------------
     def load_tool_sets(self, sets_to_load: list[str] | None = None):
         """
-        Load all tool sets from config, supporting:
-        - external folders (`folder` in config)
-        - default internal folders (app_root/tools/<set_name>/)
+        Load tool sets with explicit module support + smart fallback.
+        Now each set only loads the modules you specify in config.
         """
         app_root = self.app_root
         sets_cfg = self.config.get("tools", {})
@@ -133,47 +141,60 @@ class ConfigLoader:
 
             print(f"[DEBUG] Loading tool set '{set_name}'")
 
+            # ── 1. Determine folder ─────────────────────────────────────
             folder = cfg.get("folder")
-            # Determine folder path
             if folder:
                 folder_path = Path(folder).expanduser().resolve()
                 print(
                     f"[DEBUG] Using external folder for set '{set_name}': {folder_path}"
                 )
-                if not folder_path.exists() or not folder_path.is_dir():
-                    print(f"[WARNING] Tool folder '{folder_path}' does not exist")
-                    continue
             else:
+                # Prefer per-set folder first
                 folder_path = app_root / "tools" / set_name
                 if not folder_path.exists() or not folder_path.is_dir():
-                    fallback_folder = app_root / "tools"
-                    if fallback_folder.exists() and fallback_folder.is_dir():
-                        folder_path = fallback_folder
-                        print(
-                            f"[DEBUG] Fallback folder for set '{set_name}': {folder_path}"
-                        )
-                    else:
-                        print(f"[WARNING] No tools folder found for set '{set_name}'")
-                        continue
-                else:
+                    folder_path = app_root / "tools"  # flat fallback
                     print(
-                        f"[DEBUG] Using internal folder for set '{set_name}': {folder_path}"
+                        f"[DEBUG] Fallback folder for set '{set_name}': {folder_path}"
                     )
+
+            if not folder_path.exists() or not folder_path.is_dir():
+                print(
+                    f"[WARNING] Tool folder '{folder_path}' does not exist for set '{set_name}'"
+                )
+                continue
+
+            # ── 2. Get explicit modules from config (new feature) ───────
+            modules_to_load = cfg.get("modules", []) if isinstance(cfg, dict) else []
 
             sys.path.insert(0, str(folder_path))
             imported_any = False
-            for py_file in folder_path.glob("*.py"):
-                if py_file.name == "__init__.py":
-                    continue
-                try:
-                    importlib.import_module(py_file.stem)
-                    print(f"[INFO] Imported '{py_file.name}' for set '{set_name}'")
-                    imported_any = True
-                except Exception as e:
-                    print(f"[ERROR] Failed to import {py_file.name}: {e}")
+
+            if modules_to_load:
+                # ✅ Explicit modules (recommended)
+                for mod_name in modules_to_load:
+                    try:
+                        importlib.import_module(mod_name)
+                        print(f"[INFO] Imported '{mod_name}' for set '{set_name}'")
+                        imported_any = True
+                    except Exception as e:
+                        print(
+                            f"[ERROR] Failed to import {mod_name} for set '{set_name}': {e}"
+                        )
+            else:
+                # Old behavior: import everything (kept for backward compat)
+                for py_file in folder_path.glob("*.py"):
+                    if py_file.name == "__init__.py":
+                        continue
+                    try:
+                        importlib.import_module(py_file.stem)
+                        print(f"[INFO] Imported '{py_file.name}' for set '{set_name}'")
+                        imported_any = True
+                    except Exception as e:
+                        print(f"[ERROR] Failed to import {py_file.name}: {e}")
+
             sys.path.pop(0)
 
-            # Registry check
+            # ── 3. Registry check ───────────────────────────────────────
             try:
                 from neuralcore.actions.manager import registry
 
@@ -185,25 +206,20 @@ class ConfigLoader:
                             f"[WARNING] Tool set '{set_name}' imported but not found in registry"
                         )
                 else:
-                    print(f"[WARNING] No .py files imported for set '{set_name}'")
+                    print(f"[WARNING] No modules imported for set '{set_name}'")
             except ImportError:
                 if not imported_any:
-                    print(f"[WARNING] No .py files imported for set '{set_name}'")
+                    print(f"[WARNING] No modules imported for set '{set_name}'")
 
     def load_workflow_sets(self, engine):
         """
-        Load workflow sets for the agent's workflow engine.
-
-        Supports:
-        - Simple string: workflow: deploy_chat
-        - Old dict style (backward compatibility)
-        - Global workflows defined at top level
-        - Python modules and YAML workflows from folders
+        Simplified workflow loader for single-config setup.
+        All workflows are defined under top-level 'workflows:' in config.yaml.
+        No folder scanning needed.
         """
-
         agent_cfg = getattr(engine.agent, "config", {})
         agent_workflow_cfg = agent_cfg.get("workflow")
-        global_workflows = getattr(self, "config", {}).get("workflows", {})
+        global_workflows = self.config.get("workflows", {})
 
         # ── 1. Resolve the workflow (support string OR dict) ─────────────────────
         resolved = {}
@@ -268,71 +284,31 @@ class ConfigLoader:
                 f"[DEBUG] No valid workflow found, falling back to default for agent '{engine.agent.name}'"
             )
 
-        # ── 3. Optionally load workflow sets from folders (Python + YAML) ───────
-        sets_cfg = getattr(engine, "workflow_sets_config", {})
-        app_root = getattr(engine, "app_root", Path.cwd())
+        # No folder-based workflow_sets loading when using single config file
+        print("[DEBUG] Single-config mode: Skipping folder-based workflow set loading")
 
-        for set_name, cfg in sets_cfg.items():
-            folder = cfg.get("folder")
-            folder_path = (
-                Path(folder).expanduser().resolve()
-                if folder
-                else app_root / "workflows" / set_name
-            )
-            if not folder_path.exists() or not folder_path.is_dir():
-                folder_path = app_root / "workflows"
+    # Helper method for safe YAML workflow loading
+    def _load_workflow_yaml(
+        self, yaml_path: Path, engine, set_name: str, filename: str
+    ):
+        try:
+            with open(yaml_path, "r", encoding="utf-8") as f:
+                wf_data: Any = yaml.safe_load(f)
 
-            if not folder_path.exists() or not folder_path.is_dir():
+            if wf_data is None:
+                wf_data = {}
+            elif not isinstance(wf_data, dict):
                 print(
-                    f"[WARNING] Workflow folder not found for set '{set_name}': {folder_path}"
+                    f"[WARNING] Workflow YAML '{filename}' root is not a dict (got {type(wf_data)})"
                 )
-                continue
+                wf_data = {"content": wf_data}
 
-            sys.path.insert(0, str(folder_path))
-            imported_any = False
-
-            # Load Python workflow modules
-            for py_file in folder_path.glob("*.py"):
-                if py_file.name == "__init__.py":
-                    continue
-                try:
-                    importlib.import_module(py_file.stem)
-                    imported_any = True
-                    print(
-                        f"[INFO] Imported Python workflow '{py_file.name}' as set '{set_name}'"
-                    )
-
-                    try:
-                        from neuralcore.workflows.registry import condition
-
-                        condition.register_to_engine(engine)
-                    except Exception as e:
-                        print(
-                            f"[WARNING] Failed to register conditions from '{py_file.name}': {e}"
-                        )
-
-                except Exception as e:
-                    print(f"[ERROR] Failed to import workflow {py_file.name}: {e}")
-
-            # Load YAML workflow files
-            for yaml_file in list(folder_path.glob("*.yml")) + list(
-                folder_path.glob("*.yaml")
-            ):
-                try:
-                    with open(yaml_file, "r") as f:
-                        wf_data = yaml.safe_load(f)
-                    engine.registered_workflows[set_name] = wf_data
-                    imported_any = True
-                    print(
-                        f"[INFO] Loaded workflow YAML '{yaml_file.name}' as set '{set_name}'"
-                    )
-                except Exception as e:
-                    print(f"[ERROR] Failed to load workflow YAML {yaml_file.name}: {e}")
-
-            sys.path.pop(0)
-
-            if not imported_any:
-                print(f"[WARNING] No workflows loaded for set '{set_name}'")
+            engine.registered_workflows[set_name] = wf_data
+            print(f"[INFO] Loaded workflow YAML '{filename}' as set '{set_name}'")
+            return True
+        except Exception as e:
+            print(f"[ERROR] Failed to load workflow YAML {filename}: {e}")
+            return False
 
     # --------------------------
     # Loader for workflow sets (YAML-based)
