@@ -370,7 +370,9 @@ class Agent:
         self, loop_name: str, initial_state: Optional[dict] = None, **kwargs
     ) -> AsyncIterator[Tuple[str, Any]]:
         """Delegate loop execution to the WorkflowEngine and yield events"""
-        async for event, payload in self.workflow.execute_loop(loop_name, initial_state, **kwargs):
+        async for event, payload in self.workflow.execute_loop(
+            loop_name, initial_state, **kwargs
+        ):
             yield event, payload
 
     async def run(
@@ -687,7 +689,7 @@ class Agent:
                     "GetContext",
                     "DeploySubAgent",
                     "GetDeploymentStatus",
-                    "BrowseTools",
+                    "FindTool",
                 ]
                 self.manager.load_tools(
                     [t for t in core_tools if t in self.registry.all_actions]
@@ -708,7 +710,7 @@ class Agent:
             "GetContext",
             "DeploySubAgent",
             "GetDeploymentStatus",
-            "BrowseTools",
+            "FindTool",
         ]
         for tool_name in critical_tools:
             if tool_name in self.registry.all_actions and not self.manager.is_loaded(
@@ -850,7 +852,7 @@ class Agent:
     @tool(
         "DeployControls",
         name="DeploySubAgent",
-        description="Use when user request requires planning, tools, multiple steps, research or code changes.",
+        description="Deploy sub-agents ONLY when the task is complex and requires multiple steps OR the user explicitly requests agent deployment. Never use for simple or single-step requests.",
     )
     async def deploy__sub_agent(self, reason: str):
         logger.info(f"[DeploySubAgent] Complex task: {reason[:100]}...")
