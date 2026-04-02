@@ -1,4 +1,5 @@
 import math
+import asyncio
 import inspect
 
 from functools import wraps
@@ -476,7 +477,7 @@ class DynamicActionManager:
             logger.info(f"Unloaded all tools from sets: {', '.join(toolset_names)}")
 
     def unload_all(self):
-        """Unload all non-persistent tools. Respect protection flag."""
+        """Unload ONLY non-persistent tools. DynamicCore stays loaded at all times."""
         if self.protect_persistent_tools:
             to_remove = [
                 name
@@ -493,7 +494,7 @@ class DynamicActionManager:
 
         self._set_to_tools.clear()
 
-        # Auto-restore persistent tools if protection is enabled
+        # Auto-restore persistent tools (including BrowseTools) if protection is enabled
         if self.protect_persistent_tools:
             for p_name in self._persistent_tools:
                 if (
@@ -504,25 +505,23 @@ class DynamicActionManager:
                     self.add(action, origin_set=origin)
 
         logger.info(
-            f"Unloaded dynamic tools. Persistent tools protected: {self.protect_persistent_tools}"
+            f"Unloaded dynamic tools only. Persistent tools (DynamicCore) protected: {self.protect_persistent_tools}"
         )
 
-    def reset_to_default_package(self, step_name: str, workflow=None) -> int:
-        """Safe reset for chat loop: clear only ephemeral tools, restore default package."""
+    def reset_to_default_package(self, step_name: str, engine) -> int:
+        """Reset to step defaults while keeping DynamicCore (persistent tools) fully loaded."""
         logger.info(f"🔄 Resetting to default tool package for step '{step_name}'")
 
-        # Unload only non-persistent tools
-        ephemeral = [t for t in self._loaded_tools if t not in self._persistent_tools]
-        if ephemeral:
-            self.unload_tools(ephemeral)
+        # NO aggressive unload — only non-persistent if protection is off
+        if not self.protect_persistent_tools:
+            ephemeral = [
+                t for t in self._loaded_tools if t not in self._persistent_tools
+            ]
+            if ephemeral:
+                self.unload_tools(ephemeral)
 
-        # Load default from decorator
-        if workflow is None:
-            from neuralcore.workflows.registry import workflow as global_workflow
-
-            workflow = global_workflow
-
-        meta = workflow.get_step_metadata(step_name) if workflow else None
+        # Load default package from decorator metadata (toolsets/tools)
+        meta = engine.get_step_metadata(step_name) if engine else None
         loaded_count = 0
 
         if meta:
@@ -535,17 +534,27 @@ class DynamicActionManager:
                 self.load_tools(tools)
                 loaded_count += len(tools) if isinstance(tools, (list, tuple)) else 1
 
-        # Always restore persistent tools
-        if self.protect_persistent_tools:
-            for p_name in self._persistent_tools:
-                if p_name in self.registry.all_actions and not self.is_loaded(p_name):
-                    action, origin = self.registry.all_actions[p_name]
-                    self.add(action, origin_set=origin)
-                    loaded_count += 1
+        # Always ensure persistent tools (DynamicCore) are present
+        for p_name in self._persistent_tools:
+            if p_name in self.registry.all_actions and not self.is_loaded(p_name):
+                action, origin = self.registry.all_actions[p_name]
+                self.add(action, origin_set=origin)
+                loaded_count += 1
 
         logger.info(
-            f"✅ Default package restored ({loaded_count} tools, persistent protected)"
+            f"✅ Default package restored ({loaded_count} tools, DynamicCore kept persistent)"
         )
+
+        # Extra safety for BrowseTools
+        if "BrowseTools" in self._persistent_tools and not self.is_loaded(
+            "BrowseTools"
+        ):
+            if "BrowseTools" in self.registry.all_actions:
+                action, origin = self.registry.all_actions["BrowseTools"]
+                self.add(action, origin_set=origin)
+                loaded_count += 1
+                logger.debug("Re-added BrowseTools after reset (safety net)")
+
         return loaded_count
 
     def is_loaded(self, tool_name: str) -> bool:
@@ -576,19 +585,18 @@ class DynamicActionManager:
 
 
 # ─────────────────────────────────────────────────────────────
-# Tool Browser
+# Tool Browser — PURE DYNAMIC SEARCH
 # ─────────────────────────────────────────────────────────────
 class ToolBrowser(Action):
     def __init__(self, registry: "ActionRegistry", manager: DynamicActionManager):
         super().__init__(
             name="BrowseTools",
-            description=(
-                "Find and load tools not currently available. "
-                "Provide a short action query (e.g. 'open file', 'edit file')."
-            ),
+            description="Search for tools that match the user intent. Returns matching tools that can be used immediately.",
             parameters={
-                "query": {"type": "string", "description": "Short action phrase"},
-                "limit": {"type": "integer", "default": 8},
+                "query": {
+                    "type": "string",
+                    "description": "User intent or action phrase",
+                },
             },
             executor=self._search,
             required=["query"],
@@ -596,35 +604,24 @@ class ToolBrowser(Action):
         self.registry = registry
         self.manager = manager
         manager.current_set.add(self)
-        logger.debug(" ToolBrowser added to DynamicCore")
+        logger.debug(" ToolBrowser added to DynamicCore (persistent)")
 
-    async def _search(self, query: str, limit: int = 8):
-        logger.debug(f" ToolBrowser search: query='{query}', limit={limit}")
-        results = self.registry.search(query, limit)
+    async def _search(self, query: str):
+        logger.debug(f"ToolBrowser pure search: query='{query}'")
+
+        results = self.registry.search(query, limit=3)
         if not results:
-            logger.debug(" No matching tools found")
             return {
                 "status": "no_matches",
-                "message": "No tools found. Try broader terms.",
+                "message": "No tools found matching your request.",
             }
 
-        best = results[:3]
-        self.manager.load_tools([a.name for a, _ in best])
-        logger.debug(f" ToolBrowser loaded {len(best)} tools")
+        self.manager.load_tools([a.name for a, _ in results])
 
         return {
-            "status": "success",
-            "loaded_tools": [a.name for a, _ in best],
-            "matching_tools": [
-                {
-                    "name": a.name,
-                    "description": a.description,
-                    "category": set_name,
-                    "parameters": getattr(a, "_raw_schema", {}).get("parameters", {}),
-                }
-                for a, set_name in results
-            ],
-            "message": f"{len(best)} tools loaded and ready.",
+            "status": "tools_loaded",
+            "loaded_tools": [a.name for a, _ in results],
+            "message": f"Found and loaded {len(results)} relevant tools.",
         }
 
 
