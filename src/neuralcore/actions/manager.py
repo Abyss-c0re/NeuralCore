@@ -1,5 +1,5 @@
 import math
-import asyncio
+import re
 import inspect
 
 from functools import wraps
@@ -26,6 +26,13 @@ PYTHON_TO_JSON_TYPE = {
 }
 
 
+TOKENIZER = re.compile(r"\b\w+(?:[-_]\w+)*\b")
+
+
+def _tokenize(text: str) -> list[str]:
+    return TOKENIZER.findall(text.lower())
+
+
 def map_type_to_json(param_annotation):
     """Convert Python type annotation to JSON Schema type."""
     if param_annotation is _empty:
@@ -46,11 +53,6 @@ def map_type_to_json(param_annotation):
 
 
 # ─────────────────────────────────────────────────────────────
-# Dynamic Action Manager
-# ─────────────────────────────────────────────────────────────
-
-
-# ─────────────────────────────────────────────────────────────
 # Main Action Registry
 # ─────────────────────────────────────────────────────────────
 class ActionRegistry:
@@ -61,11 +63,7 @@ class ActionRegistry:
         self.all_actions: Dict[str, tuple[Action, str]] = {}
         self._index = []
 
-        # Dynamic manager
-
-        logger.debug(" ActionRegistry initialized")
-
-        # Load ToolBrowser
+        logger.debug("ActionRegistry initialized")
 
     def register_set(self, name: str, action_set: ActionSet):
         logger.debug(f"Registering set '{name}' with {len(action_set.actions)} actions")
@@ -86,53 +84,76 @@ class ActionRegistry:
         self._add_to_index(action, set_name)
 
     def _add_to_index(self, action: Action, set_name: str):
+        """Improved indexing: separate name, description, tags, set_name for better scoring."""
         self.all_actions[action.name] = (action, set_name)
-        searchable = " ".join(
-            [action.name, action.description]
-            + getattr(action, "tags", [])
-            + getattr(action, "aliases", [])
-        ).lower()
-        self._index.append({"action": action, "set": set_name, "text": searchable})
-        logger.debug(f" Added action '{action.name}' to index under set '{set_name}'")
 
-    def search(self, query: str, limit: int = 20):
+        name_tokens = _tokenize(action.name)
+        desc_tokens = _tokenize(action.description)
+        tag_tokens = [t.lower() for t in getattr(action, "tags", [])]
+        alias_tokens = [a.lower() for a in getattr(action, "aliases", [])]
+        set_tokens = _tokenize(set_name)
+
+        searchable_text = " ".join(
+            name_tokens + desc_tokens + tag_tokens + alias_tokens + set_tokens
+        )
+
+        self._index.append(
+            {
+                "action": action,
+                "set": set_name,
+                "name_tokens": name_tokens,  # ← new
+                "text": searchable_text,  # full text for fuzzy/keyword
+                "set_tokens": set_tokens,  # ← new
+            }
+        )
+        logger.debug(f"Added action '{action.name}' to index under set '{set_name}'")
+
+    def search(self, query: str, limit: int = 5):
+        """Pure dynamic lexical + semantic search. No hardcoded boosts."""
         query = query.lower().strip()
-        query_words = query.split()
+        if not query:
+            return []
 
+        query_words = _tokenize(query)
         results = []
 
         for entry in self._index:
             action = entry["action"]
-            text = entry["text"]
-            set_name = entry["set"]
+            text = entry["text"]  # name + desc + tags + set
+            name_tokens = entry["name_tokens"]
 
-            # 1. Scoring
-            k_score = keyword_score(query_words, text.split())
-            f_score = fuzzy_score(query, text)
+            # Core scoring
+            k_score = keyword_score(query_words, text) * 5.0
+            f_score = fuzzy_score(query, text) * 3.0
 
-            usage_bonus = math.log1p(action.usage_count)
-            set_bonus = 1.5 if query in set_name.lower() else 0
+            # Strong name priority
+            name_match = len(set(query_words) & set(name_tokens))
+            name_boost = name_match * 8.0
 
-            # 2. Weighted Total (Increased weights to ensure matches)
-            total = k_score * 5 + f_score * 3 + usage_bonus * 0.4 + set_bonus
+            # Bigram bonus for phrases like "web search", "read pdf"
+            bigram_bonus = 0.0
+            if len(query_words) >= 2:
+                query_bigrams = {
+                    " ".join(query_words[i : i + 2])
+                    for i in range(len(query_words) - 1)
+                }
+                text_bigrams = {
+                    " ".join(_tokenize(text)[i : i + 2])
+                    for i in range(len(_tokenize(text)) - 1)
+                }
+                bigram_bonus = len(query_bigrams & text_bigrams) * 4.0
 
-            # 3. Lower Threshold (0.10 is safe; 0.4 was too strict)
-            if total > 0.10:
-                results.append((total, action, set_name))
+            total_score = k_score + f_score + name_boost + bigram_bonus
 
-        # Sort by score (highest first)
+            if total_score > 3.0:  # reasonable threshold
+                results.append((total_score, action, entry["set"]))
+
         results.sort(key=lambda x: x[0], reverse=True)
         return [(a, s) for _, a, s in results[:limit]]
 
+    # list_all_tools, debug_print_all_tools, execute unchanged...
     def list_all_tools(self, limit: int = 100) -> List[Dict]:
-        """
-        Returns a list of all tools currently in the registry.
-        """
         tools = []
-
-        # Correct Unpacking:
-        # 1. key (name_string)
-        # 2. value (tuple containing Action and set_name)
         for name, (action, set_name) in self.all_actions.items():
             tools.append(
                 {
@@ -142,16 +163,9 @@ class ActionRegistry:
                     "tags": getattr(action, "tags", []),
                 }
             )
-
-        # Sort by name for readability
         tools.sort(key=lambda x: x["name"])
+        return tools[:limit] if limit else tools
 
-        if limit:
-            return tools[:limit]
-
-        return tools
-
-    # Optional: Quick debug print version
     def debug_print_all_tools(self, limit: int = 8):
         tools = self.list_all_tools(limit)
         print("\n" + "=" * 80)
@@ -170,17 +184,15 @@ class ActionRegistry:
         if name not in self.all_actions:
             raise ValueError(f"Action '{name}' not found")
         action, _ = self.all_actions[name]
-        logger.debug(f" Executing action '{name}' with args: {kwargs}")
+        logger.debug(f"Executing action '{name}' with args: {kwargs}")
         result = action.executor(**kwargs)
         action.usage_count = getattr(action, "usage_count", 0) + 1
         return result
 
 
-# ─────────────────────────────────────────────────────────────
-# Create global singleton
-# ─────────────────────────────────────────────────────────────
+# Global singleton
 registry = ActionRegistry()
-logger.debug(f" Global registry created with sets: {list(registry.sets.keys())}")
+logger.debug(f"Global registry created with sets: {list(registry.sets.keys())}")
 
 
 class DynamicActionManager:
@@ -192,7 +204,7 @@ class DynamicActionManager:
         self._set_to_tools: Dict[str, Set[str]] = {}
 
         self._persistent_tools: Set[str] = {
-            "BrowseTools",
+            "FindTool",
             "GetContext",
             "DeploySubAgent",
             "GetDeploymentStatus",
@@ -361,7 +373,7 @@ class DynamicActionManager:
             logger.debug(
                 "Sub-agent llm_stream: preserving assigned tools (flexible mode)"
             )
-            self.unload_tools(["BrowseTools"])
+            self.unload_tools(["FindTool"])
         else:
             self.unload_all()  # respects protect_persistent_tools
 
@@ -402,8 +414,8 @@ class DynamicActionManager:
 
         # 4. Dynamic browsing control
         if not meta.get("dynamic_allowed", True):
-            self.unload_tools(["BrowseTools"])
-            logger.debug(f"BrowseTools disabled for step '{step_name}'")
+            self.unload_tools(["FindTool"])
+            logger.debug(f"FindTool disabled for step '{step_name}'")
 
         # FINAL SAFETY: Restore persistent tools unless protection is off
         if self.protect_persistent_tools:
@@ -494,7 +506,7 @@ class DynamicActionManager:
 
         self._set_to_tools.clear()
 
-        # Auto-restore persistent tools (including BrowseTools) if protection is enabled
+        # Auto-restore persistent tools (including FindTool) if protection is enabled
         if self.protect_persistent_tools:
             for p_name in self._persistent_tools:
                 if (
@@ -545,15 +557,15 @@ class DynamicActionManager:
             f"✅ Default package restored ({loaded_count} tools, DynamicCore kept persistent)"
         )
 
-        # Extra safety for BrowseTools
-        if "BrowseTools" in self._persistent_tools and not self.is_loaded(
-            "BrowseTools"
+        # Extra safety for FindTool
+        if "FindTool" in self._persistent_tools and not self.is_loaded(
+            "FindTool"
         ):
-            if "BrowseTools" in self.registry.all_actions:
-                action, origin = self.registry.all_actions["BrowseTools"]
+            if "FindTool" in self.registry.all_actions:
+                action, origin = self.registry.all_actions["FindTool"]
                 self.add(action, origin_set=origin)
                 loaded_count += 1
-                logger.debug("Re-added BrowseTools after reset (safety net)")
+                logger.debug("Re-added FindTool after reset (safety net)")
 
         return loaded_count
 
@@ -590,12 +602,16 @@ class DynamicActionManager:
 class ToolBrowser(Action):
     def __init__(self, registry: "ActionRegistry", manager: DynamicActionManager):
         super().__init__(
-            name="BrowseTools",
-            description="Search for tools that match the user intent. Returns matching tools that can be used immediately.",
+            name="FindTool",
+            description=(
+                "Call this when you need a specific tool or capability that is not currently available. "
+                "Provide a short, clear description of the required action (3-10 words). "
+                "Examples: 'web search', 'read pdf file', 'search code', 'list directory', 'fetch webpage'"
+            ),
             parameters={
                 "query": {
                     "type": "string",
-                    "description": "User intent or action phrase",
+                    "description": "Short keyword-rich description of the needed capability",
                 },
             },
             executor=self._search,
@@ -604,20 +620,20 @@ class ToolBrowser(Action):
         self.registry = registry
         self.manager = manager
         manager.current_set.add(self)
-        logger.debug(" ToolBrowser added to DynamicCore (persistent)")
+        logger.info("ToolBrowser (FindTool) added to DynamicCore as persistent tool")
 
     async def _search(self, query: str):
-        logger.debug(f"ToolBrowser pure search: query='{query}'")
-
+        logger.info(f"ToolBrowser search executed: query='{query}'")
         results = self.registry.search(query, limit=3)
         if not results:
+            logger.info("ToolBrowser: no matches found")
             return {
                 "status": "no_matches",
                 "message": "No tools found matching your request.",
             }
 
         self.manager.load_tools([a.name for a, _ in results])
-
+        logger.info(f"ToolBrowser: loaded {len(results)} tools")
         return {
             "status": "tools_loaded",
             "loaded_tools": [a.name for a, _ in results],
