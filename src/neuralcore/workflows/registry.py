@@ -251,6 +251,13 @@ class Workflow:
 
         if registered_count > 0:
             logger.info(f"✅ Synced {registered_count} workflows from decorators")
+        for cond_name, handler in self.conditions.items():
+            engine.register_custom_condition(
+                name=cond_name,
+                handler=handler,
+                description="Auto-bound from @workflow.condition",
+            )
+            logger.info(f"✅ Bound condition handler: '{cond_name}' to engine")
 
     def get_step_metadata(self, step_name: str) -> Optional[Dict[str, Any]]:
         return self.metadata.get(step_name)

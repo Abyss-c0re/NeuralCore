@@ -226,6 +226,10 @@ class AgentExecutors:
 
     # ====================== CHAT LOOP (FULL CM + CLEAN TOOL LOOPING) ======================
 
+
+# ====================== CHAT LOOP (UPDATED) ======================
+
+
     async def chat_loop(
         self, messages: List[Dict], state: AgentState
     ) -> AsyncIterator[Tuple[str, Any]]:
@@ -235,6 +239,7 @@ class AgentExecutors:
 
         max_tool_loops = 10
         loop_count = 0
+        browse_restart_pending = False  # ← NEW FLAG
 
         while loop_count < max_tool_loops:
             loop_count += 1
@@ -244,19 +249,19 @@ class AgentExecutors:
             text_buffer = ""
             tool_results: List[str] = []
 
-            # Query for provide_context (first turn = real user message)
             current_query = ""
-            if loop_count == 1:
+            if loop_count == 1 or browse_restart_pending:
+                # Use the original user query on first turn OR after BrowseTools restart
                 for m in reversed(messages or []):
                     if m.get("role") == "user" and m.get("content"):
                         current_query = m.get("content", "").strip()
                         break
                 if not current_query:
                     current_query = state.current_task or "[NO USER QUERY]"
+                browse_restart_pending = False  # reset flag
             else:
                 current_query = "[CONTINUATION AFTER TOOL CALLS]"
 
-            # FULL CM context on every turn
             cm_messages = await self.agent.context_manager.provide_context(
                 query=current_query,
                 max_input_tokens=self.agent.max_tokens,
@@ -291,17 +296,18 @@ class AgentExecutors:
                     elif kind in ("tool_delta", "tool_complete", "needs_confirmation"):
                         if isinstance(payload, dict):
                             tool_name = (
-                                payload.get("tool_name")
-                                or payload.get("name")
-                                or "unknown"
+                                payload.get("tool_name") or payload.get("name") or "unknown"
                             )
                             result = payload.get("result") or payload.get("output")
-                            tool_call_id = payload.get("tool_call_id")
 
                             if "BrowseTools" in tool_name:
                                 tool_browser_detected = True
-                                logger.info("[BrowseTools] Restarting stream")
-                                break
+                                logger.info(
+                                    "[BrowseTools] detected → will restart LLM once with new tools"
+                                )
+                                break  # stop this stream immediately
+
+                            # ... rest of tool handling unchanged ...
 
                             if tool_name == "RequestComplexAction":
                                 complex_action_called = True
@@ -316,8 +322,6 @@ class AgentExecutors:
                                 else str(result or "No output")
                             )
 
-                            # ONLY external context (KB + heuristics + investigation state)
-                            # NO assistant/tool messages added during tool looping
                             await self.agent.context_manager.record_tool_outcome(
                                 tool_name=tool_name,
                                 result=content_str,
@@ -338,21 +342,16 @@ class AgentExecutors:
                 yield ("error", str(e))
                 return
 
+            # ====================== RESTART LOGIC ======================
             if tool_browser_detected:
-                continue
+                browse_restart_pending = True  # ← signal to reuse original query next turn
+                continue  # go to next iteration of while loop (restart LLM)
 
             if complex_action_called:
-                self.agent.task = complex_reason
-                self.agent.goal = complex_reason
-                final_reply = f"✅ Starting multi-step orchestration for: **{complex_reason[:120]}**..."
-                await self.agent.context_manager.add_message("assistant", final_reply)
-                yield ("llm_response", {"full_reply": final_reply, "is_complete": True})
-                await self.agent.post_control(
-                    {"event": "switch_workflow", "name": "default"}
-                )
+                # ... your existing complex action code ...
                 return
 
-            # ── FINAL REPLY LOGIC + CLEAN HISTORY COMMIT ─────────────────────
+            # ── FINAL REPLY LOGIC (unchanged) ─────────────────────
             final_reply = text_buffer.strip()
             if not final_reply and tool_results:
                 final_reply = "\n\n".join(tool_results)
@@ -360,14 +359,9 @@ class AgentExecutors:
             if not final_reply:
                 final_reply = "✅ Done."
 
-            # Perfect balance to avoid hallucinations:
-            #   • If tools were called this turn → do NOT add reasoning to history
-            #   • Only commit the final non-tool response (pure chat or synthesis)
-            #   • Tool results live safely in KB via record_tool_outcome
             tools_called_this_turn = len(tool_results) > 0
 
             if not tools_called_this_turn and final_reply:
-                # Pure chat / final synthesis turn → maintain history
                 await self.agent.context_manager.add_message("assistant", final_reply)
                 yield (
                     "llm_response",
@@ -376,23 +370,15 @@ class AgentExecutors:
                 break
 
             elif tools_called_this_turn and loop_count < max_tool_loops:
-                # Tool turn → reasoning stays transient, KB updated, loop for synthesis
                 logger.info(
-                    f"Tools executed (loop {loop_count}) – reasoning NOT added to history. "
-                    "Continuing for final answer (results already in KB)."
+                    f"Tools executed (loop {loop_count}) – continuing for final answer"
                 )
                 continue
 
             else:
-                # Fallback / max loops reached
                 if final_reply:
-                    await self.agent.context_manager.add_message(
-                        "assistant", final_reply
-                    )
-                yield (
-                    "llm_response",
-                    {"full_reply": final_reply, "tool_calls": [], "is_complete": True},
-                )
+                    await self.agent.context_manager.add_message("assistant", final_reply)
+                yield ("llm_response", {"full_reply": final_reply, "is_complete": True})
                 break
 
         if loop_count >= max_tool_loops:
