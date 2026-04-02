@@ -183,19 +183,23 @@ logger.debug(f" Global registry created with sets: {list(registry.sets.keys())}"
 
 
 class DynamicActionManager:
-    """Manages dynamically loaded tools for the current session."""
-
     def __init__(self, registry: "ActionRegistry"):
         self.registry = registry
         self.current_set = ActionSet("DynamicCore")
-        self._loaded_tools: Set[str] = set()  # tool names currently active
-        self._tool_to_set: Dict[str, str] = {}  # tool_name → originating set_name
-        self._set_to_tools: Dict[
-            str, Set[str]
-        ] = {}  # set_name → {tool_names loaded from it}
+        self._loaded_tools: Set[str] = set()
+        self._tool_to_set: Dict[str, str] = {}
+        self._set_to_tools: Dict[str, Set[str]] = {}
 
-        # Always keep BrowseTools available
-        self._persistent_tools: Set[str] = {"BrowseTools"}
+        self._persistent_tools: Set[str] = {
+            "BrowseTools",
+            "GetContext",
+            "DeploySubAgent",
+            "GetDeploymentStatus",
+        }
+
+        # Flag to allow unloading persistent tools when explicitly needed
+        # Default = True (protect them)
+        self.protect_persistent_tools = True
 
         logger.debug("DynamicActionManager initialized")
 
@@ -322,7 +326,9 @@ class DynamicActionManager:
     ) -> int:
         """
         Configure tools for a workflow step based on @workflow.set decorator.
-        Supports workflow-level and step-level hidden_toolsets.
+        - By default protects persistent tools.
+        - Respects hidden_toolsets and dynamic_allowed.
+        - Always restores persistent tools at the end unless protection is disabled.
         """
         if workflow is None:
             from neuralcore.workflows.registry import workflow as global_workflow
@@ -344,20 +350,19 @@ class DynamicActionManager:
 
         logger.info(f"🔧 Configuring tools for workflow step: '{step_name}'")
 
-        # Determine context
         workflow_name = getattr(workflow, "current_workflow_name", "") or getattr(
             workflow, "name", ""
         )
         is_sub_workflow = workflow_name == "sub_agent_execute"
 
-        # === Smart Sub-Agent Handling ===
+        # Decide unload strategy
         if is_sub_workflow and step_name == "llm_stream":
             logger.debug(
                 "Sub-agent llm_stream: preserving assigned tools (flexible mode)"
             )
             self.unload_tools(["BrowseTools"])
         else:
-            self.unload_all()
+            self.unload_all()  # respects protect_persistent_tools
 
         loaded_count = 0
 
@@ -372,10 +377,8 @@ class DynamicActionManager:
             self.load_tools(tools)
             loaded_count += len(tools) if isinstance(tools, (list, tuple)) else 1
 
-        # === 3. Hide unwanted toolsets (workflow-level + step-level) ===
+        # 3. Handle hidden_toolsets
         hidden_toolsets: List[str] = []
-
-        # Try to get workflow-level hidden_toolsets from the registry via workflow object
         if engine:
             wf_meta = engine.registered_workflows.get(workflow_name)
             if wf_meta and wf_meta.get("hidden_toolsets"):
@@ -385,7 +388,6 @@ class DynamicActionManager:
                 elif isinstance(hidden, (list, tuple)):
                     hidden_toolsets.extend(hidden)
 
-        # Step-level hidden_toolsets (higher priority)
         step_hidden = meta.get("hidden_toolsets")
         if step_hidden:
             if isinstance(step_hidden, str):
@@ -402,13 +404,19 @@ class DynamicActionManager:
             self.unload_tools(["BrowseTools"])
             logger.debug(f"BrowseTools disabled for step '{step_name}'")
 
+        # FINAL SAFETY: Restore persistent tools unless protection is off
+        if self.protect_persistent_tools:
+            for p_name in self._persistent_tools:
+                if p_name in self.registry.all_actions and not self.is_loaded(p_name):
+                    action, origin = self.registry.all_actions[p_name]
+                    self.add(action, origin_set=origin)
+                    loaded_count += 1
+
         current_tools = len(self.current_set.actions)
         logger.info(
             f"✅ Step '{step_name}' configured with {current_tools} tools "
-            f"(toolsets={toolsets or '-'}, "
-            f"hidden={hidden_toolsets or '-'}, "
-            f"tools={tools or '-'}, "
-            f"dynamic_allowed={meta.get('dynamic_allowed', True)})"
+            f"(toolsets={toolsets or '-'}, hidden={hidden_toolsets or '-'}, "
+            f"tools={tools or '-'}, dynamic_allowed={meta.get('dynamic_allowed', True)})"
         )
 
         return loaded_count
@@ -468,29 +476,77 @@ class DynamicActionManager:
             logger.info(f"Unloaded all tools from sets: {', '.join(toolset_names)}")
 
     def unload_all(self):
-        """Unload all non-persistent dynamic tools."""
-        to_remove = self._loaded_tools - self._persistent_tools
-        if not to_remove:
-            return
+        """Unload all non-persistent tools. Respect protection flag."""
+        if self.protect_persistent_tools:
+            to_remove = [
+                name
+                for name in self._loaded_tools
+                if name not in self._persistent_tools
+            ]
+        else:
+            to_remove = list(self._loaded_tools)
 
-        for name in list(to_remove):
+        for name in to_remove:
             self.current_set.remove_by_name(name)
             self._loaded_tools.remove(name)
             self._tool_to_set.pop(name, None)
 
-        self._set_to_tools.clear()  # all dynamic origins gone
+        self._set_to_tools.clear()
 
-        # Re-add persistent tools (e.g. BrowseTools)
-        for p_name in self._persistent_tools:
-            if p_name in self.registry.all_actions:
-                action, _ = self.registry.all_actions[p_name]
-                if p_name not in self._loaded_tools:
-                    self.current_set.add(action)
-                    self._loaded_tools.add(p_name)
+        # Auto-restore persistent tools if protection is enabled
+        if self.protect_persistent_tools:
+            for p_name in self._persistent_tools:
+                if (
+                    p_name in self.registry.all_actions
+                    and p_name not in self._loaded_tools
+                ):
+                    action, origin = self.registry.all_actions[p_name]
+                    self.add(action, origin_set=origin)
 
         logger.info(
-            f"Unloaded all dynamic tools. Retained persistent: {', '.join(self._persistent_tools)}"
+            f"Unloaded dynamic tools. Persistent tools protected: {self.protect_persistent_tools}"
         )
+
+    def reset_to_default_package(self, step_name: str, workflow=None) -> int:
+        """Safe reset for chat loop: clear only ephemeral tools, restore default package."""
+        logger.info(f"🔄 Resetting to default tool package for step '{step_name}'")
+
+        # Unload only non-persistent tools
+        ephemeral = [t for t in self._loaded_tools if t not in self._persistent_tools]
+        if ephemeral:
+            self.unload_tools(ephemeral)
+
+        # Load default from decorator
+        if workflow is None:
+            from neuralcore.workflows.registry import workflow as global_workflow
+
+            workflow = global_workflow
+
+        meta = workflow.get_step_metadata(step_name) if workflow else None
+        loaded_count = 0
+
+        if meta:
+            toolsets = meta.get("toolsets")
+            if toolsets:
+                loaded_count += self.load_toolsets(toolsets)
+
+            tools = meta.get("tools")
+            if tools:
+                self.load_tools(tools)
+                loaded_count += len(tools) if isinstance(tools, (list, tuple)) else 1
+
+        # Always restore persistent tools
+        if self.protect_persistent_tools:
+            for p_name in self._persistent_tools:
+                if p_name in self.registry.all_actions and not self.is_loaded(p_name):
+                    action, origin = self.registry.all_actions[p_name]
+                    self.add(action, origin_set=origin)
+                    loaded_count += 1
+
+        logger.info(
+            f"✅ Default package restored ({loaded_count} tools, persistent protected)"
+        )
+        return loaded_count
 
     def is_loaded(self, tool_name: str) -> bool:
         return tool_name in self._loaded_tools
