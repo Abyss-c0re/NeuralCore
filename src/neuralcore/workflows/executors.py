@@ -62,6 +62,7 @@ class AgentExecutors:
         while loop_count < max_loops:
             loop_count += 1
             tool_browser_detected = False
+            browse_query = state.current_task or ""  # ← FIXED: always defined
             text_buffer = ""
             tool_results: List[str] = []
             assistant_message = ""
@@ -106,11 +107,16 @@ class AgentExecutors:
                                 or "unknown"
                             )
                             result = payload.get("result") or payload.get("output")
+                            args = payload.get("args", {}) or {}
 
-                            if "BrowseTools" in tool_name:
+                            if "FindTool" in tool_name:
                                 tool_browser_detected = True
+                                # Extract the exact query the LLM actually sent
+                                browse_query = args.get(
+                                    "query", state.current_task or ""
+                                )
                                 logger.info(
-                                    f"[BrowseTools] detected. Restarting agentic loop {loop_count}"
+                                    f"[FindTool] detected in agentic_loop. Query='{browse_query[:120]}...'"
                                 )
                                 break
 
@@ -153,6 +159,7 @@ class AgentExecutors:
                 return
 
             if tool_browser_detected:
+                await self._handle_browse_tools_interception(browse_query)
                 continue
 
             final_reply = text_buffer.strip()
@@ -225,23 +232,30 @@ class AgentExecutors:
         )
 
     # ====================== CHAT LOOP (FULL CM + CLEAN TOOL LOOPING) ======================
+
     async def chat_loop(
         self, messages: List[Dict], state: AgentState
     ) -> AsyncIterator[Tuple[str, Any]]:
-        logger.debug("=== ENTERING chat_loop (silent tools → grounded final synthesis) ===")
+        logger.debug(
+            "=== ENTERING chat_loop (silent tools → grounded final synthesis) ==="
+        )
 
-        max_tool_loops = 6
+        max_tool_loops = 20
         loop_count = 0
 
         original_user_query = next(
-            (m.get("content", "").strip() for m in reversed(messages or [])
-             if m.get("role") == "user" and m.get("content")),
-            state.current_task or "[USER REQUEST]"
+            (
+                m.get("content", "").strip()
+                for m in reversed(messages or [])
+                if m.get("role") == "user" and m.get("content")
+            ),
+            state.current_task or "[USER REQUEST]",
         )
 
         while loop_count < max_tool_loops:
             loop_count += 1
             tool_browser_detected = False
+            browse_query = original_user_query  # ← FIXED: always defined
             complex_action_called = False
             complex_reason = ""
             tools_called_this_turn = False
@@ -275,8 +289,10 @@ class AgentExecutors:
 
             try:
                 async for item in self.agent.client._drain_queue(queue):
-                    if item is None: continue
-                    if not isinstance(item, tuple) or len(item) != 2: continue
+                    if item is None:
+                        continue
+                    if not isinstance(item, tuple) or len(item) != 2:
+                        continue
 
                     kind, payload = item
 
@@ -285,17 +301,27 @@ class AgentExecutors:
 
                     elif kind in ("tool_delta", "tool_complete", "needs_confirmation"):
                         if isinstance(payload, dict):
-                            tool_name = payload.get("tool_name") or payload.get("name") or "unknown"
+                            tool_name = (
+                                payload.get("tool_name")
+                                or payload.get("name")
+                                or "unknown"
+                            )
                             result = payload.get("result") or payload.get("output")
+                            args = payload.get("args", {}) or {}
 
-                            if "BrowseTools" in tool_name:
+                            if "FindTool" in tool_name:
                                 tool_browser_detected = True
-                                logger.info("[BrowseTools] Restarting stream")
+                                browse_query = args.get("query", original_user_query)
+                                logger.info(
+                                    f"[FindTool] intercepted in chat_loop. Query='{browse_query[:120]}...'"
+                                )
                                 break
 
                             if tool_name == "RequestComplexAction":
                                 complex_action_called = True
-                                complex_reason = str(payload.get("args", {}).get("reason", ""))
+                                complex_reason = str(
+                                    payload.get("args", {}).get("reason", "")
+                                )
                                 break
 
                             tools_called_this_turn = True
@@ -324,23 +350,25 @@ class AgentExecutors:
                 return
 
             if tool_browser_detected:
+                await self._handle_browse_tools_interception(browse_query)
                 continue
 
             if complex_action_called:
-                # ... unchanged
                 self.agent.task = complex_reason
                 self.agent.goal = complex_reason
                 final_reply = f"✅ Starting multi-step orchestration for: **{complex_reason[:120]}**..."
                 await self.agent.context_manager.add_message("assistant", final_reply)
                 yield ("llm_response", {"full_reply": final_reply, "is_complete": True})
-                await self.agent.post_control({"event": "switch_workflow", "name": "default"})
+                await self.agent.post_control(
+                    {"event": "switch_workflow", "name": "default"}
+                )
                 return
 
             if tools_called_this_turn and loop_count < max_tool_loops:
                 logger.info(f"Tools executed (loop {loop_count}) – continuing silently")
                 continue
 
-            # ── STRONG FINAL SYNTHESIS PASS (this fixes the hallucination) ──
+            # ── STRONG FINAL SYNTHESIS PASS ──
             final_query = (
                 f"USER ORIGINAL REQUEST: {original_user_query}\n\n"
                 "You now have ALL tool results stored in the KB / provided context.\n"
@@ -356,15 +384,13 @@ class AgentExecutors:
                 max_input_tokens=self.agent.max_tokens,
                 reserved_for_output=8000,
                 system_prompt=self._build_objective_reminder()
-                           + "\n\nYou are in FINAL ANSWER MODE. Be precise and factual.",
+                + "\n\nYou are in FINAL ANSWER MODE. Be precise and factual.",
                 include_logs=True,
                 chat=True,
             )
 
             final_reply = await self.agent.client.chat(
-                final_messages,
-                temperature=0.0,   # zero creativity
-                top_p=0.1
+                final_messages, temperature=0.0, top_p=0.1
             )
 
             await self.agent.context_manager.add_message("assistant", final_reply)
@@ -377,6 +403,121 @@ class AgentExecutors:
 
         if loop_count >= max_tool_loops:
             logger.warning("Max tool loops reached in chat_loop")
+
+    # ====================== SMART TWO-STAGE FindTool INTERCEPTION ======================
+    async def _handle_browse_tools_interception(self, original_user_query: str):
+        """
+        SMART interception (exactly as requested):
+          1. LLM distills raw user request into a clean, short tool-search query
+             (optimized for registry lexical/fuzzy matching).
+          2. LLM selects the SINGLE best tool + parameters from the full live registry.
+          3. Load the chosen tool(s).
+          4. Inject an enhanced system directive so the next stream restart uses:
+             "use web search to check the weather in Poland".
+        Fully dynamic — no hardcoding, works with any externally-loaded @tool.
+        """
+        logger.info(f"[FindTool INTERCEPT] original='{original_user_query[:150]}...'")
+
+        # ── Stage 1: Refine into precise tool-discovery query ──
+        refinement_prompt = f"""You are an expert tool-router.
+        Convert this user request into a SHORT, keyword-rich query (max 12 words) that will perfectly match the best tool in our registry.
+
+        USER REQUEST: {original_user_query}
+
+        Rules:
+        - Focus ONLY on the core capability needed (e.g. "web search weather", "read pdf file", "search codebase function").
+        - Use terms that appear in tool names/descriptions/tags.
+        - Do NOT include specific data values (e.g. do NOT put "Poland").
+        - Return ONLY the refined query as plain text, nothing else.
+
+        Refined query:"""
+
+        refined_query = await self.agent.client.chat(
+            refinement_prompt, temperature=0.0, max_tokens=80
+        )
+        refined_query = refined_query.strip().strip("\"'").strip()
+        logger.info(f"[FindTool] REFINED search query → '{refined_query}'")
+
+        # ── Stage 2: LLM picks the SINGLE best tool using the refined query ──
+        all_tools = self.agent.registry.list_all_tools(limit=120)
+        tool_list_str = "\n".join(
+            f"• {t['name']} (@{t['set_name']}) — {t['description'][:110]}"
+            for t in all_tools
+        )
+
+        selection_prompt = f"""REFINED INTENT (use this for matching): {refined_query}
+
+        USER ORIGINAL REQUEST: {original_user_query}
+
+        AVAILABLE TOOLS:
+        {tool_list_str}
+
+        You MUST pick the SINGLE best tool that can fulfill the refined intent.
+        Return ONLY valid JSON (no extra text, no markdown):
+
+        {{
+        "tool_name": "exact_tool_name",
+        "parameters": {{ "key": "value", ... }},
+        "reason": "one short sentence"
+        }}
+
+        If no tool is clearly better than others, still pick the closest one."""
+
+        selection_text = await self.agent.client.chat(
+            selection_prompt, temperature=0.0, max_tokens=700
+        )
+
+        try:
+            choice = json.loads(selection_text.strip())
+            tool_name = choice.get("tool_name")
+            params = choice.get("parameters", {}) or {}
+            reason = choice.get("reason", "")
+
+            if tool_name and tool_name in self.agent.registry.all_actions:
+                self.agent.manager.load_tools([tool_name])
+                logger.info(f"[FindTool] LLM selected → {tool_name} | reason: {reason}")
+
+                # Enhanced directive → this becomes the "restart stream with enhanced original prompt"
+                enhanced_directive = (
+                    f"Use the '{tool_name}' tool to handle the request. "
+                    f"Parameters: {json.dumps(params) if params else 'none needed'}.\n"
+                    f"Refined intent was: {refined_query}"
+                )
+
+                await self.agent.context_manager.add_message(
+                    "system", f"[SMART TOOL ROUTER] {enhanced_directive}"
+                )
+
+                await self.agent.context_manager.record_tool_outcome(
+                    tool_name="FindTool",
+                    result=f"Selected {tool_name} for refined query '{refined_query}'",
+                    metadata={
+                        "refined_query": refined_query,
+                        "original": original_user_query[:200],
+                    },
+                )
+                return
+
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning(
+                f"[FindTool] Selection JSON parse failed: {e}. Falling back..."
+            )
+
+        # ── Fallback: refined-query lexical search ──
+        fallback_results = self.agent.registry.search(refined_query, limit=3)
+        if fallback_results:
+            names = [a.name for a, _ in fallback_results]
+            self.agent.manager.load_tools(names)
+            logger.info(f"[FindTool] Fallback loaded via refined query: {names}")
+
+            await self.agent.context_manager.add_message(
+                "system",
+                f"[SMART TOOL ROUTER FALLBACK] Loaded tools for refined intent '{refined_query}': {', '.join(names)}",
+            )
+        else:
+            logger.warning(
+                f"[FindTool] No tools found even after refinement for '{refined_query}'"
+            )
 
     # ====================== HELPERS ======================
 
