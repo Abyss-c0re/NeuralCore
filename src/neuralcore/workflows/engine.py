@@ -636,6 +636,13 @@ class WorkflowEngine:
 
         return next_step_index, emitted
 
+    def get_step_metadata(self, step_name: str) -> Optional[Dict[str, Any]]:
+        """Delegate step metadata lookup to the underlying Workflow registry."""
+        if self.workflow is None:
+            logger.warning(f"No workflow registry attached when requesting metadata for '{step_name}'")
+            return None
+        return self.workflow.get_step_metadata(step_name)
+
     async def execute_loop(
         self, loop_name: str, initial_state: Optional[dict] = None, **kwargs
     ) -> AsyncIterator[Tuple[str, Any]]:
