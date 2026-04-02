@@ -27,19 +27,19 @@ except ImportError:
 # ─────────────────────────────────────────────────────────────
 # TOPIC & OFF-TOPIC DETECTION
 # ─────────────────────────────────────────────────────────────
-MSG_THR = 0.55          # Slightly higher → more stable topic matching
-NUM_MSG = 8             # More messages considered for analysis
-OFF_THR = 0.65          # Lowered a bit → catches drifting conversation earlier
+MSG_THR = 0.55  # Slightly higher → more stable topic matching
+NUM_MSG = 8  # More messages considered for analysis
+OFF_THR = 0.65  # Lowered a bit → catches drifting conversation earlier
 OFF_FREQ = 4
-SLICE_SIZE = 6          # Bigger window for off-topic detection
+SLICE_SIZE = 6  # Bigger window for off-topic detection
 
 # ─────────────────────────────────────────────────────────────
 # CHUNKING STRATEGY (Best balance for 64GB RAM)
 # ─────────────────────────────────────────────────────────────
-CHUNK_SIZE_TOKENS = 768         # ← Recommended increase from 512
-CHUNK_OVERLAP_TOKENS = 128      # ~17% overlap (good sweet spot)
-MAX_CHUNKS_PER_ITEM = 12        # Allow more chunks for large files/code
-TOOL_OUTCOME_NO_CHUNK_THRESHOLD = 1500   # Only chunk very large tool outputs
+CHUNK_SIZE_TOKENS = 768  # ← Recommended increase from 512
+CHUNK_OVERLAP_TOKENS = 128  # ~17% overlap (good sweet spot)
+MAX_CHUNKS_PER_ITEM = 12  # Allow more chunks for large files/code
+TOOL_OUTCOME_NO_CHUNK_THRESHOLD = 1500  # Only chunk very large tool outputs
 
 logger = Logger.get_logger()
 
@@ -266,37 +266,42 @@ class ContextManager:
     async def fetch_embedding(
         self, text: str, size: int = 500, prefix: str | None = None
     ) -> np.ndarray:
-        if self.mode == "chat" and len(text) < 200:
-            logger.debug("Chat mode: skipping embedding for short query")
-            return np.array([])
-        if not text.strip():
+        if not text or not text.strip():
             return np.array([])
 
         prefix_str = prefix or "default"
-        cache_key = hashlib.md5(f"{prefix_str}:{text}".encode("utf-8")).hexdigest()
+        cache_key = hashlib.md5(
+            f"{prefix_str}:{text[:1000]}".encode("utf-8")
+        ).hexdigest()
 
         if cache_key in self.embedding_cache:
             return self.embedding_cache[cache_key]
 
+        emb = np.array([])
+
         if self.fast_embedder is not None:
+            fast_embedder = self.fast_embedder  # Pyright narrowing
             input_text = f"{prefix}: {text}" if prefix else text
+            try:
 
-            def _embed_sync():
-                try:
-                    emb_list = list(self.fast_embedder.embed([input_text]))  # type: ignore[attr-defined]
-                    return np.asarray(emb_list[0], dtype=np.float32)
-                except Exception:
-                    logger.error("FastEmbed failed", exc_info=True)
-                    return np.array([])
+                def _embed_sync():
+                    return np.asarray(
+                        list(fast_embedder.embed([input_text]))[0], dtype=np.float32
+                    )
 
-            emb = await asyncio.to_thread(_embed_sync)
+                emb = await asyncio.to_thread(_embed_sync)
+            except Exception as e:
+                logger.warning(f"FastEmbed failed: {e}")
+
         elif self.embeddings is not None:
-            emb = await self.embeddings.fetch_embedding(text, size)
-        else:
-            emb = np.array([])
+            try:
+                emb = await self.embeddings.fetch_embedding(text, size)
+            except Exception as e:
+                logger.warning(f"Fallback embeddings failed: {e}")
 
         if emb.size > 0 and np.isfinite(emb).all():
             self.embedding_cache[cache_key] = emb
+
         return emb
 
     def _log_action(
@@ -486,6 +491,21 @@ class ContextManager:
         if not content or not content.strip():
             return None
 
+        # ── STRONG ANTI-CONTAMINATION GUARD (this was the missing piece) ──
+        forbidden = [
+            "You are a helpful Terminal AI agent",
+            "CONTEXT WINDOW STATUS",
+            "RELEVANT EXTERNAL CONTEXT",
+            "CHAT CONTEXT (light)",
+            "[FINAL_ANSWER_COMPLETE]",
+            "AUTONOMOUS CONTINUATION",
+        ]
+        if any(phrase in content for phrase in forbidden):
+            logger.warning(
+                f"[KB GUARD] Blocked contaminated content (source={source_type})"
+            )
+            return None
+
         metadata = metadata or {}
         path_key = metadata.get("path") or metadata.get("filename")
 
@@ -513,35 +533,42 @@ class ContextManager:
         )
         self.context_stats["kb_added"] += len(added_keys)
 
-        # Mark for lazy async rebuild
         self._sparse_index_dirty = True
 
-        logger.info(f"Added {len(added_keys)} chunks for {parent_key}")
+        logger.info(
+            f"✅ Added {len(added_keys)} clean chunks for {parent_key} | source={source_type}"
+        )
         return parent_key
 
     # ─────────────────────────────────────────────────────────────
     # SPARSE INDEX (TF-IDF) – fully async + lazy
     # ─────────────────────────────────────────────────────────────
     def _rebuild_sparse_index_sync(self):
-        """Synchronous heavy rebuild – called only from thread."""
-        if len(self.knowledge_base) < 3:
+        """Robust TF-IDF rebuild – fixes 'no terms remain' crash."""
+        if len(self.knowledge_base) < 1:
+            self.tfidf_matrix = None
+            self.kb_keys_ordered = []
             return
         texts = [item.content for item in self.knowledge_base.values()]
         self.kb_keys_ordered = list(self.knowledge_base.keys())
+
         if self.tfidf_vectorizer is None:
             self.tfidf_vectorizer = TfidfVectorizer(
                 lowercase=True,
                 stop_words="english",
-                max_df=0.85,
-                min_df=2,
+                min_df=1,  # ← critical
+                max_df=0.98,
                 ngram_range=(1, 2),
+                max_features=10000,
             )
-        self.tfidf_matrix = self.tfidf_vectorizer.fit_transform(texts)
 
-        # Safe shape access that satisfies strict type checkers
-        shape = getattr(self.tfidf_matrix, "shape", None)
-        if shape is not None:
-            logger.debug(f"Rebuilt TF-IDF sparse matrix: {shape}")
+        try:
+            self.tfidf_matrix = self.tfidf_vectorizer.fit_transform(texts)
+            logger.debug(f"Rebuilt TF-IDF: {getattr(self.tfidf_matrix, 'shape', None)}")
+        except Exception as e:
+            logger.warning(f"TF-IDF failed ({e}), using fallback")
+            self.tfidf_vectorizer = TfidfVectorizer(min_df=1, max_df=1.0)
+            self.tfidf_matrix = self.tfidf_vectorizer.fit_transform(texts)
 
     async def _rebuild_sparse_index(self):
         """Async wrapper for CPU-heavy TF-IDF rebuild."""
@@ -581,11 +608,31 @@ class ContextManager:
     # KNOWLEDGE RETRIEVAL (now fully async)
     # ─────────────────────────────────────────────────────────────
     async def _retrieve_relevant_knowledge(self, query: str, max_kb_tokens: int) -> str:
+        """Fixed version with detailed logging + workaround for chat-mode embedding skip."""
         if not self.knowledge_base or not query.strip():
+            logger.debug(
+                "retrieve_relevant_knowledge: KB empty or query empty → returning ''"
+            )
             return ""
-        query_emb = await self.fetch_embedding(query, prefix="query")
+
+        logger.debug(
+            f"retrieve_relevant_knowledge START | query='{query[:100]}...' | "
+            f"KB_size={len(self.knowledge_base)} | max_kb_tokens={max_kb_tokens}"
+        )
+
+        # Workaround for chat-mode skip (len(text) < 200)
+        # We prepend a descriptive string so the embedding is always computed
+        embedding_query = f"Search query for relevant tool results and context: {query}"
+        query_emb = await self.fetch_embedding(embedding_query, prefix="query")
+
         sparse_scores = await self._sparse_retrieve(query)
 
+        logger.debug(
+            f"Embedding & sparse done | query_emb_size={query_emb.size} | "
+            f"dense_candidates={len(self.knowledge_base)} | sparse_hits={len(sparse_scores)}"
+        )
+
+        # Dense ranking
         dense_ranked = []
         if query_emb.size > 0:
             for key, item in self.knowledge_base.items():
@@ -595,11 +642,17 @@ class ContextManager:
             dense_ranked.sort(reverse=True)
             dense_ranked = dense_ranked[:50]
 
+        # Sparse ranking
         sparse_ranked = sorted(
             [(score, key) for key, score in sparse_scores.items() if score > 0],
             reverse=True,
         )[:50]
 
+        logger.debug(
+            f"RRF candidates → dense_top50={len(dense_ranked)}, sparse_top50={len(sparse_ranked)}"
+        )
+
+        # RRF fusion
         rrf_scores: Dict[str, float] = {}
         k = 60
         for rank, (_, key) in enumerate(dense_ranked, start=1):
@@ -607,29 +660,70 @@ class ContextManager:
         for rank, (_, key) in enumerate(sparse_ranked, start=1):
             rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (rank + k)
 
+        # Final scored list
         scored = sorted(
             [
-                (rrf_scores.get(key, 0.0), self.knowledge_base[key])
+                (rrf_scores.get(key, 0.0), key, self.knowledge_base[key])
                 for key in rrf_scores
             ],
             reverse=True,
         )
+
         parts: List[str] = []
         used = 0
-        for _, item in scored[:40]:
+        tool_outcome_count = 0
+        blocked_count = 0
+
+        for score, key, item in scored[:40]:
+            # Contamination guard
+            if any(
+                forbidden in item.content
+                for forbidden in [
+                    "You are a helpful Terminal AI agent",
+                    "CONTEXT WINDOW STATUS",
+                    "RELEVANT EXTERNAL CONTEXT",
+                    "CHAT CONTEXT (light)",
+                    "AUTONOMOUS CONTINUATION",
+                    "[FINAL_ANSWER_COMPLETE]",
+                ]
+            ):
+                blocked_count += 1
+                logger.debug(f"[KB GUARD] Blocked contaminated item: {item.key}")
+                continue
+
+            if item.source_type == "tool_outcome":
+                tool_outcome_count += 1
+
             meta_str = ", ".join(f"{k}={v}" for k, v in item.metadata.items() if v)
             header = f"[{item.source_type.upper()}] {item.key}\nMetadata: {meta_str}\n"
             block = f"{header}{item.content}\n{'─' * 50}\n"
+
             block_tokens = (
                 self.tokenizer.count_tokens(block)
                 if self.tokenizer
                 else len(block) // 4
             )
+
             if used + block_tokens > max_kb_tokens:
+                logger.debug(
+                    f"Token budget reached ({used}/{max_kb_tokens}) — stopping"
+                )
                 break
+
             parts.append(block)
             used += block_tokens
-        return "".join(parts)
+
+        result = "".join(parts)
+
+        logger.debug(
+            f"retrieve_relevant_knowledge FINISHED | "
+            f"returned_chars={len(result)} | "
+            f"tool_outcomes_included={tool_outcome_count} | "
+            f"blocked_contaminated={blocked_count} | "
+            f"total_scored={len(scored)}"
+        )
+
+        return result
 
     async def add_message(
         self, role: str, message: str, embedding: np.ndarray | None = None
@@ -806,7 +900,6 @@ class ContextManager:
 
     # ─────────────────────────────────────────────────────────────
     # PROVIDE CONTEXT, PRUNE, TOKEN COUNT, ARCHIVED CONTEXT, RECORD TOOL OUTCOME
-    # (100% unchanged from your original)
     # ─────────────────────────────────────────────────────────────
     async def provide_context(
         self,
@@ -821,30 +914,45 @@ class ContextManager:
     ) -> List[Dict[str, Any]]:
         messages: List[Dict[str, Any]] = []
 
-        if chat or self.mode == "chat":
+        if chat:
+            # ── RICH CHAT MODE: history + relevant KB/files, no agentic pollution ──
             clean_system = system_prompt.strip()
             messages.append({"role": "system", "content": clean_system})
 
-            user_content = query.strip()
-            if any(
-                phrase in user_content.upper()
-                for phrase in ["CONTINUATION", "AFTER TOOL", "AFTER_TOOL"]
-            ):
-                user_content = "Please give the clean final answer based on the tool results you just received."
+            # Recent conversation history
+            if self.pure_chat_history:
+                recent = self.pure_chat_history[-12:]  # bigger history
+                for msg in recent:
+                    messages.append({"role": msg["role"], "content": msg["content"]})
 
+            # Light KB + files (relevant only)
+            if query.strip() and self.knowledge_base:
+                kb_text = await self._retrieve_relevant_knowledge(
+                    query, max_kb_tokens // 2
+                )
+                if kb_text:
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": f"=== RELEVANT TOOL RESULTS & FILES ===\n{kb_text}\n=== END CONTEXT ===",
+                        }
+                    )
+
+            # Current user query
             messages.append(
                 {
                     "role": "user",
-                    "content": user_content or "[AUTONOMOUS CONTINUATION]",
+                    "content": query.strip() or "[AUTONOMOUS CONTINUATION]",
                 }
             )
 
+            # Light prune only if over limit
             total_tokens = self.count_tokens(messages)
             if total_tokens > max_input_tokens - reserved_for_output:
                 self.prune_to_fit_context(
                     messages,
                     max_tokens=max_input_tokens - reserved_for_output,
-                    min_keep_messages=3,
+                    min_keep_messages=4,
                     system_role="system",
                     user_role="user",
                     assistant_role="assistant",
@@ -852,20 +960,21 @@ class ContextManager:
                 )
             return messages
 
+        # ── AGENTIC MODE (unchanged) ──
         base_system = system_prompt.strip()
         summary = self.get_context_summary()
         full_system = base_system
         if summary:
-            full_system += f"\n\n{summary}\n\n→ Use this context to stay aware. Never repeat the summary back to the user."
+            full_system += f"\n\n{summary}\n\n→ Use this context to stay aware. Never repeat the summary."
 
         if include_logs:
             try:
                 log_lines = Logger.get_log_data(level="info", max_entries=100)
                 if log_lines:
-                    log_text = "\n".join(log_lines)
                     full_system += (
-                        f"\n\n=== RECENT LOGS (INFO, last {len(log_lines)} lines) ===\n"
-                        f"{log_text}\n=== END LOGS ==="
+                        f"\n\n=== RECENT LOGS ===\n"
+                        + "\n".join(log_lines)
+                        + "\n=== END LOGS ==="
                     )
             except Exception:
                 pass
@@ -878,14 +987,11 @@ class ContextManager:
             if query.strip()
             else 0
         )
+        target = max_input_tokens - reserved_for_output
+        remaining = max(0, target - tokens_used - query_tokens)
 
-        target_context_tokens = max_input_tokens - reserved_for_output
-        remaining_tokens = target_context_tokens - tokens_used - query_tokens
-        if remaining_tokens < 0:
-            remaining_tokens = 0
-
-        kb_tokens = min(max_kb_tokens, remaining_tokens // 2)
-        history_tokens_budget = max(remaining_tokens - kb_tokens, min_history_tokens)
+        kb_tokens = min(max_kb_tokens, remaining // 2)
+        history_budget = max(remaining - kb_tokens, min_history_tokens)
 
         if query.strip() and kb_tokens > 500:
             kb_text = await self._retrieve_relevant_knowledge(query, kb_tokens)
@@ -897,33 +1003,32 @@ class ContextManager:
                     }
                 )
                 tokens_used = self.count_tokens(messages)
-                remaining_tokens = target_context_tokens - tokens_used - query_tokens
-                history_tokens_budget = max(remaining_tokens, min_history_tokens)
+                remaining = max(0, target - tokens_used - query_tokens)
+                history_budget = max(remaining, min_history_tokens)
 
         recent_msgs: List[Dict[str, str]] = []
         for msg, t in zip(
             reversed(self.current_topic.history),
             reversed(self.current_topic.history_tokens),
         ):
-            if t > history_tokens_budget:
+            if t > history_budget:
                 break
             recent_msgs.insert(0, msg)
-            history_tokens_budget -= t
+            history_budget -= t
             tokens_used += t
         messages.extend(recent_msgs)
 
         messages.append(
             {
                 "role": "user",
-                "content": query if query.strip() else "[AUTONOMOUS CONTINUATION]",
+                "content": query.strip() or "[AUTONOMOUS CONTINUATION]",
             }
         )
 
-        total_tokens = self.count_tokens(messages)
-        if total_tokens > target_context_tokens:
+        if self.count_tokens(messages) > target:
             removed, pruned_turns = self.prune_to_fit_context(
                 messages,
-                max_tokens=target_context_tokens,
+                max_tokens=target,
                 min_keep_messages=5,
                 system_role="system",
                 user_role="user",
@@ -932,17 +1037,6 @@ class ContextManager:
             )
             if pruned_turns:
                 self.current_topic.archived_history.extend(pruned_turns)
-
-        messages.append(
-            {
-                "role": "system",
-                "content": (
-                    f"⚠️ CONTEXT WINDOW STATUS: max tokens = {self.max_tokens}, "
-                    f"current estimated usage = {tokens_used}. "
-                    "If you detect the context is too long, summarize or prune older content."
-                ),
-            }
-        )
 
         return messages
 
@@ -1066,30 +1160,50 @@ class ContextManager:
             used += toks
         return "".join(parts)
 
-    async def record_tool_outcome(self, tool_name: str, result: str, metadata: dict):
+    async def record_tool_outcome(self, tool_name: str, result: Any, metadata: dict):
+        """Fixed – now extremely defensive and logs clearly."""
+        # Convert anything to clean string
+        if not isinstance(result, str):
+            try:
+                if isinstance(result, (list, dict)):
+                    result = json.dumps(result, ensure_ascii=False, default=str)[:4000]
+                else:
+                    result = str(result)
+            except Exception:
+                result = str(result)[:2000] if result is not None else "No output"
+
         summary = result[:800] + ("..." if len(result) > 800 else "")
-        if "not found" in result.lower() or "no such" in result.lower():
-            self.fs_state["negative_findings"].append(
-                (tool_name, metadata.get("path", ""))
-            )
+
+        # Extra safety – never store prompts or internal messages
+        if any(
+            phrase in result
+            for phrase in [
+                "You are a helpful Terminal AI agent",
+                "CONTEXT WINDOW STATUS",
+                "RELEVANT EXTERNAL CONTEXT",
+                "CHAT CONTEXT (light)",
+            ]
+        ):
+            logger.warning(f"🚫 Blocked contaminated tool result for {tool_name}")
+            return
+
         await self.add_external_content(
             source_type="tool_outcome",
-            content=f"Tool: {tool_name}\nResult: {summary}\nMetadata: {metadata}",
+            content=f"Tool: {tool_name}\nResult: {result}\nMetadata: {metadata}",
             metadata={
                 "tool": tool_name,
                 **metadata,
-                "negative": "not found" in result.lower(),
+                "negative": any(x in result.lower() for x in ["not found", "no such"]),
             },
         )
+
         text = result.lower()
         if any(k in text for k in ["error", "exception", "failed"]):
             self.add_unknown(f"{tool_name} issue: {summary[:200]}")
-        if "def " in result or "class " in result:
-            self.add_finding(f"Code structure found via {tool_name}")
-        if "not found" in text:
-            self.add_unknown(f"{metadata.get('path', 'unknown')} not found")
+
         if metadata.get("path"):
             self.complete_subtask(f"inspect {metadata['path']}")
+
         self.tools_executed.append(tool_name)
         self.files_checked.update(
             m.get("path", "") for m in [metadata] if m.get("path")

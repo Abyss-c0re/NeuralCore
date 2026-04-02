@@ -225,42 +225,35 @@ class AgentExecutors:
         )
 
     # ====================== CHAT LOOP (FULL CM + CLEAN TOOL LOOPING) ======================
-
-
-# ====================== CHAT LOOP (UPDATED) ======================
-
-
     async def chat_loop(
         self, messages: List[Dict], state: AgentState
     ) -> AsyncIterator[Tuple[str, Any]]:
-        logger.debug(
-            "=== ENTERING chat_loop (FULL ContextManager + clean tool looping) ==="
-        )
+        logger.debug("=== ENTERING chat_loop (silent tools → grounded final synthesis) ===")
 
-        max_tool_loops = 10
+        max_tool_loops = 6
         loop_count = 0
-        browse_restart_pending = False  # ← NEW FLAG
+
+        original_user_query = next(
+            (m.get("content", "").strip() for m in reversed(messages or [])
+             if m.get("role") == "user" and m.get("content")),
+            state.current_task or "[USER REQUEST]"
+        )
 
         while loop_count < max_tool_loops:
             loop_count += 1
             tool_browser_detected = False
             complex_action_called = False
             complex_reason = ""
-            text_buffer = ""
-            tool_results: List[str] = []
+            tools_called_this_turn = False
 
-            current_query = ""
-            if loop_count == 1 or browse_restart_pending:
-                # Use the original user query on first turn OR after BrowseTools restart
-                for m in reversed(messages or []):
-                    if m.get("role") == "user" and m.get("content"):
-                        current_query = m.get("content", "").strip()
-                        break
-                if not current_query:
-                    current_query = state.current_task or "[NO USER QUERY]"
-                browse_restart_pending = False  # reset flag
+            if loop_count == 1:
+                current_query = original_user_query
             else:
-                current_query = "[CONTINUATION AFTER TOOL CALLS]"
+                current_query = (
+                    f"USER REQUEST: {original_user_query}\n\n"
+                    "Previous tool results are already stored in KB.\n"
+                    "You may call more tools if needed, otherwise prepare for final answer."
+                )
 
             cm_messages = await self.agent.context_manager.provide_context(
                 query=current_query,
@@ -268,12 +261,13 @@ class AgentExecutors:
                 reserved_for_output=12000,
                 system_prompt=self._build_objective_reminder(),
                 include_logs=True,
+                chat=True,
             )
 
             queue = await self.agent.client.stream_with_tools(
                 messages=cm_messages,
                 tools=self.agent.manager.get_action_set("DynamicCore"),
-                temperature=self.agent.temperature,
+                temperature=0.2,
                 max_tokens=self.agent.max_tokens,
                 tool_choice="auto",
                 executor_callback=self._execute_tool,
@@ -281,40 +275,30 @@ class AgentExecutors:
 
             try:
                 async for item in self.agent.client._drain_queue(queue):
-                    if item is None:
-                        continue
-                    if not isinstance(item, tuple) or len(item) != 2:
-                        continue
+                    if item is None: continue
+                    if not isinstance(item, tuple) or len(item) != 2: continue
 
                     kind, payload = item
 
                     if kind == "content":
-                        content = str(payload) if payload is not None else ""
-                        text_buffer += content
-                        yield ("content_delta", content)
+                        pass  # silent, no UI output
 
                     elif kind in ("tool_delta", "tool_complete", "needs_confirmation"):
                         if isinstance(payload, dict):
-                            tool_name = (
-                                payload.get("tool_name") or payload.get("name") or "unknown"
-                            )
+                            tool_name = payload.get("tool_name") or payload.get("name") or "unknown"
                             result = payload.get("result") or payload.get("output")
 
                             if "BrowseTools" in tool_name:
                                 tool_browser_detected = True
-                                logger.info(
-                                    "[BrowseTools] detected → will restart LLM once with new tools"
-                                )
-                                break  # stop this stream immediately
-
-                            # ... rest of tool handling unchanged ...
+                                logger.info("[BrowseTools] Restarting stream")
+                                break
 
                             if tool_name == "RequestComplexAction":
                                 complex_action_called = True
-                                complex_reason = str(
-                                    payload.get("args", {}).get("reason", "")
-                                )
+                                complex_reason = str(payload.get("args", {}).get("reason", ""))
                                 break
+
+                            tools_called_this_turn = True
 
                             content_str = (
                                 json.dumps(result, ensure_ascii=False, default=str)
@@ -328,9 +312,6 @@ class AgentExecutors:
                                 metadata={"loop": loop_count, "chat_mode": True},
                             )
 
-                            if content_str.strip():
-                                tool_results.append(content_str.strip())
-
                     elif kind == "finish":
                         break
                     elif kind in ("error", "cancelled"):
@@ -342,44 +323,57 @@ class AgentExecutors:
                 yield ("error", str(e))
                 return
 
-            # ====================== RESTART LOGIC ======================
             if tool_browser_detected:
-                browse_restart_pending = True  # ← signal to reuse original query next turn
-                continue  # go to next iteration of while loop (restart LLM)
-
-            if complex_action_called:
-                # ... your existing complex action code ...
-                return
-
-            # ── FINAL REPLY LOGIC (unchanged) ─────────────────────
-            final_reply = text_buffer.strip()
-            if not final_reply and tool_results:
-                final_reply = "\n\n".join(tool_results)
-
-            if not final_reply:
-                final_reply = "✅ Done."
-
-            tools_called_this_turn = len(tool_results) > 0
-
-            if not tools_called_this_turn and final_reply:
-                await self.agent.context_manager.add_message("assistant", final_reply)
-                yield (
-                    "llm_response",
-                    {"full_reply": final_reply, "tool_calls": [], "is_complete": True},
-                )
-                break
-
-            elif tools_called_this_turn and loop_count < max_tool_loops:
-                logger.info(
-                    f"Tools executed (loop {loop_count}) – continuing for final answer"
-                )
                 continue
 
-            else:
-                if final_reply:
-                    await self.agent.context_manager.add_message("assistant", final_reply)
+            if complex_action_called:
+                # ... unchanged
+                self.agent.task = complex_reason
+                self.agent.goal = complex_reason
+                final_reply = f"✅ Starting multi-step orchestration for: **{complex_reason[:120]}**..."
+                await self.agent.context_manager.add_message("assistant", final_reply)
                 yield ("llm_response", {"full_reply": final_reply, "is_complete": True})
-                break
+                await self.agent.post_control({"event": "switch_workflow", "name": "default"})
+                return
+
+            if tools_called_this_turn and loop_count < max_tool_loops:
+                logger.info(f"Tools executed (loop {loop_count}) – continuing silently")
+                continue
+
+            # ── STRONG FINAL SYNTHESIS PASS (this fixes the hallucination) ──
+            final_query = (
+                f"USER ORIGINAL REQUEST: {original_user_query}\n\n"
+                "You now have ALL tool results stored in the KB / provided context.\n"
+                "VERY IMPORTANT RULES:\n"
+                "• Answer ONLY using the exact information from the tool results in the context.\n"
+                "• DO NOT invent, hallucinate, or add any files, folders, or results that were not returned.\n"
+                "• Be direct, concise, and factual.\n"
+                "• Do not mention tools, KB, or internal steps."
+            )
+
+            final_messages = await self.agent.context_manager.provide_context(
+                query=final_query,
+                max_input_tokens=self.agent.max_tokens,
+                reserved_for_output=8000,
+                system_prompt=self._build_objective_reminder()
+                           + "\n\nYou are in FINAL ANSWER MODE. Be precise and factual.",
+                include_logs=True,
+                chat=True,
+            )
+
+            final_reply = await self.agent.client.chat(
+                final_messages,
+                temperature=0.0,   # zero creativity
+                top_p=0.1
+            )
+
+            await self.agent.context_manager.add_message("assistant", final_reply)
+
+            yield (
+                "llm_response",
+                {"full_reply": final_reply, "tool_calls": [], "is_complete": True},
+            )
+            break
 
         if loop_count >= max_tool_loops:
             logger.warning("Max tool loops reached in chat_loop")
