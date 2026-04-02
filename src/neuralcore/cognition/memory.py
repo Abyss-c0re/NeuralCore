@@ -25,18 +25,21 @@ except ImportError:
 
 
 # ─────────────────────────────────────────────────────────────
-# CONSTANTS
+# TOPIC & OFF-TOPIC DETECTION
 # ─────────────────────────────────────────────────────────────
-MSG_THR = 0.5
-NUM_MSG = 5
-OFF_THR = 0.7
+MSG_THR = 0.55          # Slightly higher → more stable topic matching
+NUM_MSG = 8             # More messages considered for analysis
+OFF_THR = 0.65          # Lowered a bit → catches drifting conversation earlier
 OFF_FREQ = 4
-SLICE_SIZE = 4
+SLICE_SIZE = 6          # Bigger window for off-topic detection
 
-CHUNK_SIZE_TOKENS = 512
-CHUNK_OVERLAP_TOKENS = 100
-MAX_CHUNKS_PER_ITEM = 8
-TOOL_OUTCOME_NO_CHUNK_THRESHOLD = 1000
+# ─────────────────────────────────────────────────────────────
+# CHUNKING STRATEGY (Best balance for 64GB RAM)
+# ─────────────────────────────────────────────────────────────
+CHUNK_SIZE_TOKENS = 768         # ← Recommended increase from 512
+CHUNK_OVERLAP_TOKENS = 128      # ~17% overlap (good sweet spot)
+MAX_CHUNKS_PER_ITEM = 12        # Allow more chunks for large files/code
+TOOL_OUTCOME_NO_CHUNK_THRESHOLD = 1500   # Only chunk very large tool outputs
 
 logger = Logger.get_logger()
 
@@ -439,7 +442,16 @@ class ContextManager:
         if len(text) < TOOL_OUTCOME_NO_CHUNK_THRESHOLD:
             chunk_texts = [text]
         else:
-            if not self.tokenizer:
+            if self.tokenizer:
+                # Use the proper chunking method from TextTokenizer (respects inner tokenizer.encode/decode)
+                chunk_texts = self.tokenizer.split_text_into_chunks(
+                    text,
+                    max_tokens=CHUNK_SIZE_TOKENS,
+                    overlap=CHUNK_OVERLAP_TOKENS,
+                )
+                chunk_texts = chunk_texts[:MAX_CHUNKS_PER_ITEM]
+            else:
+                # fallback: character-based
                 chunk_size = CHUNK_SIZE_TOKENS * 4
                 overlap = CHUNK_OVERLAP_TOKENS * 4
                 chunks = []
@@ -449,30 +461,6 @@ class ContextManager:
                     chunks.append(text[start:end])
                     start = end - overlap
                 chunk_texts = chunks[:MAX_CHUNKS_PER_ITEM]
-            else:
-                chunk_size = CHUNK_SIZE_TOKENS
-                overlap = CHUNK_OVERLAP_TOKENS
-                chunk_texts = []
-                words = text.split()
-                current_chunk = []
-                current_token_count = 0
-                for word in words:
-                    word_tokens = self.tokenizer.count_tokens(word)
-                    if current_token_count + word_tokens > chunk_size and current_chunk:
-                        chunk_texts.append(" ".join(current_chunk))
-                        if len(chunk_texts) >= MAX_CHUNKS_PER_ITEM:
-                            break
-                        overlap_words = (
-                            current_chunk[-overlap // 4 :] if overlap > 0 else []
-                        )
-                        current_chunk = overlap_words
-                        current_token_count = sum(
-                            self.tokenizer.count_tokens(w) for w in overlap_words
-                        )
-                    current_chunk.append(word)
-                    current_token_count += word_tokens
-                if current_chunk and len(chunk_texts) < MAX_CHUNKS_PER_ITEM:
-                    chunk_texts.append(" ".join(current_chunk))
 
         items = []
         for i, chunk_content in enumerate(chunk_texts):
@@ -549,8 +537,11 @@ class ContextManager:
                 ngram_range=(1, 2),
             )
         self.tfidf_matrix = self.tfidf_vectorizer.fit_transform(texts)
-        if self.tfidf_matrix is not None:  # type guard
-            logger.debug(f"Rebuilt TF-IDF sparse matrix: {self.tfidf_matrix.shape}")  # type: ignore[attr-defined]
+
+        # Safe shape access that satisfies strict type checkers
+        shape = getattr(self.tfidf_matrix, "shape", None)
+        if shape is not None:
+            logger.debug(f"Rebuilt TF-IDF sparse matrix: {shape}")
 
     async def _rebuild_sparse_index(self):
         """Async wrapper for CPU-heavy TF-IDF rebuild."""
