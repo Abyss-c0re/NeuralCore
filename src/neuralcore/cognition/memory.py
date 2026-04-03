@@ -1,4 +1,5 @@
 import re
+import os
 import asyncio
 import time
 import numpy as np
@@ -97,22 +98,16 @@ class ContextManager:
 
         loader = get_loader()
         embed_config = loader.get_client_config("embeddings") or {}
+
         self.use_fastembed = embed_config.get("use_fastembed", True)
         self.fast_embedder = None
         self.fastembed_model = None
 
-        if self.use_fastembed and TextEmbedding:
-            try:
-                model_name = embed_config.get(
-                    "fastembed_model", "BAAI/bge-small-en-v1.5"
-                )
-                self.fast_embedder = TextEmbedding(model_name=model_name)
-                self.fastembed_model = model_name
-                logger.info(f"✅ FastEmbed ready (model: {model_name})")
-            except Exception as e:
-                logger.warning(f"⚠️ FastEmbed init failed: {e}")
-                self.fast_embedder = None
+        # Initialize FastEmbed with full config support
+        if self.use_fastembed and TextEmbedding is not None:
+            self._init_fastembed(embed_config)
 
+        # Tokenizer setup (unchanged)
         self.tokenizer = None
         try:
             self.tokenizer = TextTokenizer.get_instance()
@@ -168,6 +163,60 @@ class ContextManager:
         self._mode_lock = asyncio.Lock()
         self.pure_chat_history: List[Dict[str, str]] = []
         self._last_analysis_ts = 0.0
+
+    def _init_fastembed(self, embed_config: dict):
+        """Helper method to initialize FastEmbed with full path handling."""
+        model_name = embed_config.get("fastembed_model", "BAAI/bge-small-en-v1.5")
+
+        local_path = embed_config.get("fastembed_local_path")
+        cache_dir = embed_config.get("fastembed_cache_dir")
+        local_files_only = embed_config.get("fastembed_local_files_only", False)
+
+        init_kwargs = {"model_name": model_name}
+
+        try:
+            # === Handle tilde expansion for local_path ===
+            if local_path:
+                # Expand ~, ~user, and environment variables
+                expanded_local = os.path.expanduser(local_path)
+                expanded_local = os.path.expandvars(
+                    expanded_local
+                )  # in case someone uses $HOME
+                expanded_local = os.path.abspath(expanded_local)  # make it absolute
+
+                if os.path.isdir(expanded_local):
+                    init_kwargs["specific_model_path"] = expanded_local
+                    logger.info(
+                        f"✅ FastEmbed: Loading from local path → {expanded_local}"
+                    )
+                else:
+                    logger.warning(
+                        f"⚠️  fastembed_local_path '{local_path}' (resolved to '{expanded_local}') does not exist. "
+                        f"Falling back to Hugging Face cache/download."
+                    )
+
+            # === Cache directory (also expand ~) ===
+            if cache_dir:
+                expanded_cache = os.path.abspath(
+                    os.path.expanduser(os.path.expandvars(cache_dir))
+                )
+                init_kwargs["cache_dir"] = expanded_cache
+                logger.info(f"   FastEmbed cache directory: {expanded_cache}")
+
+            # === Offline mode ===
+            if local_files_only:
+                init_kwargs["local_files_only"] = True
+                logger.info("   FastEmbed: local_files_only=True (strict offline mode)")
+            if self.use_fastembed and TextEmbedding is not None:
+                # Initialize
+                self.fast_embedder = TextEmbedding(**init_kwargs)
+                self.fastembed_model = model_name
+
+                logger.info(f"✅ FastEmbed ready (model: {model_name})")
+
+        except Exception as e:
+            logger.warning(f"⚠️ FastEmbed init failed: {e}")
+            self.fast_embedder = None
 
     async def set_mode(self, mode: str) -> None:
         async with self._mode_lock:
