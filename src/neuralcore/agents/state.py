@@ -11,6 +11,9 @@ class AgentState:
     is_complete: bool = False
     phase: Any = None
 
+    # ← NEW: Hybrid chat mode (used by goal_achieved condition)
+    mode: str = "task"  # "casual" or "task"
+
     # Tool execution results (used by needs_reflection and error_rate_high)
     tool_results: List[Dict[str, Any]] = field(default_factory=list)
 
@@ -72,6 +75,7 @@ class AgentState:
         self.complex_reason = ""
         self.loop_count = 0
         self.start_time = time.time()
+        self.mode = "task"  # ← reset to task for new cycles
 
     def add_tool_result(self, tool_name: str, result: Any, success: bool = True):
         """Helper to record tool outcomes."""

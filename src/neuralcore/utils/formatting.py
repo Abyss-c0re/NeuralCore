@@ -4,6 +4,7 @@ import json
 import asyncio
 
 from typing import List, Dict, Any, Optional, Union
+from neuralcore.actions.actions import Action
 
 from neuralcore.utils.logger import Logger
 
@@ -29,6 +30,28 @@ def safe_parse_json(raw_text: str):
     except json.JSONDecodeError as e:
         logger.debug(f"JSON parsing still failed: {e}")
         return None
+
+def safe_json_dumps(obj: Any, **kwargs) -> str:
+    """Never crash on Action, custom objects, Pydantic models, etc."""
+    def default(o: Any):
+        if isinstance(o, Action):                          # ← explicit protection
+            return {
+                "name": getattr(o, "name", "unknown"),
+                "type": getattr(o, "type", "tool"),
+                # never serialize .executor or internal state
+            }
+        if hasattr(o, "model_dump"):      # Pydantic v2
+            return o.model_dump()
+        if hasattr(o, "dict"):            # Pydantic v1
+            return o.dict()
+        if hasattr(o, "__dict__"):
+            return {k: v for k, v in o.__dict__.items() if not k.startswith("_")}
+        return str(o)
+
+    try:
+        return json.dumps(obj, default=default, ensure_ascii=False, **kwargs)
+    except Exception:
+        return str(obj)   # ultimate fallback — never crash the UI
 
 
 async def drain_queue_to_string(queue: asyncio.Queue) -> str:
