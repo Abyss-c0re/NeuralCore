@@ -563,22 +563,29 @@ class Agent:
             self.current_task = ""
             logger.info(f"Agent '{self.name}' run finished")
 
+    # ====================== IMPROVED COMPLEX DEPLOYMENT ======================
+
     async def start_complex_deployment(
         self,
         task_description: str,
         user_facing_name: Optional[str] = None,
         sub_profile: Optional[str] = None,
         assigned_tools: Optional[List[str]] = None,
-        custom_system_prompt: Optional[str] = None,
+        custom_system_prompt: Optional[str] = None,  # ← kept for backward compatibility
         temperature: Optional[float] = None,
         max_iterations: Optional[int] = None,
+        depends_on: Optional[str] = None,  # ← dependency support
     ) -> str:
+        """
+        Start a sub-agent for a focused micro-task with optional dependency.
+        """
         self._sub_task_counter += 1
         task_id = f"deploy_{self.agent_id}_{self._sub_task_counter:03d}"
         display_name = user_facing_name or task_description[:65]
 
         logger.info(
-            f"[DEPLOY] Starting sub-task {task_id}: {display_name} | tools={len(assigned_tools) if assigned_tools else 'all'}"
+            f"[DEPLOY] Starting sub-task {task_id}: {display_name} | "
+            f"depends_on={depends_on or 'None'} | tools={len(assigned_tools) if assigned_tools else 'all'}"
         )
 
         self.sub_tasks[task_id] = {
@@ -592,15 +599,23 @@ class Agent:
             "task_obj": None,
             "result": None,
             "error": None,
+            "depends_on": depends_on,
+            "dependents": [],
+            "completed_at": None,
+            "custom_system_prompt": custom_system_prompt,  # store it here for the runner
         }
+
+        # Register reverse dependency
+        if depends_on and depends_on in self.sub_tasks:
+            self.sub_tasks[depends_on]["dependents"].append(task_id)
 
         try:
             sub_agent = SubAgent(
                 parent=self,
                 task_name=display_name,
                 assigned_tools=assigned_tools,
-                custom_system_prompt=custom_system_prompt,
-                temperature=temperature,
+                custom_system_prompt=custom_system_prompt,  # pass to SubAgent __init__
+                temperature=temperature or 0.25,
                 max_iterations=max_iterations,
                 profile=sub_profile,
                 agent_id_override=f"{self.agent_id}_sub_{self._sub_task_counter}",
@@ -608,15 +623,20 @@ class Agent:
 
             sub_agent.task = task_description
             sub_agent.goal = task_description
-            # UPGRADE: propagate current task to sub-agent
             sub_agent.current_task = task_description
             sub_agent.current_role = f"sub-agent:{display_name}"
 
-            coro = self._run_sub_agent_internal(sub_agent, task_id, task_description)
+            # Start background task
+            coro = self._run_sub_agent_internal(
+                sub_agent=sub_agent,
+                task_id=task_id,
+                task_description=task_description,
+                depends_on=depends_on,
+            )
             background_task = asyncio.create_task(coro, name=task_id)
 
             self.sub_tasks[task_id]["task_obj"] = background_task
-            self.sub_tasks[task_id]["status"] = "running"
+            self.sub_tasks[task_id]["status"] = "waiting" if depends_on else "running"
 
             return task_id
 
@@ -624,50 +644,94 @@ class Agent:
             logger.error(
                 f"[DEPLOY] Failed to create sub-agent {task_id}", exc_info=True
             )
-            self.sub_tasks[task_id]["status"] = "failed"
-            self.sub_tasks[task_id]["error"] = str(e)
+            self.sub_tasks[task_id].update(
+                {
+                    "status": "failed",
+                    "error": str(e),
+                    "completed_at": asyncio.get_event_loop().time(),
+                }
+            )
             return f"ERROR_{task_id}"
 
-    # --- Internal runner for SubAgent ---
-    async def _run_sub_agent_internal(
-        self, sub_agent: "SubAgent", task_id: str, task_description: str
-    ):
+    # ====================== IMPROVED SUB-AGENT RUNNER ======================
 
+    async def _run_sub_agent_internal(
+        self,
+        sub_agent: "SubAgent",
+        task_id: str,
+        task_description: str,
+        depends_on: Optional[str] = None,
+    ):
+        """Run a sub-agent with dependency waiting and proper result handling."""
         try:
-            # --- Tool restriction ---
+            # === 1. WAIT FOR DEPENDENCY ===
+            if depends_on:
+                logger.info(f"Sub-task {task_id} waiting for dependency: {depends_on}")
+                self.sub_tasks[task_id]["status"] = "waiting"
+
+                while True:
+                    dep_task = self.sub_tasks.get(depends_on)
+                    if dep_task and dep_task.get("status") in (
+                        "completed",
+                        "failed",
+                        "cancelled",
+                    ):
+                        break
+                    await asyncio.sleep(0.25)
+
+                logger.info(f"Dependency {depends_on} completed → resuming {task_id}")
+
+                # Inject dependency result into shared context
+                if dep_task and dep_task.get("result"):
+                    await sub_agent.context_manager.add_external_content(
+                        source_type="dependency_result",
+                        content=f"Result from previous step ({depends_on}):\n{dep_task['result']}",
+                        metadata={
+                            "dependency_task_id": depends_on,
+                            "source_task": task_id,
+                        },
+                    )
+
+            # === 2. TOOL SETUP ===
             assigned = getattr(sub_agent, "assigned_tools", None)
             if assigned:
                 sub_agent.manager.unload_all()
                 sub_agent.manager.load_tools(assigned)
-                for t in ["GetContext", "GetDeploymentStatus"]:
+                for core_tool in ["GetContext", "GetDeploymentStatus"]:
                     if (
-                        t in sub_agent.registry.all_actions
-                        and not sub_agent.manager.is_loaded(t)
+                        core_tool in sub_agent.registry.all_actions
+                        and not sub_agent.manager.is_loaded(core_tool)
                     ):
-                        sub_agent.manager.load_tools([t])
+                        sub_agent.manager.load_tools([core_tool])
             else:
                 sub_agent.manager.unload_all()
                 sub_agent.manager.load_tools(["GetContext", "GetDeploymentStatus"])
 
-            sub_system = f"""You are a precise sub-agent executing one focused micro-task.
+            # === 3. SYSTEM PROMPT ===
+            if (
+                sub_agent.system_prompt
+                and "You are a precise sub-agent" not in sub_agent.system_prompt
+            ):
+                sub_system = sub_agent.system_prompt
+            else:
+                sub_system = f"""You are a precise sub-agent executing one focused micro-task.
 
-            Task: {task_description}
+Task: {task_description}
 
-            Rules:
-            - Use tools as needed to complete this exact task.
-            - Do not speculate about other steps or the bigger picture.
-            - Stay strictly within the tools you were given."""
+Rules:
+- Complete ONLY this exact task using the tools provided.
+- When finished, output a short summary and end with exactly: [FINAL_ANSWER_COMPLETE]
+- Do not speculate about other steps or the bigger picture."""
 
-            # --- Run the sub-agent with isolated queue ---
+            # === 4. EXECUTE ===
             async for event, payload in sub_agent.run(
                 user_prompt=task_description,
                 system_prompt=sub_system,
-                temperature=0.25,
+                temperature=getattr(sub_agent, "temperature", 0.25),
                 max_tokens=10000,
                 workflow="sub_agent_execute",
                 chat_mode=False,
             ):
-                # --- Forward only relevant events to parent ---
                 if event in (
                     "tool_result",
                     "step_completed",
@@ -698,6 +762,7 @@ class Agent:
             raise
 
         except Exception as exc:
+            logger.error(f"Sub-agent {task_id} failed", exc_info=True)
             self.sub_tasks[task_id].update(
                 {
                     "status": "failed",
@@ -710,32 +775,50 @@ class Agent:
             )
 
         finally:
-            sub_agent.context_manager.prune_sub_agent_noise()
+            # === 5. FINALIZE ===
+            now = asyncio.get_event_loop().time()
             summary = await self._generate_deployment_summary(
                 sub_agent, task_description
             )
+
             self.sub_tasks[task_id].update(
                 {
-                    "status": "completed",
-                    "completed_at": asyncio.get_event_loop().time(),
+                    "completed_at": now,
                     "result": summary,
                     "progress": 100,
+                    "status": "failed"
+                    if self.sub_tasks[task_id].get("status") == "failed"
+                    else "completed",
                 }
             )
-            # --- Notify parent ---
+
+            # Notify parent
             await self.post_control(
                 {
                     "event": "sub_task_completed",
                     "task_id": task_id,
                     "summary": summary[:500],
-                    "success": True,
+                    "success": self.sub_tasks[task_id]["status"] == "completed",
                     "origin": sub_agent.agent_id,
                 }
             )
+
+            # Notify any dependent tasks
+            for dep_id in self.sub_tasks[task_id].get("dependents", []):
+                await self.post_control(
+                    {
+                        "event": "dependency_satisfied",
+                        "task_id": dep_id,
+                        "depends_on": task_id,
+                    }
+                )
+
             await self.post_system_message(
-                f"✅ Step completed: {self.sub_tasks[task_id].get('display_name', task_id)}\n"
-                f"{summary[:300]}{'...' if len(summary) > 300 else ''}"
+                f"✅ Step completed: {self.sub_tasks[task_id].get('display_name')}\n"
+                f"{summary[:280]}{'...' if len(summary) > 280 else ''}"
             )
+
+            sub_agent.context_manager.prune_sub_agent_noise()
 
     def attach_tools(self, assigned_tools: Optional[List[str]] = None):
         if getattr(self, "sub_agent", False) and assigned_tools:
@@ -916,42 +999,31 @@ class Agent:
     @tool(
         "DeployControls",
         name="DeploySubAgent",
-        description="Deploy sub-agents ONLY when the task is complex and requires multiple steps OR the user explicitly requests agent deployment. Never use for simple or single-step requests.",
+        description="""Deploy a focused sub-agent to handle one micro-task.
+
+        Parameters:
+        - task_description: Clear, specific description of what this step should do.
+        - assigned_tools: Optional list of tool names this sub-agent may use.
+        - depends_on_task_id: Optional. Task ID of a previous sub-task this one depends on.
+          The new sub-agent will automatically wait until the dependency finishes.
+        """,
     )
-    async def deploy__sub_agent(self, reason: str):
-        logger.info(f"[DeploySubAgent] Complex task: {reason[:100]}...")
-        self.task = reason
-        self.goal = reason
-
-        # --- DYNAMIC WORKFLOW: use agent's configured workflow, fallback to default_workflow attr ---
-        workflow_to_use = self.config.get("workflow") or getattr(
-            self, "default_workflow", None
-        )
-        if not workflow_to_use:
-            raise ValueError(
-                f"Agent '{self.name}' has no workflow configured for complex actions."
-            )
-
-        try:
-            self.workflow.switch_workflow(workflow_to_use)
-        except Exception:
-            # fallback to sending a control event if direct switch fails
-            await self.post_control(
-                {"event": "switch_workflow", "name": workflow_to_use}
-            )
-
+    async def deploy_sub_agent(
+        self,
+        task_description: str,
+        assigned_tools: Optional[List[str]] = None,
+        depends_on_task_id: Optional[str] = None,
+        user_facing_name: Optional[str] = None,
+    ) -> str:
         task_id = await self.start_complex_deployment(
-            task_description=reason,
-            user_facing_name=reason[:60] + "...",
-            assigned_tools=None,
-            temperature=0.3,
+            task_description=task_description,
+            user_facing_name=user_facing_name,
+            assigned_tools=assigned_tools,
+            depends_on=depends_on_task_id,
+            temperature=0.25,
         )
-
-        return (
-            f"✅ Starting **multi-step orchestration** for:\n"
-            f"**{reason}**\n\n"
-            f"Task ID: `{task_id}` — breaking it down into focused steps..."
-        )
+        dep_info = f" (depends on {depends_on_task_id})" if depends_on_task_id else ""
+        return f"✅ Launched sub-task `{task_id}`{dep_info}: {task_description[:80]}..."
 
     @tool("DeployControls", name="GetDeploymentStatus")
     async def get_deployment_status(self, task_id: Optional[str] = None):

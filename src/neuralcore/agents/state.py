@@ -30,6 +30,7 @@ class AgentState:
     # Planning & sub-agent orchestration
     planned_tasks: List[str] = field(default_factory=list)
     task_tool_assignments: Dict[int, List[str]] = field(default_factory=dict)
+    task_dependencies: Dict[int, Optional[str]] = field(default_factory=dict)
     current_task_index: int = 0
 
     # Sub-agent tracking
@@ -59,6 +60,7 @@ class AgentState:
         """Reset state when starting a new complex task or iteration cycle."""
         self.planned_tasks.clear()
         self.task_tool_assignments.clear()
+        self.task_dependencies.clear()
         self.sub_task_ids.clear()
         self.task_id_map.clear()
         self.current_task_index = 0
