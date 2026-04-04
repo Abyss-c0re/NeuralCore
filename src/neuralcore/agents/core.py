@@ -169,16 +169,34 @@ class Agent:
         self, chat_mode: bool = False, workflow_override: Optional[str] = None
     ) -> str:
         """
-        Return the workflow to use:
-        1. Use explicit override if provided
-        2. Use chat workflow if chat_mode and defined
-        3. Fallback to default workflow in config
+        Return the workflow to use.
+        Priority:
+          1. Explicit override
+          2. workflow key from agent config (string or dict form)
+          3. First workflow defined in config.yaml
+          4. Never fall back to literal string "default"
         """
         if workflow_override:
             return workflow_override
-        if chat_mode:
-            return self.config.get("workflow_chat") or self.default_workflow
-        return self.default_workflow
+
+        # 1. Check explicit "workflow" key in agent config (this is what you set in config.yaml)
+        workflow_cfg = self.config.get("workflow")
+        if isinstance(workflow_cfg, str):
+            return workflow_cfg.strip()
+        if isinstance(workflow_cfg, dict) and workflow_cfg:
+            return next(iter(workflow_cfg.keys()))
+
+        # 2. Fallback: use first workflow from the full config (via loader)
+        if hasattr(self.loader, "config"):
+            global_workflows = self.loader.config.get("workflows", {})
+            if global_workflows:
+                return next(iter(global_workflows.keys()))
+
+        # Ultimate safe fallback - should never reach here with proper config
+        logger.warning(
+            "No workflow found in agent config or global config. Using first available."
+        )
+        return "deploy_chat"  # or raise, but we keep it running
 
     def _reset_state(self):
         self.task = ""
@@ -647,7 +665,7 @@ class Agent:
 
     # ====================== IMPROVED SUB-AGENT RUNNER ======================
 
-       # ====================== SAFEGUARDED SUB-AGENT RUNNER ======================
+    # ====================== SAFEGUARDED SUB-AGENT RUNNER ======================
 
     async def _run_sub_agent_internal(
         self,
@@ -663,7 +681,11 @@ class Agent:
                 self.sub_tasks[task_id]["status"] = "waiting"
                 while True:
                     dep = self.sub_tasks.get(depends_on)
-                    if dep and dep.get("status") in ("completed", "failed", "cancelled"):
+                    if dep and dep.get("status") in (
+                        "completed",
+                        "failed",
+                        "cancelled",
+                    ):
                         break
                     await asyncio.sleep(0.25)
 
@@ -678,17 +700,26 @@ class Agent:
             assigned = getattr(sub_agent, "assigned_tools", None) or []
             if assigned:
                 # Filter only tools that actually exist
-                valid_tools = [t for t in assigned if t in sub_agent.registry.all_actions]
+                valid_tools = [
+                    t for t in assigned if t in sub_agent.registry.all_actions
+                ]
                 if valid_tools:
                     sub_agent.manager.unload_all()
                     sub_agent.manager.load_tools(valid_tools)
-                    logger.info(f"[SUB-AGENT] Loaded {len(valid_tools)} valid tools: {valid_tools}")
+                    logger.info(
+                        f"[SUB-AGENT] Loaded {len(valid_tools)} valid tools: {valid_tools}"
+                    )
                 else:
-                    logger.warning(f"[SUB-AGENT] No valid tools found in assigned list: {assigned}")
+                    logger.warning(
+                        f"[SUB-AGENT] No valid tools found in assigned list: {assigned}"
+                    )
 
             # Always ensure core tools
             for core in ["GetContext", "GetDeploymentStatus"]:
-                if core in sub_agent.registry.all_actions and not sub_agent.manager.is_loaded(core):
+                if (
+                    core in sub_agent.registry.all_actions
+                    and not sub_agent.manager.is_loaded(core)
+                ):
                     sub_agent.manager.load_tools([core])
 
             # === 3. SYSTEM PROMPT ===
@@ -713,47 +744,76 @@ class Agent:
                 workflow="sub_agent_execute",
                 chat_mode=False,
             ):
-                if event in ("tool_result", "step_completed", "iteration_finished", "final_answer"):
-                    await self.post_control({
-                        "event": "sub_agent_progress",
-                        "task_id": task_id,
-                        "type": event,
-                        "payload": payload,
-                        "sub_agent_name": sub_agent.name,
-                        "origin": sub_agent.agent_id,
-                    })
+                if event in (
+                    "tool_result",
+                    "step_completed",
+                    "iteration_finished",
+                    "final_answer",
+                ):
+                    await self.post_control(
+                        {
+                            "event": "sub_agent_progress",
+                            "task_id": task_id,
+                            "type": event,
+                            "payload": payload,
+                            "sub_agent_name": sub_agent.name,
+                            "origin": sub_agent.agent_id,
+                        }
+                    )
 
         except asyncio.CancelledError:
-            self.sub_tasks[task_id].update({"status": "cancelled", "completed_at": asyncio.get_event_loop().time()})
-            await self.post_control({"event": "sub_task_failed", "task_id": task_id, "error": "cancelled"})
+            self.sub_tasks[task_id].update(
+                {"status": "cancelled", "completed_at": asyncio.get_event_loop().time()}
+            )
+            await self.post_control(
+                {"event": "sub_task_failed", "task_id": task_id, "error": "cancelled"}
+            )
             raise
         except Exception as exc:
             logger.error(f"Sub-agent {task_id} failed", exc_info=True)
-            self.sub_tasks[task_id].update({
-                "status": "failed",
-                "completed_at": asyncio.get_event_loop().time(),
-                "error": str(exc),
-            })
-            await self.post_control({"event": "sub_task_failed", "task_id": task_id, "error": str(exc)})
+            self.sub_tasks[task_id].update(
+                {
+                    "status": "failed",
+                    "completed_at": asyncio.get_event_loop().time(),
+                    "error": str(exc),
+                }
+            )
+            await self.post_control(
+                {"event": "sub_task_failed", "task_id": task_id, "error": str(exc)}
+            )
         finally:
-            summary = await self._generate_deployment_summary(sub_agent, task_description)
-            self.sub_tasks[task_id].update({
-                "completed_at": asyncio.get_event_loop().time(),
-                "result": summary,
-                "progress": 100,
-                "status": "failed" if self.sub_tasks[task_id].get("status") == "failed" else "completed",
-            })
+            summary = await self._generate_deployment_summary(
+                sub_agent, task_description
+            )
+            self.sub_tasks[task_id].update(
+                {
+                    "completed_at": asyncio.get_event_loop().time(),
+                    "result": summary,
+                    "progress": 100,
+                    "status": "failed"
+                    if self.sub_tasks[task_id].get("status") == "failed"
+                    else "completed",
+                }
+            )
 
-            await self.post_control({
-                "event": "sub_task_completed",
-                "task_id": task_id,
-                "summary": summary[:500],
-                "success": self.sub_tasks[task_id]["status"] == "completed",
-                "origin": sub_agent.agent_id,
-            })
+            await self.post_control(
+                {
+                    "event": "sub_task_completed",
+                    "task_id": task_id,
+                    "summary": summary[:500],
+                    "success": self.sub_tasks[task_id]["status"] == "completed",
+                    "origin": sub_agent.agent_id,
+                }
+            )
 
             for dep_id in self.sub_tasks[task_id].get("dependents", []):
-                await self.post_control({"event": "dependency_satisfied", "task_id": dep_id, "depends_on": task_id})
+                await self.post_control(
+                    {
+                        "event": "dependency_satisfied",
+                        "task_id": dep_id,
+                        "depends_on": task_id,
+                    }
+                )
 
             await self.post_system_message(
                 f"✅ Step completed: {self.sub_tasks[task_id].get('display_name', task_id)}\n{summary[:300]}{'...' if len(summary) > 300 else ''}"
