@@ -13,17 +13,15 @@ logger = Logger.get_logger()
 
 
 class AgentExecutors:
-    """Handles all LLM streaming, tool execution, chat loops, and sub-agent execution.
-    NOW WITH RESTORED BASIC CASUAL CHAT + full goal-driven tasks."""
+    """Handles LLM streaming, tool execution, chat loops, and sub-agent execution.
+    Refactored: shared goal-driven task loop for both chat and agentic (sub-agent) modes."""
 
     def __init__(self, agent, phase_enum):
         self.agent = agent
         self.Phase = phase_enum
-        self.engine = agent.workflow
 
-    # ====================== FAST CASUAL DETECTOR (the fix) ======================
+    # ====================== FAST CASUAL DETECTOR ======================
     async def _classify_intent(self, query: str) -> str:
-        """One-word CASUAL vs TASK check. Extremely strict so greetings stay natural."""
         prompt = f"""Classify this user message as either CASUAL or TASK.
 
 CASUAL = greeting, small talk, "how are you", joke, opinion, thank you, chit-chat, storytelling, emotional support, philosophy, roleplay, simple general-knowledge questions.
@@ -34,9 +32,7 @@ User message: {query}
 Answer with **exactly one word**: CASUAL or TASK"""
 
         try:
-            result = await self.agent.client.chat(
-                prompt, temperature=0.0, max_tokens=20
-            )
+            result = await self.agent.client.chat(prompt, temperature=0.0, max_tokens=20)
             return "CASUAL" if "CASUAL" in result.upper() else "TASK"
         except Exception:
             return "CASUAL" if len(query.split()) < 25 else "TASK"
@@ -46,7 +42,7 @@ Answer with **exactly one word**: CASUAL or TASK"""
 Be natural, use contractions, show personality, be concise unless asked otherwise.
 Never mention tools, internal steps, thinking process, or knowledge base unless the user explicitly asks about them."""
 
-    # ====================== TOOL EXECUTION (unchanged) ======================
+    # ====================== TOOL EXECUTION ======================
     async def _execute_tool(self, name: str, args: dict):
         executor = self.agent.manager.get_executor(name, self.agent)
         if not executor:
@@ -54,46 +50,52 @@ Never mention tools, internal steps, thinking process, or knowledge base unless 
         result = executor(**args)
         return await result if asyncio.iscoroutine(result) else result
 
-    # ====================== AGENTIC LOOP (exactly as you pasted) ======================
-    async def agentic_loop(
+    # ====================== SHARED GOAL-DRIVEN TASK LOOP ======================
+    async def _goal_driven_task_loop(
         self,
-        iteration: int,
+        original_query: str,
         state: AgentState,
-        tools: Optional[ActionSet] = None,
+        is_sub_agent: bool = False,
     ) -> AsyncIterator[Tuple[str, Any]]:
-        # (your exact code from the paste — unchanged)
-        state.phase = self.Phase.EXECUTE
-        yield ("phase_changed", {"phase": state.phase.value})
+        """Core robust task execution loop.
+        Used by both chat_loop (TASK path) and agentic_loop (sub-agents)."""
+        logger.info(f"[TASK EXECUTION] Starting goal-driven loop for: {original_query[:100]}...")
 
-        task_name = state.current_task or f"agentic_task_{iteration}"
-        task_ctx = self.agent.context_manager.create_task_context(task_name)
-        self.agent.context_manager.set_goal(self.agent.goal or task_name)
-        self.agent.context_manager.add_subtask(task_name)
+        yield ("phase_changed", {"phase": "thinking"})
 
-        max_loops = 15
+        max_loops = 20
         loop_count = 0
         final_answer_marker = "[FINAL_ANSWER_COMPLETE]"
 
         while loop_count < max_loops:
             loop_count += 1
-            tool_browser_detected = False
-            browse_query = state.current_task or ""
             text_buffer = ""
-            tool_results: List[str] = []
-            assistant_message = ""
+            tools_called_this_turn = False
+            tool_browser_detected = False
+            browse_query = original_query
+
+            current_query = (
+                original_query if loop_count == 1
+                else f"USER REQUEST: {original_query}\n\n"
+                     "Previous tool results are already stored in KB.\n"
+                     "You may call more tools if needed, otherwise prepare for final answer."
+            )
+
+            yield ("phase_changed", {"phase": "searching_tools"})
 
             messages = await self.agent.context_manager.provide_context(
-                query=state.current_task or "Continue and complete the task",
+                query=current_query,
                 max_input_tokens=self.agent.max_tokens,
                 reserved_for_output=12000,
-                system_prompt=self._build_sub_agent_objective_reminder(),
+                system_prompt=self._build_objective_reminder(),
                 include_logs=True,
+                chat=not is_sub_agent,
             )
 
             queue = await self.agent.client.stream_with_tools(
                 messages=messages,
-                tools=tools or self.agent.manager.get_llm_tools(),
-                temperature=self.agent.temperature,
+                tools=self.agent.manager.get_action_set("DynamicCore"),
+                temperature=0.2 if not is_sub_agent else self.agent.temperature,
                 max_tokens=self.agent.max_tokens,
                 tool_choice="auto",
                 executor_callback=self._execute_tool,
@@ -111,54 +113,33 @@ Never mention tools, internal steps, thinking process, or knowledge base unless 
                     if kind == "content":
                         content = str(payload) if payload is not None else ""
                         text_buffer += content
-                        assistant_message += content
                         yield ("content_delta", content)
 
                     elif kind in ("tool_delta", "tool_complete", "needs_confirmation"):
                         if isinstance(payload, dict):
-                            tool_name = (
-                                payload.get("tool_name")
-                                or payload.get("name")
-                                or "unknown"
-                            )
+                            tool_name = payload.get("tool_name") or payload.get("name") or "unknown"
                             result = payload.get("result") or payload.get("output")
                             args = payload.get("args", {}) or {}
 
                             if "FindTool" in tool_name:
                                 tool_browser_detected = True
-                                browse_query = args.get(
-                                    "query", state.current_task or ""
-                                )
-                                logger.info(
-                                    f"[FindTool] detected in agentic_loop. Query='{browse_query[:120]}...'"
-                                )
+                                browse_query = args.get("query", original_query)
+                                logger.info(f"[FindTool] intercepted. Query='{browse_query[:120]}...'")
+                                yield ("phase_changed", {"phase": "handling_findtool"})
                                 break
+
+                            tools_called_this_turn = True
 
                             content_str = (
                                 json.dumps(result, ensure_ascii=False, default=str)
-                                if isinstance(result, dict)
-                                else str(result or "No output")
+                                if isinstance(result, dict) else str(result or "No output")
                             )
 
                             await self.agent.context_manager.record_tool_outcome(
                                 tool_name=tool_name,
                                 result=content_str,
-                                metadata={
-                                    "task": task_name,
-                                    "loop": loop_count,
-                                    "sub_agent": True,
-                                },
+                                metadata={"loop": loop_count, "sub_agent": is_sub_agent},
                             )
-
-                            await task_ctx.add_important_result(
-                                title=tool_name,
-                                content=content_str,
-                                source="tool",
-                                metadata={"loop": loop_count},
-                            )
-
-                            if content_str.strip():
-                                tool_results.append(content_str.strip())
 
                     elif kind == "finish":
                         break
@@ -167,7 +148,7 @@ Never mention tools, internal steps, thinking process, or knowledge base unless 
                         return
 
             except Exception as e:
-                logger.error(f"Stream error in agentic_loop: {e}", exc_info=True)
+                logger.error(f"Stream error in task loop: {e}", exc_info=True)
                 yield ("error", str(e))
                 return
 
@@ -179,260 +160,19 @@ Never mention tools, internal steps, thinking process, or knowledge base unless 
             if final_answer_marker in final_reply:
                 final_reply = final_reply.replace(final_answer_marker, "").strip()
 
-            if not final_reply and tool_results:
-                final_reply = "\n\n".join(tool_results)
-
-            if not final_reply:
-                final_reply = "✅ Task completed."
-
-            await self.agent.context_manager.add_message("assistant", final_reply)
-
-            await task_ctx.add_important_result(
-                title="Final Task Outcome",
-                content=final_reply,
-                source="agentic_loop_completion",
-                metadata={"iteration": loop_count, "task": task_name},
-            )
-
-            if getattr(self.agent, "sub_agent", False):
-                parent = getattr(self.agent, "parent", None)
-                if parent:
-                    try:
-                        await parent.context_manager.add_external_content(
-                            source_type="sub_task_final_reply",
-                            content=final_reply,
-                            metadata={"origin": self.agent.agent_id},
-                        )
-                    except Exception as e:
-                        logger.warning(f"Parent propagation failed: {e}")
-
-            self.agent.context_manager.prune_sub_agent_noise()
-            self.agent.context_manager.complete_subtask(task_name)
-
-            yield (
-                "llm_response",
-                {
-                    "full_reply": final_reply,
-                    "tool_calls": [],
-                    "is_complete": True,
-                },
-            )
-            break
-
-        else:
-            logger.warning(f"agentic_loop reached max iterations ({max_loops})")
-            final_reply = "⚠️ Maximum iterations reached while executing sub-task."
-            await self.agent.context_manager.add_message("assistant", final_reply)
-            await task_ctx.add_important_result(
-                title="Max Iterations Reached",
-                content=final_reply,
-                source="agentic_loop",
-            )
-            yield (
-                "llm_response",
-                {
-                    "full_reply": final_reply,
-                    "is_complete": True,
-                },
-            )
-
-    def _build_sub_agent_objective_reminder(self) -> str:
-        base = f"Current goal: {self.agent.goal or 'Complete the assigned micro-task'}"
-        return (
-            base
-            + "\n\nWhen you have fully completed the task, end your response with exactly: [FINAL_ANSWER_COMPLETE]"
-        )
-
-    # ====================== CHAT LOOP — BASIC CASUAL RESTORED + GOAL-DRIVEN TASK PATH ======================
-    # ====================== CHAT LOOP (status updates restored + mode switching) ======================
-    async def chat_loop(
-        self, messages: List[Dict], state: AgentState
-    ) -> AsyncIterator[Tuple[str, Any]]:
-        logger.debug("=== CHAT LOOP (basic casual + full status for tasks) ===")
-
-        original_user_query = next(
-            (
-                m.get("content", "").strip()
-                for m in reversed(messages or [])
-                if m.get("role") == "user" and m.get("content")
-            ),
-            state.current_task or "[USER REQUEST]",
-        )
-
-        # ── EARLY CASUAL PATH (unchanged — fast & clean) ──
-        intent = await self._classify_intent(original_user_query)
-        logger.info(f"[CHAT INTENT] {intent} | '{original_user_query[:80]}...'")
-
-        # Always re-evaluate mode on every message
-        state.mode = "casual" if intent == "CASUAL" else "task"
-        logger.info(f"→ Agent mode set to: {state.mode.upper()}")
-
-        if intent == "CASUAL":
-            logger.info("[CASUAL MODE] Pure basic chat — NO goal lock, NO tools")
-            yield ("phase_changed", {"phase": "casual chat"})
-            state.mode = "casual"
-
-            # Exactly like your old basic chat: full history via ContextManager
-            casual_messages = await self.agent.context_manager.provide_context(
-                query=original_user_query,
-                max_input_tokens=self.agent.max_tokens,
-                reserved_for_output=12000,
-                system_prompt=self._build_casual_system_prompt(),
-                include_logs=False,
-                chat=True,
-            )
-
-            final_reply = await self.agent.client.chat(
-                casual_messages, temperature=0.85, top_p=0.95
-            )
-
-            await self.agent.context_manager.add_message("assistant", final_reply)
-
-            yield (
-                "llm_response",
-                {"full_reply": final_reply, "is_complete": True},
-            )
-            return  # ← critical: exit immediately
-
-        # ── TASK PATH (full goal-driven + RESTORED status updates) ──
-        logger.info("[TASK MODE] Full goal-driven tool loop")
-        yield ("phase_changed", {"phase": "thinking"})  # ← restored
-
-        max_tool_loops = 20
-        loop_count = 0
-
-        while loop_count < max_tool_loops:
-            loop_count += 1
-            tool_browser_detected = False
-            browse_query = original_user_query
-            complex_action_called = False
-            complex_reason = ""
-            tools_called_this_turn = False
-
-            if loop_count == 1:
-                current_query = original_user_query
-            else:
-                current_query = (
-                    f"USER REQUEST: {original_user_query}\n\n"
-                    "Previous tool results are already stored in KB.\n"
-                    "You may call more tools if needed, otherwise prepare for final answer."
-                )
-
-            # Status: about to call LLM + tools
-            yield ("phase_changed", {"phase": "searching_tools"})  # ← restored
-
-            cm_messages = await self.agent.context_manager.provide_context(
-                query=current_query,
-                max_input_tokens=self.agent.max_tokens,
-                reserved_for_output=12000,
-                system_prompt=self._build_objective_reminder(),
-                include_logs=True,
-                chat=True,
-            )
-
-            queue = await self.agent.client.stream_with_tools(
-                messages=cm_messages,
-                tools=self.agent.manager.get_action_set("DynamicCore"),
-                temperature=0.2,
-                max_tokens=self.agent.max_tokens,
-                tool_choice="auto",
-                executor_callback=self._execute_tool,
-            )
-
-            try:
-                async for item in self.agent.client._drain_queue(queue):
-                    if item is None:
-                        continue
-                    if not isinstance(item, tuple) or len(item) != 2:
-                        continue
-
-                    kind, payload = item
-
-                    if kind == "content":
-                        pass
-
-                    elif kind in ("tool_delta", "tool_complete", "needs_confirmation"):
-                        if isinstance(payload, dict):
-                            tool_name = (
-                                payload.get("tool_name")
-                                or payload.get("name")
-                                or "unknown"
-                            )
-                            result = payload.get("result") or payload.get("output")
-                            args = payload.get("args", {}) or {}
-
-                            if "FindTool" in tool_name:
-                                tool_browser_detected = True
-                                browse_query = args.get("query", original_user_query)
-                                logger.info(
-                                    f"[FindTool] intercepted in chat_loop. Query='{browse_query[:120]}...'"
-                                )
-                                yield (
-                                    "phase_changed",
-                                    {"phase": "handling_findtool"},
-                                )  # ← restored
-                                break
-
-                            if tool_name == "RequestComplexAction":
-                                complex_action_called = True
-                                complex_reason = str(
-                                    payload.get("args", {}).get("reason", "")
-                                )
-                                break
-
-                            tools_called_this_turn = True
-
-                            content_str = (
-                                json.dumps(result, ensure_ascii=False, default=str)
-                                if isinstance(result, dict)
-                                else str(result or "No output")
-                            )
-
-                            await self.agent.context_manager.record_tool_outcome(
-                                tool_name=tool_name,
-                                result=content_str,
-                                metadata={"loop": loop_count, "chat_mode": True},
-                            )
-
-                    elif kind == "finish":
-                        break
-                    elif kind in ("error", "cancelled"):
-                        yield (kind, payload)
-                        return
-
-            except Exception as e:
-                logger.error(f"Stream error in chat_loop: {e}", exc_info=True)
-                yield ("error", str(e))
-                return
-
-            if tool_browser_detected:
-                await self._handle_browse_tools_interception(browse_query)
-                continue
-
-            if complex_action_called:
-                self.agent.task = complex_reason
-                self.agent.goal = complex_reason
-                final_reply = f"✅ Starting multi-step orchestration for: **{complex_reason[:120]}**..."
-                await self.agent.context_manager.add_message("assistant", final_reply)
-                yield ("llm_response", {"full_reply": final_reply, "is_complete": True})
-                await self.agent.post_control(
-                    {"event": "switch_workflow", "name": "default"}
-                )
-                return
-
-            if tools_called_this_turn and loop_count < max_tool_loops:
-                yield ("phase_changed", {"phase": "executing_tools"})  # ← restored
+            if tools_called_this_turn and loop_count < max_loops:
+                yield ("phase_changed", {"phase": "executing_tools"})
                 logger.info(f"Tools executed (loop {loop_count}) – continuing silently")
                 continue
 
-            # ── STRONG FINAL SYNTHESIS PASS ──
-            yield ("phase_changed", {"phase": "generating_final_answer"})  # ← restored
+            # === STRONG FINAL SYNTHESIS PASS ===
+            yield ("phase_changed", {"phase": "generating_final_answer"})
 
             final_query = (
-                f"USER ORIGINAL REQUEST: {original_user_query}\n\n"
+                f"USER ORIGINAL REQUEST: {original_query}\n\n"
                 "You now have ALL tool results stored in the KB / provided context.\n"
                 "VERY IMPORTANT RULES:\n"
-                "• Answer ONLY using the exact information from the tool results in the context.\n"
+                "• Answer ONLY using the exact information from the tool results.\n"
                 "• DO NOT invent, hallucinate, or add any files, folders, or results that were not returned.\n"
                 "• Be direct, concise, and factual.\n"
                 "• Do not mention tools, KB, or internal steps."
@@ -442,10 +182,9 @@ Never mention tools, internal steps, thinking process, or knowledge base unless 
                 query=final_query,
                 max_input_tokens=self.agent.max_tokens,
                 reserved_for_output=8000,
-                system_prompt=self._build_objective_reminder()
-                + "\n\nYou are in FINAL ANSWER MODE. Be precise and factual.",
+                system_prompt=self._build_objective_reminder() + "\n\nYou are in FINAL ANSWER MODE. Be precise and factual.",
                 include_logs=True,
-                chat=True,
+                chat=not is_sub_agent,
             )
 
             final_reply = await self.agent.client.chat(
@@ -460,8 +199,79 @@ Never mention tools, internal steps, thinking process, or knowledge base unless 
             )
             break
 
-        if loop_count >= max_tool_loops:
-            logger.warning("Max tool loops reached in chat_loop")
+        else:
+            logger.warning(f"Task execution reached max loops ({max_loops})")
+            final_reply = "⚠️ Maximum iterations reached while executing the task."
+            await self.agent.context_manager.add_message("assistant", final_reply)
+            yield ("llm_response", {"full_reply": final_reply, "is_complete": True})
+
+    # ====================== REFACTORED AGENTIC LOOP (for sub-agents) ======================
+    async def agentic_loop(
+        self,
+        iteration: int,
+        state: AgentState,
+        tools: Optional[ActionSet] = None,
+    ) -> AsyncIterator[Tuple[str, Any]]:
+        """Headless sub-agent loop — now uses the same robust goal-driven logic as chat TASK path."""
+        state.phase = self.Phase.EXECUTE
+        yield ("phase_changed", {"phase": state.phase.value})
+
+        original_query = state.current_task or self.agent.goal or "Complete the assigned micro-task"
+
+        async for event, payload in self._goal_driven_task_loop(
+            original_query=original_query,
+            state=state,
+            is_sub_agent=True,
+        ):
+            yield event, payload
+
+    # ====================== CHAT LOOP (casual path + shared task path) ======================
+    async def chat_loop(
+        self, messages: List[Dict], state: AgentState
+    ) -> AsyncIterator[Tuple[str, Any]]:
+        logger.debug("=== CHAT LOOP ===")
+
+        original_user_query = next(
+            (m.get("content", "").strip() for m in reversed(messages or [])
+             if m.get("role") == "user" and m.get("content")),
+            state.current_task or "[USER REQUEST]",
+        )
+
+        intent = await self._classify_intent(original_user_query)
+        logger.info(f"[CHAT INTENT] {intent} | '{original_user_query[:80]}...'")
+
+        state.mode = "casual" if intent == "CASUAL" else "task"
+        logger.info(f"→ Agent mode set to: {state.mode.upper()}")
+
+        if intent == "CASUAL":
+            logger.info("[CASUAL MODE] Pure basic chat")
+            yield ("phase_changed", {"phase": "casual chat"})
+            state.mode = "casual"
+
+            casual_messages = await self.agent.context_manager.provide_context(
+                query=original_user_query,
+                max_input_tokens=self.agent.max_tokens,
+                reserved_for_output=12000,
+                system_prompt=self._build_casual_system_prompt(),
+                include_logs=False,
+                chat=True,
+            )
+
+            final_reply = await self.agent.client.chat(
+                casual_messages, temperature=0.85, top_p=0.95
+            )
+
+            await self.agent.context_manager.add_message("assistant", final_reply)
+            yield ("llm_response", {"full_reply": final_reply, "is_complete": True})
+            return
+
+        # TASK path — use the shared robust loop
+        async for event, payload in self._goal_driven_task_loop(
+            original_query=original_user_query,
+            state=state,
+            is_sub_agent=False,
+        ):
+            yield event, payload
 
     # ====================== SMART TWO-STAGE FindTool INTERCEPTION (unchanged) ======================
     async def _handle_browse_tools_interception(self, original_user_query: str):
@@ -568,3 +378,10 @@ Never mention tools, internal steps, thinking process, or knowledge base unless 
     # ====================== HELPERS ======================
     def _build_objective_reminder(self) -> str:
         return f"Current goal: {self.agent.goal or 'No goal set'}"
+
+    def _build_sub_agent_objective_reminder(self) -> str:
+        base = f"Current goal: {self.agent.goal or 'Complete the assigned micro-task'}"
+        return (
+            base
+            + "\n\nWhen you have fully completed the task, end your response with exactly: [FINAL_ANSWER_COMPLETE]"
+        )

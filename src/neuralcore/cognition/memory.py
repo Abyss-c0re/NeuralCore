@@ -534,13 +534,17 @@ class ContextManager:
     # ─────────────────────────────────────────────────────────────
     # ADD EXTERNAL CONTENT (now lazy, does NOT rebuild immediately)
     # ─────────────────────────────────────────────────────────────
+
     async def add_external_content(
         self, source_type: str, content: str, metadata: Dict[str, Any] | None = None
     ) -> str | None:
-        if not content or not content.strip():
+        if not content or len(content.strip()) < 15:
             return None
 
-        # ── STRONG ANTI-CONTAMINATION GUARD (this was the missing piece) ──
+        metadata = metadata or {}
+        content_lower = content.lower()
+
+        # ── Smart, less aggressive guard ──
         forbidden = [
             "You are a helpful Terminal AI agent",
             "CONTEXT WINDOW STATUS",
@@ -549,43 +553,62 @@ class ContextManager:
             "[FINAL_ANSWER_COMPLETE]",
             "AUTONOMOUS CONTINUATION",
         ]
-        if any(phrase in content for phrase in forbidden):
-            logger.warning(
-                f"[KB GUARD] Blocked contaminated content (source={source_type})"
-            )
+
+        is_contaminated = any(phrase.lower() in content_lower for phrase in forbidden)
+
+        if is_contaminated:
+            if source_type in ("tool_outcome", "task_result"):
+                # Clean instead of block for legitimate results
+                for phrase in forbidden:
+                    content = re.sub(
+                        re.escape(phrase) + r".*?(\n|$)",
+                        "",
+                        content,
+                        flags=re.IGNORECASE | re.DOTALL,
+                    )
+                logger.debug(f"[KB GUARD] Partially cleaned {source_type}")
+            else:
+                logger.warning(
+                    f"[KB GUARD] Blocked contaminated content (source={source_type})"
+                )
+                return None
+
+        # Deduplication
+        parent_key = (
+            metadata.get("path")
+            or metadata.get("filename")
+            or f"{source_type}_{hash(content[:300])}"
+        )
+
+        if parent_key and str(parent_key) in self.files_checked:
             return None
 
-        metadata = metadata or {}
-        path_key = metadata.get("path") or metadata.get("filename")
-
-        if path_key and path_key in self.files_checked:
-            return path_key
-
-        parent_key = path_key or f"{source_type}_{hash(content)}"
         chunk_items = self._chunk_text(content, parent_key, source_type)
 
-        added_keys = []
+        added = 0
         for item in chunk_items:
             if item.key in self.knowledge_base:
                 continue
             item.embedding = await self.fetch_embedding(item.content, prefix="passage")
             self.knowledge_base[item.key] = item
-            added_keys.append(item.key)
+            added += 1
 
-        if path_key:
-            self.files_checked.add(str(path_key))
+        if added > 0:
+            self._sparse_index_dirty = True
+            self.context_stats["kb_added"] += added
+            logger.info(
+                f"✅ Added {added} clean chunks for {parent_key} | source={source_type}"
+            )
+        else:
+            logger.debug(f"→ Skipped duplicate/empty content for {parent_key}")
+
+        if "path" in metadata or "filename" in metadata:
+            self.files_checked.add(str(parent_key))
 
         self._log_action(
             "add_knowledge",
-            f"Added {source_type} → {parent_key} ({len(chunk_items)} chunks)",
+            f"Added {source_type} → {parent_key} ({added} chunks)",
             metadata,
-        )
-        self.context_stats["kb_added"] += len(added_keys)
-
-        self._sparse_index_dirty = True
-
-        logger.info(
-            f"✅ Added {len(added_keys)} clean chunks for {parent_key} | source={source_type}"
         )
         return parent_key
 
@@ -634,22 +657,56 @@ class ContextManager:
         await self._rebuild_sparse_index()
         self._sparse_index_dirty = False
 
+    # ─────────────────────────────────────────────────────────────
+    # SPARSE RETRIEVAL - FIXED TF-IDF CRASH
+    # ─────────────────────────────────────────────────────────────
     async def _sparse_retrieve(self, query: str) -> Dict[str, float]:
-        """Async sparse retrieval."""
+        """Safe sparse retrieval with aggressive type handling for Pyright."""
         await self._ensure_sparse_index()
+
         if self.tfidf_matrix is None or self.tfidf_vectorizer is None:
+            logger.debug("TF-IDF index not ready")
             return {}
 
         def _sparse_sync():
-            if self.tfidf_vectorizer is None or self.tfidf_matrix is None:
+            try:
+                if self.tfidf_vectorizer is None:
+                    return {}
+
+                # Force refit if necessary
+                if (
+                    not hasattr(self.tfidf_vectorizer, "vocabulary_")
+                    or len(self.tfidf_vectorizer.vocabulary_) == 0
+                ):
+                    if len(self.knowledge_base) > 0:
+                        texts = [item.content for item in self.knowledge_base.values()]
+                        logger.debug(f"Fitting TF-IDF on {len(texts)} documents")
+                        self.tfidf_matrix = self.tfidf_vectorizer.fit_transform(texts)
+                    else:
+                        return {}
+
+                query_vec = self.tfidf_vectorizer.transform([query])
+                matrix = self.tfidf_matrix
+                vec = query_vec
+
+                # Use .dot() with explicit transpose
+                if hasattr(vec, "T"):
+                    scores_matrix = matrix.dot(vec.T)  # type: ignore[attr-defined]
+                else:
+                    scores_matrix = matrix.dot(vec.transpose())  # type: ignore[attr-defined]
+
+                scores = scores_matrix.toarray().flatten()  # type: ignore[attr-defined]
+
+                result: Dict[str, float] = {}
+                for idx, score in enumerate(scores):
+                    if score > 1e-8 and idx < len(self.kb_keys_ordered):
+                        result[self.kb_keys_ordered[idx]] = float(score)
+
+                return result
+
+            except Exception as e:
+                logger.warning(f"Sparse retrieval failed: {e}", exc_info=False)
                 return {}
-            query_vec = self.tfidf_vectorizer.transform([query])
-            scores = (self.tfidf_matrix * query_vec.transpose()).toarray().flatten()  # type: ignore[attr-defined]
-            result = {}
-            for idx, score in enumerate(scores):
-                if score > 0 and idx < len(self.kb_keys_ordered):
-                    result[self.kb_keys_ordered[idx]] = float(score)
-            return result
 
         return await asyncio.to_thread(_sparse_sync)
 
@@ -1209,54 +1266,47 @@ class ContextManager:
             used += toks
         return "".join(parts)
 
-    async def record_tool_outcome(self, tool_name: str, result: Any, metadata: dict):
-        """Fixed – now extremely defensive and logs clearly."""
-        # Convert anything to clean string
+    async def record_tool_outcome(
+        self, tool_name: str, result: Any, metadata: dict | None = None
+    ):
+        metadata = metadata or {}
+
         if not isinstance(result, str):
             try:
-                if isinstance(result, (list, dict)):
-                    result = json.dumps(result, ensure_ascii=False, default=str)[:4000]
-                else:
-                    result = str(result)
+                result = json.dumps(result, ensure_ascii=False, default=str)[:4000]
             except Exception:
-                result = str(result)[:2000] if result is not None else "No output"
+                result = str(result)[:2000]
 
-        summary = result[:800] + ("..." if len(result) > 800 else "")
+        # Pre-clean obvious noise
+        result = re.sub(
+            r"(?i)You are a helpful Terminal AI agent.*?(?=\n\n|\Z)",
+            "",
+            result,
+            flags=re.DOTALL,
+        )
+        result = re.sub(
+            r"(?i)CONTEXT WINDOW STATUS.*?=== END.*?(?=\n\n|\Z)",
+            "",
+            result,
+            flags=re.DOTALL,
+        )
 
-        # Extra safety – never store prompts or internal messages
-        if any(
-            phrase in result
-            for phrase in [
-                "You are a helpful Terminal AI agent",
-                "CONTEXT WINDOW STATUS",
-                "RELEVANT EXTERNAL CONTEXT",
-                "CHAT CONTEXT (light)",
-            ]
-        ):
-            logger.warning(f"🚫 Blocked contaminated tool result for {tool_name}")
+        if len(result.strip()) < 20 or "No output" in result and len(result) < 100:
+            logger.debug(f"[TOOL OUTCOME] Skipped empty/noise result from {tool_name}")
             return
 
         await self.add_external_content(
             source_type="tool_outcome",
-            content=f"Tool: {tool_name}\nResult: {result}\nMetadata: {metadata}",
+            content=f"Tool: {tool_name}\nResult: {result}",
             metadata={
                 "tool": tool_name,
                 **metadata,
-                "negative": any(x in result.lower() for x in ["not found", "no such"]),
+                "negative": any(
+                    x in result.lower()
+                    for x in ["not found", "no such", "error", "failed"]
+                ),
             },
         )
 
-        text = result.lower()
-        if any(k in text for k in ["error", "exception", "failed"]):
-            self.add_unknown(f"{tool_name} issue: {summary[:200]}")
-
-        if metadata.get("path"):
-            self.complete_subtask(f"inspect {metadata['path']}")
-
         self.tools_executed.append(tool_name)
-        self.files_checked.update(
-            m.get("path", "") for m in [metadata] if m.get("path")
-        )
-        self._log_action(
-            "tool_outcome", f"Tool {tool_name} → {summary[:80]}...", metadata
-        )
+        self._log_action("tool_outcome", f"{tool_name} → {result[:80]}...", metadata)
