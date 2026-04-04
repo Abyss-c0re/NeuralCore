@@ -258,6 +258,7 @@ class AgentExecutors:
         )
 
         intent = await self._classify_intent(original_user_query)
+        await self.agent.context_manager.add_message("user", original_user_query)
         logger.info(f"[CHAT INTENT] {intent} | '{original_user_query[:80]}...'")
 
         state.mode = "casual" if intent == "CASUAL" else "task"
