@@ -1,12 +1,11 @@
 import asyncio
 import json
-from typing import Awaitable
+
 from typing import AsyncIterator, Dict, Any, List, Optional, Tuple
 
-from neuralcore.actions.actions import Action
+
 from neuralcore.agents.state import AgentState
 from neuralcore.actions.actions import ActionSet
-from neuralcore.utils.formatting import safe_json_dumps
 from neuralcore.utils.logger import Logger
 
 logger = Logger.get_logger()
@@ -24,23 +23,25 @@ class AgentExecutors:
     async def _classify_intent(self, query: str) -> str:
         prompt = f"""Classify this user message as either CASUAL or TASK.
 
-CASUAL = greeting, small talk, "how are you", joke, opinion, thank you, chit-chat, storytelling, emotional support, philosophy, roleplay, simple general-knowledge questions.
-TASK   = anything that might need tools, search, calculation, research, file/code work, actions, multi-step goal, current events, data lookup, etc.
+    CASUAL = greeting, small talk, "how are you", joke, opinion, thank you, chit-chat, storytelling, emotional support, philosophy, roleplay, simple general-knowledge questions.
+    TASK   = anything that might need tools, search, calculation, research, file/code work, actions, multi-step goal, current events, data lookup, etc.
 
-User message: {query}
+    User message: {query}
 
-Answer with **exactly one word**: CASUAL or TASK"""
+    Answer with **exactly one word**: CASUAL or TASK"""
 
         try:
-            result = await self.agent.client.chat(prompt, temperature=0.0, max_tokens=20)
+            result = await self.agent.client.chat(
+                prompt, temperature=0.0, max_tokens=20
+            )
             return "CASUAL" if "CASUAL" in result.upper() else "TASK"
         except Exception:
             return "CASUAL" if len(query.split()) < 25 else "TASK"
 
     def _build_casual_system_prompt(self) -> str:
         return """You are a warm, friendly, engaging AI companion.
-Be natural, use contractions, show personality, be concise unless asked otherwise.
-Never mention tools, internal steps, thinking process, or knowledge base unless the user explicitly asks about them."""
+        Be natural, use contractions, show personality, be concise unless asked otherwise.
+        Never mention tools, internal steps, thinking process, or knowledge base unless the user explicitly asks about them."""
 
     # ====================== TOOL EXECUTION ======================
     async def _execute_tool(self, name: str, args: dict):
@@ -59,7 +60,9 @@ Never mention tools, internal steps, thinking process, or knowledge base unless 
     ) -> AsyncIterator[Tuple[str, Any]]:
         """Core robust task execution loop.
         Used by both chat_loop (TASK path) and agentic_loop (sub-agents)."""
-        logger.info(f"[TASK EXECUTION] Starting goal-driven loop for: {original_query[:100]}...")
+        logger.info(
+            f"[TASK EXECUTION] Starting goal-driven loop for: {original_query[:100]}..."
+        )
 
         yield ("phase_changed", {"phase": "thinking"})
 
@@ -75,10 +78,11 @@ Never mention tools, internal steps, thinking process, or knowledge base unless 
             browse_query = original_query
 
             current_query = (
-                original_query if loop_count == 1
+                original_query
+                if loop_count == 1
                 else f"USER REQUEST: {original_query}\n\n"
-                     "Previous tool results are already stored in KB.\n"
-                     "You may call more tools if needed, otherwise prepare for final answer."
+                "Previous tool results are already stored in KB.\n"
+                "You may call more tools if needed, otherwise prepare for final answer."
             )
 
             yield ("phase_changed", {"phase": "searching_tools"})
@@ -117,14 +121,20 @@ Never mention tools, internal steps, thinking process, or knowledge base unless 
 
                     elif kind in ("tool_delta", "tool_complete", "needs_confirmation"):
                         if isinstance(payload, dict):
-                            tool_name = payload.get("tool_name") or payload.get("name") or "unknown"
+                            tool_name = (
+                                payload.get("tool_name")
+                                or payload.get("name")
+                                or "unknown"
+                            )
                             result = payload.get("result") or payload.get("output")
                             args = payload.get("args", {}) or {}
 
                             if "FindTool" in tool_name:
                                 tool_browser_detected = True
                                 browse_query = args.get("query", original_query)
-                                logger.info(f"[FindTool] intercepted. Query='{browse_query[:120]}...'")
+                                logger.info(
+                                    f"[FindTool] intercepted. Query='{browse_query[:120]}...'"
+                                )
                                 yield ("phase_changed", {"phase": "handling_findtool"})
                                 break
 
@@ -132,13 +142,17 @@ Never mention tools, internal steps, thinking process, or knowledge base unless 
 
                             content_str = (
                                 json.dumps(result, ensure_ascii=False, default=str)
-                                if isinstance(result, dict) else str(result or "No output")
+                                if isinstance(result, dict)
+                                else str(result or "No output")
                             )
 
                             await self.agent.context_manager.record_tool_outcome(
                                 tool_name=tool_name,
                                 result=content_str,
-                                metadata={"loop": loop_count, "sub_agent": is_sub_agent},
+                                metadata={
+                                    "loop": loop_count,
+                                    "sub_agent": is_sub_agent,
+                                },
                             )
 
                     elif kind == "finish":
@@ -182,7 +196,8 @@ Never mention tools, internal steps, thinking process, or knowledge base unless 
                 query=final_query,
                 max_input_tokens=self.agent.max_tokens,
                 reserved_for_output=8000,
-                system_prompt=self._build_objective_reminder() + "\n\nYou are in FINAL ANSWER MODE. Be precise and factual.",
+                system_prompt=self._build_objective_reminder()
+                + "\n\nYou are in FINAL ANSWER MODE. Be precise and factual.",
                 include_logs=True,
                 chat=not is_sub_agent,
             )
@@ -216,7 +231,9 @@ Never mention tools, internal steps, thinking process, or knowledge base unless 
         state.phase = self.Phase.EXECUTE
         yield ("phase_changed", {"phase": state.phase.value})
 
-        original_query = state.current_task or self.agent.goal or "Complete the assigned micro-task"
+        original_query = (
+            state.current_task or self.agent.goal or "Complete the assigned micro-task"
+        )
 
         async for event, payload in self._goal_driven_task_loop(
             original_query=original_query,
@@ -232,8 +249,11 @@ Never mention tools, internal steps, thinking process, or knowledge base unless 
         logger.debug("=== CHAT LOOP ===")
 
         original_user_query = next(
-            (m.get("content", "").strip() for m in reversed(messages or [])
-             if m.get("role") == "user" and m.get("content")),
+            (
+                m.get("content", "").strip()
+                for m in reversed(messages or [])
+                if m.get("role") == "user" and m.get("content")
+            ),
             state.current_task or "[USER REQUEST]",
         )
 
