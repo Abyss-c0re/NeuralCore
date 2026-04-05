@@ -209,16 +209,16 @@ class DynamicActionManager:
             "GetDeploymentStatus",
         }
 
-        # Flag to allow unloading persistent tools when explicitly needed
-        # Default = True (protect them)
+        # NEW: Tools that were dynamically discovered via FindTool
+        # These should survive across chat turns in persistent workflows
+        self._discovered_tools: Set[str] = set()
+
         self.protect_persistent_tools = True
 
         logger.debug("DynamicActionManager initialized")
 
     def add(self, action: Action, origin_set: Optional[str] = None):
-        """Add a single action to the current dynamic set."""
         if action.name in self._loaded_tools:
-            logger.debug(f"Tool '{action.name}' already loaded — skipping")
             return
 
         self.current_set.add(action)
@@ -227,6 +227,10 @@ class DynamicActionManager:
         if origin_set:
             self._tool_to_set[action.name] = origin_set
             self._set_to_tools.setdefault(origin_set, set()).add(action.name)
+
+        # If this tool was loaded via FindTool (or manually), mark it as discovered
+        if origin_set is None or "FindTool" in action.name:
+            self._discovered_tools.add(action.name)
 
         logger.debug(
             f"Added tool '{action.name}' to DynamicCore (origin: {origin_set or 'manual'})"
@@ -487,16 +491,20 @@ class DynamicActionManager:
             self.unload_tools(list(to_unload))
             logger.info(f"Unloaded all tools from sets: {', '.join(toolset_names)}")
 
-    def unload_all(self):
-        """Unload ONLY non-persistent tools. DynamicCore stays loaded at all times."""
-        if self.protect_persistent_tools:
-            to_remove = [
-                name
-                for name in self._loaded_tools
-                if name not in self._persistent_tools
-            ]
-        else:
-            to_remove = list(self._loaded_tools)
+    def unload_all(self, keep_discovered: bool = False):
+        """Unload non-persistent tools.
+
+        Args:
+            keep_discovered: If True, protect tools that were dynamically loaded via FindTool.
+                            This is a generic flag — the caller (NeuralVoid) decides when to use it.
+        """
+        to_remove = []
+        for name in list(self._loaded_tools):
+            if name in self._persistent_tools:
+                continue
+            if keep_discovered and name in self._discovered_tools:
+                continue
+            to_remove.append(name)
 
         for name in to_remove:
             self.current_set.remove_by_name(name)
@@ -505,67 +513,49 @@ class DynamicActionManager:
 
         self._set_to_tools.clear()
 
-        # Auto-restore persistent tools (including FindTool) if protection is enabled
+        # Re-add persistent tools
         if self.protect_persistent_tools:
             for p_name in self._persistent_tools:
-                if (
-                    p_name in self.registry.all_actions
-                    and p_name not in self._loaded_tools
-                ):
+                if p_name in self.registry.all_actions and not self.is_loaded(p_name):
                     action, origin = self.registry.all_actions[p_name]
                     self.add(action, origin_set=origin)
 
+        # Re-add discovered tools when requested
+        if keep_discovered:
+            for d_name in list(self._discovered_tools):
+                if not self.is_loaded(d_name) and d_name in self.registry.all_actions:
+                    action, origin = self.registry.all_actions[d_name]
+                    self.add(action, origin_set=origin)
+
         logger.info(
-            f"Unloaded dynamic tools only. Persistent tools (DynamicCore) protected: {self.protect_persistent_tools}"
+            f"Unloaded dynamic tools. Persistent protected. "
+            f"keep_discovered={keep_discovered} → {len(self._discovered_tools)} kept"
         )
 
     def reset_to_default_package(self, step_name: str, engine) -> int:
-        """Reset to step defaults while keeping DynamicCore (persistent tools) fully loaded."""
         logger.info(f"🔄 Resetting to default tool package for step '{step_name}'")
 
-        # NO aggressive unload — only non-persistent if protection is off
-        if not self.protect_persistent_tools:
-            ephemeral = [
-                t for t in self._loaded_tools if t not in self._persistent_tools
-            ]
-            if ephemeral:
-                self.unload_tools(ephemeral)
+        # Generic: always unload non-persistent first (caller can control via keep_discovered later)
+        self.unload_all(keep_discovered=False)
 
-        # Load default package from decorator metadata (toolsets/tools)
+        # Load defaults from metadata (this part can stay)
         meta = engine.get_step_metadata(step_name) if engine else None
         loaded_count = 0
-
         if meta:
-            toolsets = meta.get("toolsets")
-            if toolsets:
+            if toolsets := meta.get("toolsets"):
                 loaded_count += self.load_toolsets(toolsets)
-
-            tools = meta.get("tools")
-            if tools:
+            if tools := meta.get("tools"):
                 self.load_tools(tools)
                 loaded_count += len(tools) if isinstance(tools, (list, tuple)) else 1
 
-        # Always ensure persistent tools (DynamicCore) are present
+        # Always ensure persistent tools
         for p_name in self._persistent_tools:
             if p_name in self.registry.all_actions and not self.is_loaded(p_name):
                 action, origin = self.registry.all_actions[p_name]
                 self.add(action, origin_set=origin)
                 loaded_count += 1
 
-        logger.info(
-            f"✅ Default package restored ({loaded_count} tools, DynamicCore kept persistent)"
-        )
-
-        # Extra safety for FindTool
-        if "FindTool" in self._persistent_tools and not self.is_loaded(
-            "FindTool"
-        ):
-            if "FindTool" in self.registry.all_actions:
-                action, origin = self.registry.all_actions["FindTool"]
-                self.add(action, origin_set=origin)
-                loaded_count += 1
-                logger.debug("Re-added FindTool after reset (safety net)")
-
+        logger.info(f"✅ Default package restored for step '{step_name}'")
         return loaded_count
 
     def is_loaded(self, tool_name: str) -> bool:
