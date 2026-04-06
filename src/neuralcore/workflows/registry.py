@@ -103,7 +103,7 @@ class Workflow:
     # ===================================================================
     # STEPS — ORIGINAL AGENT BINDING LOGIC (100% unchanged)
     # ===================================================================
-    def set(
+    def step(
         self,
         workflow_name: str = "default",
         *,
