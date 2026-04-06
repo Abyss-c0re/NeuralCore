@@ -408,6 +408,7 @@ class LLMClient:
 
     async def stream_with_tools(
         self,
+        manager,
         messages: List[Dict[str, Any]],
         tools: Optional[Union[List[Dict[str, Any]], "ActionSet"]] = None,
         temperature: float = 0.7,
@@ -415,27 +416,31 @@ class LLMClient:
         tool_choice: Union[str, Dict] = "auto",
         auto_stop_on_complete_tool: bool = False,
         extra_body: Optional[Dict] = None,
-        executor_callback: Optional[Callable[[str, dict], Awaitable[Any]]] = None,
         **kwargs,
     ) -> asyncio.Queue:
         """
-        Streaming with tool support, now fully supporting ConfirmationRequired.
+        Streaming with tool support using ActionSet for executor resolution.
 
-        executor_callback: async callable(name: str, args: dict) -> result
-        This is how the client executes tools while catching ConfirmationRequired.
+        - tools can be raw OpenAI tool schemas OR an ActionSet
+        - Agent binding is handled by DynamicActionManager (set at init time)
+        - Fully supports ConfirmationRequired exceptions
         """
 
         # ── Normalize tools ─────────────────────────────
         tool_schemas: Optional[List[Dict]] = None
+        action_set: Optional[ActionSet] = None
+
+        if not tools:
+            tools = manager.get_action_set("DynamicCore")
+
         if tools is not None:
             if isinstance(tools, list):
                 tool_schemas = tools
             elif isinstance(tools, ActionSet):
+                action_set = tools
                 tool_schemas = tools.get_llm_tools()
-            else:
-                raise TypeError("tools must be List[dict] or ActionSet")
 
-        queue = asyncio.Queue()
+        queue: asyncio.Queue = asyncio.Queue()
         stop_event = asyncio.Event()
         self._current_stop_event = stop_event
         self._current_output_queue = queue
@@ -459,7 +464,7 @@ class LLMClient:
         if merged_extra:
             params["extra_body"] = merged_extra
 
-        # ── State ───────────────────────────────────────
+        # ── State for tool call streaming ─────────────────────────────
         tool_call_buffer: Dict[int, Dict] = {}
         tool_meta: Dict[int, Dict] = {}
         last_chunk = None
@@ -479,16 +484,16 @@ class LLMClient:
                     if not delta:
                         continue
 
-                    # ── CONTENT ──────────────────────────────
+                    # ── CONTENT STREAM ──────────────────────────────
                     if delta.content is not None:
                         await queue.put(("content", delta.content))
 
-                    # ── TOOL CALLS ──────────────────────────
+                    # ── TOOL CALLS STREAMING ────────────────────────
                     if delta.tool_calls:
                         for tc_delta in delta.tool_calls:
                             idx = tc_delta.index
 
-                            # INIT buffers
+                            # Initialize buffers
                             if idx not in tool_call_buffer:
                                 tool_call_buffer[idx] = {
                                     "id": "",
@@ -505,7 +510,7 @@ class LLMClient:
                             tc = tool_call_buffer[idx]
                             meta = tool_meta[idx]
 
-                            # assign id/name safely
+                            # Accumulate data
                             if tc_delta.id:
                                 tc["id"] = tc_delta.id
                             if tc_delta.function.name:
@@ -515,11 +520,11 @@ class LLMClient:
                                     tc_delta.function.arguments
                                 )
 
-                            # skip if name missing or already completed
+                            # Skip if we don't have a name yet or already completed
                             if not tc["function"]["name"] or meta["completed"]:
                                 continue
 
-                            # ── STREAM incremental updates ──
+                            # ── Incremental tool argument streaming ──
                             args = tc["function"]["arguments"]
                             new_len = len(args)
                             if new_len > meta["last_len"]:
@@ -537,20 +542,45 @@ class LLMClient:
                                     )
                                 )
 
-                            # ── COMPLETE when JSON valid ──
+                            # ── COMPLETE when arguments form valid JSON ──
                             if is_valid_json(args) and not meta["completed"]:
                                 meta["completed"] = True
                                 payload = {"index": idx, **tc}
 
-                                if executor_callback:
+                                # Resolve and execute tool
+                                if action_set is not None:
                                     try:
+                                        # Use manager.get_executor (agent is already bound at load time)
+
+                                        if manager is not None and hasattr(
+                                            manager, "get_executor"
+                                        ):
+                                            action = manager.get_executor(
+                                                name=tc["function"]["name"]
+                                            )
+                                        else:
+                                            # fallback
+                                            action = action_set.get_executor(
+                                                name=tc["function"]["name"]
+                                            )
+
+                                        if action is None:
+                                            raise RuntimeError(
+                                                f"No executor found for tool '{tc['function']['name']}'"
+                                            )
+
                                         args_dict = json.loads(args)
-                                        result = await executor_callback(
-                                            tc["function"]["name"], args_dict
-                                        )
+                                        result = action(**args_dict)
+
+                                        if asyncio.iscoroutine(result) or isinstance(
+                                            result, Awaitable
+                                        ):
+                                            result = await result
+
                                         payload["result"] = result
+
                                     except ConfirmationRequired as exc:
-                                        # proper handling of ConfirmationRequired
+                                        # Forward confirmation request to consumer
                                         await queue.put(
                                             (
                                                 "needs_confirmation",
@@ -561,18 +591,25 @@ class LLMClient:
                                                 },
                                             )
                                         )
-                                        continue  # skip marking complete until confirmed
+                                        continue
+
                                     except Exception as e:
+                                        logger.error(
+                                            f"Tool execution error for '{tc['function']['name']}': {e}",
+                                            exc_info=True,
+                                        )
                                         payload["error"] = True
                                         payload["result"] = str(e)
+                                else:
+                                    # Fallback when only raw schemas were provided
+                                    payload["result"] = None
 
                                 await queue.put(("tool_complete", payload))
 
                                 if auto_stop_on_complete_tool:
-                                    stop_event.set()
                                     break
 
-                # ── STREAM ENDED ─────────────────────────────
+                # ── STREAM FINISHED ─────────────────────────────
                 final_tool_calls = (
                     [
                         {"index": i, **tool_call_buffer[i]}
@@ -603,6 +640,7 @@ class LLMClient:
             except asyncio.CancelledError:
                 await queue.put(("finish", {"finish_reason": "cancelled"}))
             except Exception as e:
+                logger.error(f"Stream error: {e}", exc_info=True)
                 await queue.put(("error", str(e)))
             finally:
                 await queue.put(None)

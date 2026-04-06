@@ -195,9 +195,11 @@ logger.debug(f"Global registry created with sets: {list(registry.sets.keys())}")
 
 
 class DynamicActionManager:
-    def __init__(self, registry: "ActionRegistry"):
+    def __init__(self, registry: "ActionRegistry", agent: Optional[Any] = None):
         self.registry = registry
         self.current_set = ActionSet("DynamicCore")
+        self._agent: Optional[Any] = agent  # ← stored once
+
         self._loaded_tools: Set[str] = set()
         self._tool_to_set: Dict[str, str] = {}
         self._set_to_tools: Dict[str, Set[str]] = {}
@@ -208,14 +210,13 @@ class DynamicActionManager:
             "DeploySubAgent",
             "GetDeploymentStatus",
         }
-
-        # NEW: Tools that were dynamically discovered via FindTool
-        # These should survive across chat turns in persistent workflows
         self._discovered_tools: Set[str] = set()
 
         self.protect_persistent_tools = True
 
-        logger.debug("DynamicActionManager initialized")
+        logger.debug(
+            f"DynamicActionManager initialized with agent={getattr(agent, 'agent_id', 'None')}"
+        )
 
     def add(self, action: Action, origin_set: Optional[str] = None):
         if action.name in self._loaded_tools:
@@ -228,9 +229,16 @@ class DynamicActionManager:
             self._tool_to_set[action.name] = origin_set
             self._set_to_tools.setdefault(origin_set, set()).add(action.name)
 
-        # If this tool was loaded via FindTool (or manually), mark it as discovered
         if origin_set is None or "FindTool" in action.name:
             self._discovered_tools.add(action.name)
+
+        # === KEY FIX: Bind agent immediately when the action is added to DynamicCore ===
+        if self._agent is not None and action._needs_agent:
+            try:
+                action.bind_agent(self._agent)
+                logger.debug(f"[BIND ON ADD] {action.name} → agent bound at load time")
+            except Exception as e:
+                logger.error(f"Failed to bind agent to '{action.name}' on add: {e}")
 
         logger.debug(
             f"Added tool '{action.name}' to DynamicCore (origin: {origin_set or 'manual'})"
@@ -573,8 +581,27 @@ class DynamicActionManager:
     def get_llm_tools(self) -> List[Dict[str, Any]]:
         return self.current_set.get_llm_tools()
 
-    def get_executor(self, agent, name: str) -> Optional[Action]:
-        return self.current_set.get_executor(agent, name)
+    def get_executor(self, name: str, agent: Optional[Any] = None) -> Optional[Action]:
+        """Simple delegation. Binding already happened in .add()"""
+        action = self.current_set.get_executor(name)
+        if action is None:
+            logger.warning(f"[DYNAMIC MANAGER] No executor for '{name}'")
+            return None
+
+        # Optional re-bind if a different agent is explicitly passed (rare)
+        binding_agent = agent or self._agent
+        if (
+            binding_agent is not None
+            and action._needs_agent
+            and action._bound_agent is None
+        ):
+            try:
+                action.bind_agent(binding_agent)
+            except Exception as e:
+                logger.error(f"Failed to bind agent to '{name}': {e}")
+                raise
+
+        return action
 
     @property
     def actions(self):

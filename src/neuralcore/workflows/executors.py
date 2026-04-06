@@ -1,4 +1,3 @@
-import asyncio
 import json
 
 from typing import AsyncIterator, Dict, Any, List, Optional, Tuple
@@ -43,32 +42,75 @@ class AgentExecutors:
         Be natural, use contractions, show personality, be concise unless asked otherwise.
         Never mention tools, internal steps, thinking process, or knowledge base unless the user explicitly asks about them."""
 
-    # ====================== TOOL EXECUTION ======================
-    async def _execute_tool(self, name: str, args: dict):
-        executor = self.agent.manager.get_executor(name, self.agent)
-        if not executor:
-            raise RuntimeError(f"No executor found for tool '{name}'")
-        result = executor(**args)
-        return await result if asyncio.iscoroutine(result) else result
+    async def _is_multi_step_task(self, query: str) -> bool:
+        """Cheap LLM check: is this request naturally multi-step?"""
+        prompt = f"""Does this user request require multiple distinct steps/actions?
 
-    # ====================== SHARED GOAL-DRIVEN TASK LOOP ======================
+        Request: {query}
+
+        Answer with exactly one word: YES or NO"""
+
+        try:
+            result = await self.agent.client.chat(
+                prompt, temperature=0.0, max_tokens=10
+            )
+            return "YES" in result.upper()
+        except Exception:
+            # Fallback: if it contains words like "then", "after", "first", "second", etc.
+            keywords = [
+                "then",
+                "after that",
+                "next",
+                "followed by",
+                "first",
+                "second",
+                "finally",
+            ]
+            return any(kw in query.lower() for kw in keywords)
+
     async def _goal_driven_task_loop(
         self,
         original_query: str,
         state: AgentState,
         is_sub_agent: bool = False,
     ) -> AsyncIterator[Tuple[str, Any]]:
-        """Core robust task execution loop.
-        Used by both chat_loop (TASK path) and agentic_loop (sub-agents)."""
-        logger.info(
-            f"[TASK EXECUTION] Starting goal-driven loop for: {original_query[:100]}..."
-        )
+        """Goal-driven loop with multi-step support + smart loop counter reset on FindTool and Next Action."""
+
+        logger.info(f"[TASK LOOP] Starting for: {original_query[:120]}...")
 
         yield ("phase_changed", {"phase": "thinking"})
 
-        max_loops = 20
+        # ====================== MULTI-STEP PLANNING ======================
+        planned_tasks = getattr(state, "planned_tasks", []) or []
+
+        if not planned_tasks:
+            is_multi_step = await self._is_multi_step_task(original_query)
+            if is_multi_step:
+                logger.info("[MULTI-STEP] Detected → planning")
+                yield ("phase_changed", {"phase": "planning"})
+                async for ev, pl in self.agent.flow._ensure_subtasks_planned(
+                    state, original_query
+                ):
+                    yield ev, pl
+                planned_tasks = getattr(state, "planned_tasks", []) or []
+            else:
+                planned_tasks = [original_query]
+
+        is_multi_step = len(planned_tasks) > 1
+        current_task_idx = getattr(state, "current_task_index", 0)
+
+        if is_multi_step:
+            yield ("phase_changed", {"phase": "multi_step_execution"})
+        else:
+            yield ("phase_changed", {"phase": "single_step_execution"})
+
+        # ====================== LOOP CONTROL ======================
+        max_loops = 10
+        max_action_restarts = 5
         loop_count = 0
-        final_answer_marker = "[FINAL_ANSWER_COMPLETE]"
+        empty_loops = 0
+        action_restarts = 0
+        marker = "[FINAL_ANSWER_COMPLETE]"
 
         while loop_count < max_loops:
             loop_count += 1
@@ -77,13 +119,25 @@ class AgentExecutors:
             tool_browser_detected = False
             browse_query = original_query
 
-            current_query = (
-                original_query
-                if loop_count == 1
-                else f"USER REQUEST: {original_query}\n\n"
-                "Previous tool results are already stored in KB.\n"
-                "You may call more tools if needed, otherwise prepare for final answer."
-            )
+            # Build query for current sub-task
+            if is_multi_step and current_task_idx < len(planned_tasks):
+                task_desc = planned_tasks[current_task_idx]
+                current_query = (
+                    f"USER ORIGINAL REQUEST: {original_query}\n\n"
+                    f"CURRENT SUB-TASK ({current_task_idx + 1}/{len(planned_tasks)}): {task_desc}\n\n"
+                    "Focus ONLY on this sub-task. When finished, end with exactly:\n"
+                    f"{marker}\n"
+                    "Previous results are in KB."
+                )
+            else:
+                current_query = (
+                    original_query
+                    if loop_count == 1
+                    else (
+                        f"USER ORIGINAL REQUEST: {original_query}\n\n"
+                        "Previous results are in KB. Continue or prepare final answer."
+                    )
+                )
 
             yield ("phase_changed", {"phase": "searching_tools"})
 
@@ -91,31 +145,25 @@ class AgentExecutors:
                 query=current_query,
                 max_input_tokens=self.agent.max_tokens,
                 reserved_for_output=12000,
-                system_prompt=self._build_objective_reminder(),
+                system_prompt=self._build_objective_reminder()
+                + f"\n\nWhen you finish the current sub-task, you MUST output exactly: {marker}",
                 include_logs=True,
-                chat=not is_sub_agent,
+                chat=False,
             )
 
             queue = await self.agent.client.stream_with_tools(
+                manager=self.agent.manager,
                 messages=messages,
-                tools=self.agent.manager.get_action_set("DynamicCore"),
                 temperature=0.2 if not is_sub_agent else self.agent.temperature,
                 max_tokens=self.agent.max_tokens,
                 tool_choice="auto",
-                executor_callback=self._execute_tool,
+                auto_stop_on_complete_tool=True,
             )
 
             try:
-                async for item in self.agent.client._drain_queue(queue):
-                    if item is None:
-                        continue
-                    if not isinstance(item, tuple) or len(item) != 2:
-                        continue
-
-                    kind, payload = item
-
+                async for kind, payload in self.agent.client._drain_queue(queue):
                     if kind == "content":
-                        content = str(payload) if payload is not None else ""
+                        content = str(payload or "")
                         text_buffer += content
                         yield ("content_delta", content)
 
@@ -127,25 +175,20 @@ class AgentExecutors:
                                 or "unknown"
                             )
                             result = payload.get("result") or payload.get("output")
-                            args = payload.get("args", {}) or {}
+                            args = payload.get("args", {})
 
                             if "FindTool" in tool_name:
                                 tool_browser_detected = True
                                 browse_query = args.get("query", original_query)
-                                logger.info(
-                                    f"[FindTool] intercepted. Query='{browse_query[:120]}...'"
-                                )
                                 yield ("phase_changed", {"phase": "handling_findtool"})
                                 break
 
                             tools_called_this_turn = True
-
                             content_str = (
                                 json.dumps(result, ensure_ascii=False, default=str)
                                 if isinstance(result, dict)
                                 else str(result or "No output")
                             )
-
                             await self.agent.context_manager.record_tool_outcome(
                                 tool_name=tool_name,
                                 result=content_str,
@@ -154,42 +197,132 @@ class AgentExecutors:
                                     "sub_agent": is_sub_agent,
                                 },
                             )
+                            break
 
                     elif kind == "finish":
                         break
                     elif kind in ("error", "cancelled"):
-                        yield (kind, payload)
+                        yield kind, payload
                         return
 
             except Exception as e:
-                logger.error(f"Stream error in task loop: {e}", exc_info=True)
-                yield ("error", str(e))
+                logger.error(f"Stream error: {e}", exc_info=True)
+                yield "error", str(e)
                 return
 
             if tool_browser_detected:
+                logger.info("[FindTool] Resetting loop counters (new tools loaded)")
+                loop_count = 0
+                empty_loops = 0
                 await self._handle_browse_tools_interception(browse_query)
                 continue
 
             final_reply = text_buffer.strip()
-            if final_answer_marker in final_reply:
-                final_reply = final_reply.replace(final_answer_marker, "").strip()
+            has_marker = marker in final_reply
+            if has_marker:
+                final_reply = final_reply.replace(marker, "").strip()
 
-            if tools_called_this_turn and loop_count < max_loops:
+            # ====================== ACTION / NEXT ACTION RESTART LOGIC ======================
+            action_restart_triggered = False
+            action_continuation = None
+            detected_keyword = None
+
+            if not has_marker:
+                lines = final_reply.splitlines()
+                last_100_lines = "\n".join(lines[-100:])
+                last_100_lower = last_100_lines.lower()
+
+                action_keywords = ["next action:", "next action", "action:", "action"]
+
+                for kw in action_keywords:
+                    pos = last_100_lower.rfind(kw)
+                    if pos != -1:
+                        after_pos = last_100_lines.rfind(kw) + len(kw)
+                        candidate = last_100_lines[after_pos:].strip()
+
+                        if candidate and len(candidate) > 15:
+                            action_continuation = candidate
+                            action_restart_triggered = True
+                            detected_keyword = kw
+                            break
+
+            if action_restart_triggered and action_continuation:
+                action_restarts += 1
+                if action_restarts > max_action_restarts:
+                    logger.warning(
+                        f"Max action restarts ({max_action_restarts}) reached. Forcing completion."
+                    )
+                else:
+                    logger.info(
+                        f"[Action Restart #{action_restarts}] Detected '{detected_keyword}' "
+                        f"in last 100 lines. New continuation: {action_continuation[:100]}..."
+                    )
+
+                    loop_count = 0
+                    empty_loops = 0
+
+                    current_query = (
+                        f"USER ORIGINAL REQUEST: {original_query}\n\n"
+                        f"NEW ACTION DIRECTIVE: {action_continuation}\n\n"
+                        "Execute the above directive precisely as the next step. "
+                        "Use tools if needed. When this step is complete, output the marker if the overall task is done."
+                    )
+
+                    yield ("phase_changed", {"phase": "action_restart"})
+                    continue
+            # ====================== END ACTION RESTART LOGIC ======================
+
+            # ====================== TERMINATION LOGIC ======================
+            task_fully_complete = False
+
+            if has_marker:
+                if not is_multi_step:
+                    task_fully_complete = True
+                else:
+                    if current_task_idx >= len(planned_tasks) - 1:
+                        task_fully_complete = True
+                    else:
+                        logger.info(
+                            f"[MULTI-STEP] Sub-task {current_task_idx + 1} done → advancing"
+                        )
+                        state.current_task_index = current_task_idx + 1
+                        empty_loops = 0
+                        continue
+
+            if (
+                not tools_called_this_turn
+                and not has_marker
+                and not action_restart_triggered
+            ):
+                empty_loops += 1
+                logger.debug(f"Empty loop detected ({empty_loops}/3)")
+                if empty_loops >= 3:
+                    logger.warning("3 consecutive empty loops → forcing completion")
+                    if is_multi_step and current_task_idx < len(planned_tasks) - 1:
+                        state.current_task_index += 1
+                        empty_loops = 0
+                        continue
+                    else:
+                        task_fully_complete = True
+            else:
+                empty_loops = 0
+
+            if (
+                tools_called_this_turn
+                and loop_count < max_loops
+                and not has_marker
+                and not task_fully_complete
+            ):
                 yield ("phase_changed", {"phase": "executing_tools"})
-                logger.info(f"Tools executed (loop {loop_count}) – continuing silently")
                 continue
 
-            # === STRONG FINAL SYNTHESIS PASS ===
+            # ====================== FINAL SYNTHESIS ======================
             yield ("phase_changed", {"phase": "generating_final_answer"})
 
             final_query = (
                 f"USER ORIGINAL REQUEST: {original_query}\n\n"
-                "You now have ALL tool results stored in the KB / provided context.\n"
-                "VERY IMPORTANT RULES:\n"
-                "• Answer ONLY using the exact information from the tool results.\n"
-                "• DO NOT invent, hallucinate, or add any files, folders, or results that were not returned.\n"
-                "• Be direct, concise, and factual.\n"
-                "• Do not mention tools, KB, or internal steps."
+                f"{'FINAL sub-task completed.' if task_fully_complete and is_multi_step else 'Current step completed.'}\n"
+                "Summarize using only verified tool results. Be concise."
             )
 
             final_messages = await self.agent.context_manager.provide_context(
@@ -197,9 +330,9 @@ class AgentExecutors:
                 max_input_tokens=self.agent.max_tokens,
                 reserved_for_output=8000,
                 system_prompt=self._build_objective_reminder()
-                + "\n\nYou are in FINAL ANSWER MODE. Be precise and factual.",
+                + "\n\nFINAL ANSWER MODE",
                 include_logs=True,
-                chat=not is_sub_agent,
+                chat=False,
             )
 
             final_reply = await self.agent.client.chat(
@@ -210,15 +343,21 @@ class AgentExecutors:
 
             yield (
                 "llm_response",
-                {"full_reply": final_reply, "tool_calls": [], "is_complete": True},
+                {
+                    "full_reply": final_reply,
+                    "tool_calls": [],
+                    "is_complete": task_fully_complete,
+                },
             )
-            break
+
+            if task_fully_complete:
+                break
 
         else:
-            logger.warning(f"Task execution reached max loops ({max_loops})")
+            logger.warning(f"Max loops ({max_loops}) reached")
             final_reply = "⚠️ Maximum iterations reached while executing the task."
             await self.agent.context_manager.add_message("assistant", final_reply)
-            yield ("llm_response", {"full_reply": final_reply, "is_complete": True})
+            yield ("llm_response", {"full_reply": final_reply, "is_complete": False})
 
     # ====================== REFACTORED AGENTIC LOOP (for sub-agents) ======================
     async def agentic_loop(

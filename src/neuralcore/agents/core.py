@@ -1,7 +1,7 @@
 import yaml
 import asyncio
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Union
 
 from neuralcore.utils.logger import Logger
 from neuralcore.actions.manager import (
@@ -17,6 +17,181 @@ from neuralcore.clients.factory import get_clients
 from neuralcore.actions.manager import tool
 
 logger = Logger.get_logger()
+
+
+# ================================ TOOLS =======================================
+# Enabling agent to use own methods as tools (search context. deploy sub agents)
+
+
+@tool("ContextManager", name="GetContext", description="Search your own memory")
+async def provide_context(agent, query: str, *, agent_metadata: Optional[dict] = None):
+    agent_metadata = agent_metadata or {}
+    agent_metadata.setdefault("is_sub_agent", getattr(agent, "sub_agent", False))
+    agent_metadata.setdefault("agent_id", getattr(agent, "agent_id", "unknown"))
+
+    # Only use parent if it exists
+    parent_agent = getattr(agent, "parent", None)
+    if getattr(agent, "sub_agent", False) and parent_agent:
+        return await parent_agent.context_manager.provide_context(query)
+    return await agent.context_manager.provide_context(query)
+
+
+@tool(
+    "DeployControls",
+    name="DeploySubAgent",
+    description="""Deploy a focused sub-agent to handle one micro-task.
+
+    Parameters:
+    - task_description: Clear, specific description of what this step should do.
+    - assigned_tools: Optional list of tool names...
+    - depends_on_task_id: Optional task ID this one depends on.
+    - user_facing_name: Optional friendly name for logs/UI.
+    """,
+)
+async def deploy_sub_agent(
+    agent,
+    task_description: str,
+    assigned_tools: Optional[Union[List[str], str]] = None,
+    depends_on_task_id: Optional[str] = None,
+    user_facing_name: Optional[str] = None,
+) -> str:
+    """Safely clean assigned_tools and launch sub-agent with recursion protection."""
+
+    # === NEURALCORE RECURSION GUARD ===
+    if agent.is_sub_agent():
+        parent = agent.get_parent_agent()
+        if parent is not None:
+            logger.warning(
+                f"[DEPLOY GUARD] Sub-agent '{agent.name}' attempted to call DeploySubAgent. "
+                f"Blocked to prevent recursion. Parent: {parent.name}"
+            )
+            return (
+                "⛔ DeploySubAgent is not available to sub-agents to prevent infinite recursion. "
+                "Complete the current micro-task using only the tools you were assigned."
+            )
+
+    # === Existing defensive cleaning of assigned_tools (unchanged) ===
+    if assigned_tools is None:
+        cleaned_tools = None
+    elif isinstance(assigned_tools, str):
+        s = assigned_tools.strip()
+        if not s:
+            cleaned_tools = None
+        elif s.startswith("[") and s.endswith("]"):
+            try:
+                import json
+
+                cleaned_tools = json.loads(s)
+            except Exception:
+                cleaned_tools = [s.strip("[]\"' ")]
+        else:
+            cleaned_tools = [s.strip("\"' ")]
+    elif isinstance(assigned_tools, (list, tuple)):
+        cleaned_tools = [str(t).strip() for t in assigned_tools if str(t).strip()]
+    else:
+        cleaned_tools = None
+
+    if cleaned_tools:
+        cleaned_tools = [t for t in cleaned_tools if isinstance(t, str) and t.strip()]
+        if not cleaned_tools:
+            cleaned_tools = None
+
+    tool_list = cleaned_tools[:8] if cleaned_tools else []
+    logger.info(
+        f"[DeploySubAgent] task='{task_description[:80]}...' | "
+        f"assigned_tools={tool_list} | depends_on={depends_on_task_id}"
+    )
+
+    # Proceed with deployment only for main agents
+    task_id = await agent.start_complex_deployment(
+        task_description=task_description,
+        user_facing_name=user_facing_name,
+        assigned_tools=cleaned_tools,
+        depends_on=depends_on_task_id,
+        temperature=0.25,
+    )
+
+    dep_info = f" (depends on {depends_on_task_id})" if depends_on_task_id else ""
+    return f"✅ Launched sub-task `{task_id}`{dep_info}: {task_description[:80]}..."
+
+
+@tool("DeployControls", name="GetDeploymentStatus")
+async def get_deployment_status(agent, task_id: Optional[str] = None):
+    # Auto-detect current task if no ID provided
+    # if not task_id:
+    #     if hasattr(self, "state") and getattr(self.state, "sub_task_ids", None):
+    #         task_id = self.state.sub_task_ids[0] if self.state.sub_task_ids else None
+    #     elif hasattr(self.state, "task_id_map") and self.state.task_id_map:
+    #         task_id = list(self.state.task_id_map.values())[-1]
+
+    # Lookup in sub_tasks
+    status = agent.sub_tasks.get(task_id) if task_id else None
+
+    # Fallback: task_id exists in task_id_map but not yet in sub_tasks
+    if not status and task_id:
+        return f"⚠ Task ID `{task_id}` registered but not yet active. Try again in a few seconds."
+
+    if status:
+        output = [
+            f"**Task ID:** `{task_id}`",
+            f"**Step:** {status.get('step_number', '?')}",
+            f"**Name:** {status.get('display_name', 'Unnamed Task')}",
+            f"**Status:** {status.get('status', 'unknown').upper()}",
+            f"**Runtime:** {status.get('runtime_seconds', 0):.1f} seconds",
+            f"**Progress:** {status.get('progress', 0)}%",
+            f"**Description:** {status.get('description', '')[:280]}...",
+        ]
+
+        if status.get("assigned_tools"):
+            output.append(
+                f"**Assigned Tools:** {', '.join(status['assigned_tools'][:10])}..."
+            )
+
+        if status.get("status") in ("completed", "failed") and status.get("result"):
+            output.append(f"\n**Result:**\n{status['result']}")
+        if status.get("error"):
+            output.append(f"\n**Error:** {status['error']}")
+
+        return "\n".join(output)
+
+    # Full overview if no specific task found
+    tasks = agent.get_sub_tasks()
+    if not tasks:
+        return "No background deployments running at the moment."
+
+    lines = ["# 📊 **Deployment Status Overview**"]
+    total = len(tasks)
+    running = sum(1 for t in tasks.values() if t.get("status") == "running")
+    completed = sum(1 for t in tasks.values() if t.get("status") == "completed")
+    failed = sum(
+        1 for t in tasks.values() if t.get("status") in ("failed", "cancelled")
+    )
+
+    lines.append(
+        f"**Progress:** {completed}/{total} steps completed | Running: {running} | Failed: {failed}"
+    )
+    if hasattr(agent, "task") and agent.task:
+        lines.append(f"\n**Main Task:** {agent.task}")
+    if hasattr(agent.workflow, "current_workflow"):
+        lines.append(f"**Current Stage:** {agent.workflow.current_workflow_name}")
+
+    lines.append("\n**Steps:**")
+    for t in sorted(tasks.values(), key=lambda x: x.get("started_at", 0)):
+        emoji = {
+            "running": "🔄",
+            "completed": "✅",
+            "failed": "❌",
+            "pending": "⏳",
+        }.get(t.get("status", "").lower(), "•")
+        line = f"{emoji} `{t['id']}` → **{t.get('status', 'unknown').upper()}** — {t.get('display_name', '')}"
+        if t.get("runtime_seconds", 0) > 5:
+            line += f" ({t['runtime_seconds']:.1f}s)"
+        lines.append(line)
+
+    if completed == total and total > 0:
+        lines.append("\n✅ **All steps completed successfully.**")
+
+    return "\n".join(lines)
 
 
 class Agent:
@@ -58,7 +233,7 @@ class Agent:
         )
 
         self.registry = registry
-        self.manager = DynamicActionManager(registry)
+        self.manager = DynamicActionManager(registry, self)
         self.context_manager = ContextManager(self.max_tokens)
 
         self.agent_tools = AgentActionHelper(self)
@@ -665,8 +840,6 @@ class Agent:
 
     # ====================== IMPROVED SUB-AGENT RUNNER ======================
 
-    # ====================== SAFEGUARDED SUB-AGENT RUNNER ======================
-
     async def _run_sub_agent_internal(
         self,
         sub_agent: "SubAgent",
@@ -822,38 +995,40 @@ class Agent:
             sub_agent.context_manager.prune_sub_agent_noise()
 
     def attach_tools(self, assigned_tools: Optional[List[str]] = None):
+        """Load tools for main agent or sub-agent."""
         if getattr(self, "sub_agent", False) and assigned_tools:
-            if assigned_tools:
+            # Sub-agent: only load the explicitly assigned tools
+            valid_tools = [t for t in assigned_tools if t in self.registry.all_actions]
+            if valid_tools:
+                self.manager.unload_all()  # clear previous
+                self.manager.load_tools(valid_tools)
                 logger.info(
-                    f"[SUB-AGENT] '{self.name}' loading {len(assigned_tools)} specialized tools: "
-                    f"{assigned_tools[:10]}{'...' if len(assigned_tools) > 10 else ''}"
+                    f"[SUB-AGENT] '{self.name}' loaded {len(valid_tools)} valid tools: {valid_tools}"
                 )
-                self.manager.load_tools(assigned_tools)
             else:
                 logger.warning(
-                    f"[SUB-AGENT] '{self.name}' has no assigned tools → loading core only"
+                    f"[SUB-AGENT] '{self.name}' – no valid tools in assigned list: {assigned_tools}"
                 )
-                core_tools = [
-                    "GetContext",
-                    "DeploySubAgent",
-                    "GetDeploymentStatus",
-                    "FindTool",
-                ]
+                # Minimal safe fallback for sub-agents
+                core = ["FindTool", "GetContext", "GetDeploymentStatus"]
                 self.manager.load_tools(
-                    [t for t in core_tools if t in self.registry.all_actions]
+                    [t for t in core if t in self.registry.all_actions]
                 )
         else:
+            # Main agent: load full tool_sets from config
             tool_sets = self.config.get("tool_sets", [])
             if tool_sets:
                 logger.debug(f"Loading tool sets for main agent: {tool_sets}")
                 self.loader.load_tool_sets(sets_to_load=tool_sets)
 
+            # Load everything from registry (safe for main agents)
             for action_name in list(self.registry.all_actions.keys()):
                 try:
                     self.manager.load_tools([action_name])
                 except Exception as e:
                     logger.warning(f"Failed to load tool '{action_name}': {e}")
 
+        # Always ensure the 4 persistent tools exist
         critical_tools = [
             "GetContext",
             "DeploySubAgent",
@@ -979,130 +1154,6 @@ class Agent:
             return summary.strip()
         except Exception:
             return f"✅ The deployment task **{task}** has been completed successfully."
-
-    # ================================ TOOLS =======================================
-    # Enabling agent to use own methods as tools (search context. deploy sub agents)
-
-    @tool("ContextManager", name="GetContext", description="Search your own memory")
-    async def provide_context(
-        self, query: str, *, agent_metadata: Optional[dict] = None
-    ):
-        agent_metadata = agent_metadata or {}
-        agent_metadata.setdefault("is_sub_agent", getattr(self, "sub_agent", False))
-        agent_metadata.setdefault("agent_id", getattr(self, "agent_id", "unknown"))
-
-        # Only use parent if it exists
-        parent_agent = getattr(self, "parent", None)
-        if getattr(self, "sub_agent", False) and parent_agent:
-            return await parent_agent.context_manager.provide_context(query)
-        return await self.context_manager.provide_context(query)
-
-    @tool(
-        "DeployControls",
-        name="DeploySubAgent",
-        description="""Deploy a focused sub-agent to handle one micro-task.
-
-        Parameters:
-        - task_description: Clear, specific description of what this step should do.
-        - assigned_tools: Optional list of tool names this sub-agent may use.
-        - depends_on_task_id: Optional. Task ID of a previous sub-task this one depends on.
-          The new sub-agent will automatically wait until the dependency finishes.
-        """,
-    )
-    async def deploy_sub_agent(
-        self,
-        task_description: str,
-        assigned_tools: Optional[List[str]] = None,
-        depends_on_task_id: Optional[str] = None,
-        user_facing_name: Optional[str] = None,
-    ) -> str:
-        task_id = await self.start_complex_deployment(
-            task_description=task_description,
-            user_facing_name=user_facing_name,
-            assigned_tools=assigned_tools,
-            depends_on=depends_on_task_id,
-            temperature=0.25,
-        )
-        dep_info = f" (depends on {depends_on_task_id})" if depends_on_task_id else ""
-        return f"✅ Launched sub-task `{task_id}`{dep_info}: {task_description[:80]}..."
-
-    @tool("DeployControls", name="GetDeploymentStatus")
-    async def get_deployment_status(self, task_id: Optional[str] = None):
-        # Auto-detect current task if no ID provided
-        # if not task_id:
-        #     if hasattr(self, "state") and getattr(self.state, "sub_task_ids", None):
-        #         task_id = self.state.sub_task_ids[0] if self.state.sub_task_ids else None
-        #     elif hasattr(self.state, "task_id_map") and self.state.task_id_map:
-        #         task_id = list(self.state.task_id_map.values())[-1]
-
-        # Lookup in sub_tasks
-        status = self.sub_tasks.get(task_id) if task_id else None
-
-        # Fallback: task_id exists in task_id_map but not yet in sub_tasks
-        if not status and task_id:
-            return f"⚠ Task ID `{task_id}` registered but not yet active. Try again in a few seconds."
-
-        if status:
-            output = [
-                f"**Task ID:** `{task_id}`",
-                f"**Step:** {status.get('step_number', '?')}",
-                f"**Name:** {status.get('display_name', 'Unnamed Task')}",
-                f"**Status:** {status.get('status', 'unknown').upper()}",
-                f"**Runtime:** {status.get('runtime_seconds', 0):.1f} seconds",
-                f"**Progress:** {status.get('progress', 0)}%",
-                f"**Description:** {status.get('description', '')[:280]}...",
-            ]
-
-            if status.get("assigned_tools"):
-                output.append(
-                    f"**Assigned Tools:** {', '.join(status['assigned_tools'][:10])}..."
-                )
-
-            if status.get("status") in ("completed", "failed") and status.get("result"):
-                output.append(f"\n**Result:**\n{status['result']}")
-            if status.get("error"):
-                output.append(f"\n**Error:** {status['error']}")
-
-            return "\n".join(output)
-
-        # Full overview if no specific task found
-        tasks = self.get_sub_tasks()
-        if not tasks:
-            return "No background deployments running at the moment."
-
-        lines = ["# 📊 **Deployment Status Overview**"]
-        total = len(tasks)
-        running = sum(1 for t in tasks.values() if t.get("status") == "running")
-        completed = sum(1 for t in tasks.values() if t.get("status") == "completed")
-        failed = sum(
-            1 for t in tasks.values() if t.get("status") in ("failed", "cancelled")
-        )
-
-        lines.append(
-            f"**Progress:** {completed}/{total} steps completed | Running: {running} | Failed: {failed}"
-        )
-        if hasattr(self, "task") and self.task:
-            lines.append(f"\n**Main Task:** {self.task}")
-        if hasattr(self.workflow, "current_workflow"):
-            lines.append(f"**Current Stage:** {self.workflow.current_workflow_name}")
-
-        lines.append("\n**Steps:**")
-        for t in sorted(tasks.values(), key=lambda x: x.get("started_at", 0)):
-            emoji = {
-                "running": "🔄",
-                "completed": "✅",
-                "failed": "❌",
-                "pending": "⏳",
-            }.get(t.get("status", "").lower(), "•")
-            line = f"{emoji} `{t['id']}` → **{t.get('status', 'unknown').upper()}** — {t.get('display_name', '')}"
-            if t.get("runtime_seconds", 0) > 5:
-                line += f" ({t['runtime_seconds']:.1f}s)"
-            lines.append(line)
-
-        if completed == total and total > 0:
-            lines.append("\n✅ **All steps completed successfully.**")
-
-        return "\n".join(lines)
 
 
 # --- SubAgent constructor (isolated queue + controlled reporting) ---

@@ -126,12 +126,16 @@ class Action:
 
             if self._needs_agent:
                 if self._bound_agent is None:
+                    # Improved error message with clear guidance (helps debugging DeploySubAgent etc.)
                     raise RuntimeError(
                         f"Action '{self.name}' expects agent/self as first parameter, "
-                        f"but no agent was bound."
+                        f"but no agent was bound.\n"
+                        f"→ Make sure you called .bind_agent(agent) or used "
+                        f"ActionSet.get_executor(name, agent=...) before invoking the action."
                     )
                 call_args.append(self._bound_agent)
 
+            # Execute the underlying function
             result = self.executor(*call_args, **kwargs)
 
             if asyncio.iscoroutine(result) or isinstance(result, Awaitable):
@@ -140,7 +144,7 @@ class Action:
 
             self.usage_count += 1
 
-            # Normalize empty results
+            # Normalize empty results (common for many tools)
             if result in (None, "", {}):
                 normalized = {
                     "status": "success",
@@ -165,7 +169,10 @@ class Action:
                 "args": kwargs,
             }
         finally:
-            self._bound_agent = None  # Reset binding after each call
+            # Always reset binding after execution to prevent stale agent references
+            # This is especially important for persistent tools like DeploySubAgent
+            # that may be called multiple times across turns
+            self._bound_agent = None
 
 
 class ActionSet:
@@ -224,7 +231,10 @@ class ActionSet:
                 tools.append(tool_spec)
         return tools
 
-    def get_executor(self, name: str, agent=None) -> Optional[Action]:
+    def get_executor(self, name: str, agent: Optional[Any] = None) -> Optional[Action]:
+        """Return an Action (which acts as the executor) by name.
+        Optionally binds the agent before returning.
+        """
         action = self.by_name.get(name)
         if not action:
             logger.warning(f"[ACTIONSET RESOLVE FAIL] No executor for '{name}'")
@@ -235,7 +245,7 @@ class ActionSet:
         if agent is not None:
             action.bind_agent(agent)
 
-        return action
+        return action  # ← returns the Action object itself (which is callable)
 
     def describe(self) -> Dict[str, Any]:  # ← new helper
         """Returns a lightweight metadata dict useful for tool search / routing."""
