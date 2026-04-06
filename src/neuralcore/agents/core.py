@@ -432,6 +432,17 @@ class Agent:
         await self.message_queue.put(item)
         logger.debug(f"Agent '{self.name}' ← control posted: {str(control)[:80]}...")
 
+    
+    async def on_background_event(self, event: str, payload: Any) -> None:
+        """Generic hook for background/headless events.
+        Default: logs the event (keeps NeuralCore generic).
+        External runners in NeuralVoid can override this for WebSocket, etc.
+        """
+        logger.info(
+            f"[BACKGROUND EVENT] {self.name} | event='{event}' | "
+            f"payload={str(payload)[:400]}{'...' if len(str(payload)) > 400 else ''}"
+        )
+
     async def get_agent_status(self) -> Dict[str, Any]:
         """Retrieve current agent status with rich LLM-generated summary.
         Uses ContextManager.get_context_summary() as requested."""
@@ -644,10 +655,8 @@ class Agent:
         workflow_name: str,
         stop_event: asyncio.Event,
     ) -> AsyncIterator[Tuple[str, Any]]:
-        """Continuous headless mode: consumes from message_queue forever."""
-        logger.info(
-            f"Agent '{self.name}' → Starting HEADLESS mode with workflow '{workflow_name}'"
-        )
+        """Continuous headless consumer with proper bootstrap + timeout safety."""
+        processed_initial = False
 
         while True:
             if stop_event.is_set():
@@ -655,8 +664,14 @@ class Agent:
                 break
 
             try:
-                msg = await asyncio.wait_for(self.message_queue.get(), timeout=30.0)
+                # Short timeout on first iteration to catch the seeded message immediately
+                timeout = 1.0 if not processed_initial else 30.0
+                msg = await asyncio.wait_for(self.message_queue.get(), timeout=timeout)
             except asyncio.TimeoutError:
+                if not processed_initial and self.message_queue.empty():
+                    logger.warning(
+                        "[HEADLESS] No initial message after bootstrap — idling"
+                    )
                 continue
 
             # Control message?
@@ -673,7 +688,8 @@ class Agent:
                 self.message_queue.task_done()
                 continue
 
-            logger.debug(f"Headless processing prompt: {content[:150]}...")
+            logger.info(f"[HEADLESS] Processing prompt: {content[:120]}...")
+            processed_initial = True
 
             async for event, payload in self._run_workflow_once(
                 user_prompt=content,
@@ -699,15 +715,8 @@ class Agent:
         chat_mode: bool = False,
         workflow: Optional[str] = None,
     ) -> AsyncIterator[Tuple[str, Any]]:
-        """
-        Main entry point for running the agent.
-
-        - chat_mode=True  → single interaction (typical for chat UIs)
-        - chat_mode=False → long-running headless queue consumer
-        """
         stop_event = stop_event or asyncio.Event()
 
-        # 1. Common setup (shared by both modes)
         (
             system_prompt,
             temperature,
@@ -717,6 +726,12 @@ class Agent:
             user_prompt, system_prompt, temperature, max_tokens, workflow, chat_mode
         )
 
+        # ← NEW: Ensure tools are loaded before any headless execution
+        if not chat_mode:
+            logger.info(f"[HEADLESS] Ensuring tools for workflow '{workflow_name}'")
+            self.manager.reset_to_default_package("headless_bootstrap", self.workflow)
+            self.attach_tools()  # safe, respects assigned_tools for sub-agents
+
         try:
             if chat_mode:
                 logger.info(
@@ -725,7 +740,6 @@ class Agent:
                 if user_prompt and str(user_prompt).strip():
                     await self.post_message(user_prompt)
 
-                # Single workflow execution (chat mode)
                 async for event, payload in self._run_workflow_once(
                     user_prompt="",
                     system_prompt=system_prompt,
@@ -737,9 +751,16 @@ class Agent:
                     yield event, payload
 
             else:
-                # Headless mode – continuous queue processing
+                # HEADLESS MODE — now properly bootstrapped
+                logger.info(
+                    f"Agent '{self.name}' → Starting HEADLESS mode with workflow '{workflow_name}'"
+                )
+
                 if user_prompt and str(user_prompt).strip():
                     await self.post_message(user_prompt)
+                    logger.debug(
+                        f"[HEADLESS] Seeded initial prompt: {user_prompt[:100]}..."
+                    )
 
                 async for event, payload in self._run_headless_loop(
                     system_prompt=system_prompt,
@@ -751,7 +772,6 @@ class Agent:
                     yield event, payload
 
         finally:
-            # Always clean up
             self._status = "idle"
             self.current_task = ""
             logger.info(f"Agent '{self.name}' run finished")
