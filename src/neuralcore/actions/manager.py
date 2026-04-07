@@ -196,7 +196,6 @@ logger.debug(f"Global registry created with sets: {list(registry.sets.keys())}")
 
 class DynamicActionManager:
     def __init__(self, registry: "ActionRegistry", agent: Optional[Any] = None):
-        self.registry = registry
         self.current_set = ActionSet("DynamicCore")
         self._agent: Optional[Any] = agent  # ← stored once
 
@@ -261,7 +260,7 @@ class DynamicActionManager:
         if set_name == "DynamicCore":
             return self.current_set
 
-        action_set = self.registry.sets.get(set_name)
+        action_set = registry.sets.get(set_name)
         if not action_set:
             logger.warning(f"ActionSet '{set_name}' not found in registry")
         return action_set
@@ -284,11 +283,11 @@ class DynamicActionManager:
                 continue
             if name in self._loaded_tools:
                 continue
-            if name not in self.registry.all_actions:
+            if name not in registry.all_actions:
                 logger.warning(f"Tool '{name}' not found in registry")
                 continue
 
-            action, origin_set = self.registry.all_actions[name]
+            action, origin_set = registry.all_actions[name]
             self.add(action, origin_set=origin_set)
             loaded.append(name)
 
@@ -317,11 +316,11 @@ class DynamicActionManager:
                 continue
 
             set_name = set_name.strip()
-            if set_name not in self.registry.sets:
+            if set_name not in registry.sets:
                 logger.warning(f"Toolset '{set_name}' not found in registry")
                 continue
 
-            action_set = self.registry.sets[set_name]
+            action_set = registry.sets[set_name]
             newly_loaded = []
 
             for action in action_set.actions:
@@ -431,8 +430,8 @@ class DynamicActionManager:
         # FINAL SAFETY: Restore persistent tools unless protection is off
         if self.protect_persistent_tools:
             for p_name in self._persistent_tools:
-                if p_name in self.registry.all_actions and not self.is_loaded(p_name):
-                    action, origin = self.registry.all_actions[p_name]
+                if p_name in registry.all_actions and not self.is_loaded(p_name):
+                    action, origin = registry.all_actions[p_name]
                     self.add(action, origin_set=origin)
                     loaded_count += 1
 
@@ -524,15 +523,15 @@ class DynamicActionManager:
         # Re-add persistent tools
         if self.protect_persistent_tools:
             for p_name in self._persistent_tools:
-                if p_name in self.registry.all_actions and not self.is_loaded(p_name):
-                    action, origin = self.registry.all_actions[p_name]
+                if p_name in registry.all_actions and not self.is_loaded(p_name):
+                    action, origin = registry.all_actions[p_name]
                     self.add(action, origin_set=origin)
 
         # Re-add discovered tools when requested
         if keep_discovered:
             for d_name in list(self._discovered_tools):
-                if not self.is_loaded(d_name) and d_name in self.registry.all_actions:
-                    action, origin = self.registry.all_actions[d_name]
+                if not self.is_loaded(d_name) and d_name in registry.all_actions:
+                    action, origin = registry.all_actions[d_name]
                     self.add(action, origin_set=origin)
 
         logger.info(
@@ -558,8 +557,8 @@ class DynamicActionManager:
 
         # Always ensure persistent tools
         for p_name in self._persistent_tools:
-            if p_name in self.registry.all_actions and not self.is_loaded(p_name):
-                action, origin = self.registry.all_actions[p_name]
+            if p_name in registry.all_actions and not self.is_loaded(p_name):
+                action, origin = registry.all_actions[p_name]
                 self.add(action, origin_set=origin)
                 loaded_count += 1
 
@@ -633,14 +632,14 @@ class ToolBrowser(Action):
             executor=self._search,
             required=["query"],
         )
-        self.registry = registry
+        registry = registry
         self.manager = manager
         manager.current_set.add(self)
         logger.info("ToolBrowser (FindTool) added to DynamicCore as persistent tool")
 
     async def _search(self, query: str):
         logger.info(f"ToolBrowser search executed: query='{query}'")
-        results = self.registry.search(query, limit=3)
+        results = registry.search(query, limit=3)
         if not results:
             logger.info("ToolBrowser: no matches found")
             return {
@@ -668,7 +667,6 @@ class AgentActionHelper:
 
     def __init__(self, agent):
         self.agent = agent
-        self.registry = agent.registry
         self.manager = self.agent.manager
 
     # ─────────────────────────────────────────────
@@ -680,7 +678,7 @@ class AgentActionHelper:
         self._ensure_set(set_name)
 
         self.manager.add(action, origin_set=set_name)
-        self.registry._add_to_index(action, set_name or "manual")
+        registry._add_to_index(action, set_name or "manual")
 
         logger.debug(f"Agent '{self.agent.agent_id}' registered action: {action.name}")
 
@@ -773,9 +771,9 @@ class AgentActionHelper:
         if not set_name:
             return
 
-        if set_name not in self.registry.sets:
+        if set_name not in registry.sets:
             aset = ActionSet(name=set_name, description=f"{set_name} tools")
-            self.registry.register_set(set_name, aset)
+            registry.register_set(set_name, aset)
 
     def _needs_agent_arg(self, func: Callable) -> bool:
         sig = signature(func)

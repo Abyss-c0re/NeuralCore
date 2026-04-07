@@ -15,6 +15,7 @@ from neuralcore.workflows.registry import workflow
 from neuralcore.cognition.memory import ContextManager
 from neuralcore.clients.factory import get_clients
 from neuralcore.actions.manager import tool
+from neuralcore.agents.state import AgentState
 
 logger = Logger.get_logger()
 
@@ -186,8 +187,8 @@ async def get_deployment_status(agent, task_id: Optional[str] = None):
     lines.append(
         f"**Progress:** {completed}/{total} steps completed | Running: {running} | Failed: {failed}"
     )
-    if hasattr(agent, "task") and agent.task:
-        lines.append(f"\n**Main Task:** {agent.task}")
+    if hasattr(agent, "task") and agent.state.task:
+        lines.append(f"\n**Main Task:** {agent.state.task}")
     if hasattr(agent.workflow, "current_workflow"):
         lines.append(f"**Current Stage:** {agent.workflow.current_workflow_name}")
 
@@ -223,6 +224,7 @@ class Agent:
         self.agent_id: str = agent_id
         self.loader = loader
         self.app_root = app_root
+        self.state: AgentState = AgentState()
 
         # === CONFIG HANDLING (supports both main agents and SubAgent override) ===
         self.sub_agent: bool = sub_agent
@@ -248,7 +250,6 @@ class Agent:
             self.client.system_prompt if hasattr(self.client, "system_prompt") else "",
         )
 
-        self.registry = registry
         self.manager = DynamicActionManager(registry, self)
         self.context_manager = ContextManager(self.max_tokens)
 
@@ -351,7 +352,7 @@ class Agent:
     def _load_agent_tools(self):
         tool_sets = self.config.get("tool_sets", [])
         self.loader.load_tool_sets(sets_to_load=tool_sets)
-        for action_name in self.registry.all_actions:
+        for action_name in registry.all_actions:
             self.manager.load_tools([action_name])
 
     def _resolve_workflow(
@@ -388,9 +389,9 @@ class Agent:
         return "deploy_chat"  # or raise, but we keep it running
 
     def _reset_state(self):
-        self.task = ""
-        self.goal = ""
-        self.tool_results: List[Dict] = []
+        """Reset both AgentState and legacy agent attributes."""
+        # Reset the rich state object (this is the source of truth)
+        self.state.reset_for_new_task()
         self.executed_signatures: set[tuple] = set()
         self.steps: List[str] = []
         self._stop_event: Optional[asyncio.Event] = None
@@ -601,6 +602,12 @@ class Agent:
         max_tokens = max_tokens if max_tokens is not None else self.max_tokens
 
         self._reset_state()
+
+        if user_prompt:
+            # Sync to both places
+            self.state.task = user_prompt
+            self.state.goal = user_prompt
+
         self.current_task = user_prompt or (
             "chat session" if chat_mode else "headless processing"
         )
@@ -835,8 +842,8 @@ class Agent:
                 agent_id_override=f"{self.agent_id}_sub_{self._sub_task_counter}",
             )
 
-            sub_agent.task = task_description
-            sub_agent.goal = task_description
+            sub_agent.state.task = task_description
+            sub_agent.state.goal = task_description
             sub_agent.current_task = task_description
             sub_agent.current_role = f"sub-agent:{display_name}"
 
@@ -899,7 +906,7 @@ class Agent:
             if assigned:
                 # Filter only tools that actually exist
                 valid_tools = [
-                    t for t in assigned if t in sub_agent.registry.all_actions
+                    t for t in assigned if t in registry.all_actions
                 ]
                 if valid_tools:
                     sub_agent.manager.unload_all()
@@ -915,7 +922,7 @@ class Agent:
             # Always ensure core tools
             for core in ["GetContext", "GetDeploymentStatus"]:
                 if (
-                    core in sub_agent.registry.all_actions
+                    core in registry.all_actions
                     and not sub_agent.manager.is_loaded(core)
                 ):
                     sub_agent.manager.load_tools([core])
@@ -1023,7 +1030,7 @@ class Agent:
         """Load tools for main agent or sub-agent."""
         if getattr(self, "sub_agent", False) and assigned_tools:
             # Sub-agent: only load the explicitly assigned tools
-            valid_tools = [t for t in assigned_tools if t in self.registry.all_actions]
+            valid_tools = [t for t in assigned_tools if t in registry.all_actions]
             if valid_tools:
                 self.manager.unload_all()  # clear previous
                 self.manager.load_tools(valid_tools)
@@ -1036,9 +1043,7 @@ class Agent:
                 )
                 # Minimal safe fallback for sub-agents
                 core = ["FindTool", "GetContext", "GetDeploymentStatus"]
-                self.manager.load_tools(
-                    [t for t in core if t in self.registry.all_actions]
-                )
+                self.manager.load_tools([t for t in core if t in registry.all_actions])
         else:
             # Main agent: load full tool_sets from config
             tool_sets = self.config.get("tool_sets", [])
@@ -1047,7 +1052,7 @@ class Agent:
                 self.loader.load_tool_sets(sets_to_load=tool_sets)
 
             # Load everything from registry (safe for main agents)
-            for action_name in list(self.registry.all_actions.keys()):
+            for action_name in list(registry.all_actions.keys()):
                 try:
                     self.manager.load_tools([action_name])
                 except Exception as e:
@@ -1061,7 +1066,7 @@ class Agent:
             "FindTool",
         ]
         for tool_name in critical_tools:
-            if tool_name in self.registry.all_actions and not self.manager.is_loaded(
+            if tool_name in registry.all_actions and not self.manager.is_loaded(
                 tool_name
             ):
                 self.manager.load_tools([tool_name])

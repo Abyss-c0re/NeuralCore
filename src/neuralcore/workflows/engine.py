@@ -148,13 +148,20 @@ class WorkflowEngine:
     # CONDITIONS
     # ===================================================================
     def _get_state_value(self, key: str, state: AgentState) -> Any:
-        """Core state accessor with rich built-in conditions for reflection, sub-tasks, and safety."""
+        """Core state accessor with built-in computed conditions.
+
+        Supports direct attributes/properties from AgentState and derived values
+        (iteration, error_rate, sub-tasks, goal achievement, etc.).
+        """
+        if not key:
+            return None
+
+        # Normalize key for flexible condition writing in YAML configs
         key = key.lower().replace(" ", "_").replace("-", "_").replace(":", "_")
 
-        # Direct attribute or property access (safe handling)
+        # 1. Direct attribute or property access (most common case)
         if hasattr(state, key):
             value = getattr(state, key)
-            # Safely resolve properties
             if isinstance(value, property):
                 try:
                     return value.__get__(state, type(state))
@@ -162,77 +169,12 @@ class WorkflowEngine:
                     return None
             return value
 
+        # 2. Built-in computed / derived values
         history = getattr(state, "iteration_history", [])
 
-        # Basic iteration & reflection
         if key == "iteration":
             return len(history)
-        if key == "reflection_count":
-            return getattr(state, "reflection_count", 0)
-        if key == "max_reflections_reached":
-            return getattr(state, "reflection_count", 0) >= getattr(
-                self.agent, "max_reflections", 3
-            )
 
-        # Sub-task / Multi-agent conditions
-        if hasattr(self.agent, "get_sub_tasks"):
-            sub_tasks = self.agent.get_sub_tasks()
-
-            if key in ("sub_task_count", "sub_tasks_total"):
-                return len(sub_tasks)
-            if key == "active_sub_tasks_count":
-                return sum(
-                    1 for t in sub_tasks.values() if t.get("status") == "running"
-                )
-            if key == "sub_tasks_completed":
-                return sum(
-                    1 for t in sub_tasks.values() if t.get("status") == "completed"
-                )
-            if key == "sub_tasks_failed":
-                return sum(1 for t in sub_tasks.values() if t.get("status") == "failed")
-
-            if key == "all_sub_tasks_completed":
-                return len(sub_tasks) > 0 and all(
-                    t.get("status") in ("completed", "failed", "cancelled")
-                    for t in sub_tasks.values()
-                )
-            if key == "any_sub_task_failed":
-                return any(t.get("status") == "failed" for t in sub_tasks.values())
-            if key == "all_sub_tasks_successful":
-                return len(sub_tasks) > 0 and all(
-                    t.get("status") == "completed" for t in sub_tasks.values()
-                )
-            if key == "sub_tasks_success_rate":
-                completed = sum(
-                    1 for t in sub_tasks.values() if t.get("status") == "completed"
-                )
-                total = len(sub_tasks)
-                return completed / total if total > 0 else 0.0
-
-        # Reflection & Self-correction
-        if key == "needs_reflection":
-            reflection_count = getattr(state, "reflection_count", 0)
-            max_ref = getattr(self.agent, "max_reflections", 3)
-            if reflection_count >= max_ref:
-                return False
-
-            tool_results = (
-                getattr(state, "tool_results", [])
-                if hasattr(state, "tool_results")
-                else []
-            )
-            if tool_results:
-                last = str(tool_results[-1].get("result", "")).lower()
-                if any(
-                    w in last
-                    for w in ["error", "failed", "uncertain", "incomplete", "try again"]
-                ):
-                    return True
-
-            recent = history[-3:] if history else []
-            return all(not h.get("executed_functions") for h in recent)
-
-        # Progress detection
         if key == "no_progress_last_n":
             n = 3
             recent = history[-n:] if history else []
@@ -242,11 +184,7 @@ class WorkflowEngine:
             )
 
         if key == "error_rate_high":
-            results = (
-                getattr(state, "tool_results", [])[-10:]
-                if hasattr(state, "tool_results")
-                else []
-            )
+            results = getattr(state, "tool_results", [])[-10:]
             errors = sum(
                 1
                 for r in results
@@ -255,38 +193,84 @@ class WorkflowEngine:
             )
             return errors >= 3
 
-        # Human-in-the-loop
-        if key in ("needs_human_approval", "pending_approval", "needs_approval"):
-            return getattr(state, "needs_approval", False)
-
-        # Last step
         if key == "last_step_was":
             if history:
                 last_steps = history[-1].get("workflow_steps_run", [])
                 return last_steps[-1] if last_steps else None
             return None
 
+        # 3. Human-in-the-loop (support multiple common names used in configs)
+        if key in ("needs_human_approval", "pending_approval", "needs_approval"):
+            return getattr(state, "needs_approval", False)
+
+        # 4. Goal achievement conditions (clean & reliable)
+        if key in ("goal_achieved", "goal_reached", "goal_complete"):
+            return getattr(state, "goal_achieved", False) or getattr(
+                state, "is_complete", False
+            )
+
+        # 5. Sub-task / multi-agent conditions (delegated to agent)
+        if key.startswith("sub_") and hasattr(self.agent, "get_sub_tasks"):
+            sub_tasks = self.agent.get_sub_tasks()
+
+            if key in ("sub_task_count", "sub_tasks_total"):
+                return len(sub_tasks)
+
+            if key == "active_sub_tasks_count":
+                return sum(
+                    1 for t in sub_tasks.values() if t.get("status") == "running"
+                )
+
+            if key == "sub_tasks_completed":
+                return sum(
+                    1 for t in sub_tasks.values() if t.get("status") == "completed"
+                )
+
+            if key == "sub_tasks_failed":
+                return sum(1 for t in sub_tasks.values() if t.get("status") == "failed")
+
+            if key == "all_sub_tasks_completed":
+                return len(sub_tasks) > 0 and all(
+                    t.get("status") in ("completed", "failed", "cancelled")
+                    for t in sub_tasks.values()
+                )
+
+            if key == "any_sub_task_failed":
+                return any(t.get("status") == "failed" for t in sub_tasks.values())
+
+            if key == "all_sub_tasks_successful":
+                return len(sub_tasks) > 0 and all(
+                    t.get("status") == "completed" for t in sub_tasks.values()
+                )
+
+            if key == "sub_tasks_success_rate":
+                completed = sum(
+                    1 for t in sub_tasks.values() if t.get("status") == "completed"
+                )
+                total = len(sub_tasks)
+                return completed / total if total > 0 else 0.0
+
+        # Unknown key → safe default (prevents crashes in conditions)
         return None
 
     def _compare(self, actual: Any, op: str, target: Any) -> bool:
+        """Compare actual value against target using the given operator.
+
+        Supports numeric coercion and common operators used in workflow conditions.
+        """
         op = op.lower().strip()
 
-        # ─── Automatic type coercion for numeric comparisons ───
+        # Automatic type coercion for numeric comparisons (very useful in YAML configs)
         if isinstance(actual, (int, float)) and isinstance(target, str):
             try:
-                # Try to convert target to the same type as actual
-                if isinstance(actual, int):
-                    target = int(target)
-                else:
-                    target = float(target)
+                target = int(target) if isinstance(actual, int) else float(target)
             except ValueError:
-                # If conversion fails, treat as mismatch (safe default)
                 logger.debug(
                     f"Cannot compare numeric actual={actual} with non-numeric target={target!r}"
                 )
                 return False
 
-        # ─── Normal comparison logic ───
+        # Standard comparison logic
         if op in ("eq", "==", "="):
             return actual == target
         if op in ("ne", "!=", "<>"):
@@ -318,13 +302,13 @@ class WorkflowEngine:
         return False
 
     def _evaluate_condition(self, cond: Any, state: AgentState) -> bool:
-        """Enhanced condition evaluator with support for string shorthand."""
+        """Evaluate a single condition (bool, string shorthand, dict, or logical combinators)."""
         if cond is None:
             return True
         if isinstance(cond, bool):
             return cond
 
-        # Support simple string conditions like "needs_reflection"
+        # Simple string condition (e.g. "goal_achieved" or "error_rate_high")
         if isinstance(cond, str):
             value = self._get_state_value(cond, state)
             return bool(value) if value is not None else False
@@ -332,29 +316,24 @@ class WorkflowEngine:
         if not isinstance(cond, dict):
             return bool(cond)
 
-        # Custom condition support
+        # Custom registered conditions
         if "custom" in cond:
             custom = cond["custom"]
             if isinstance(custom, str):
                 handler = self._custom_conditions.get(custom)
-                if handler is not None:
-                    return handler(state, None)
-                return False
+                return bool(handler(state, None)) if handler else False
 
             if isinstance(custom, dict):
                 name = custom.get("name")
                 args = custom.get("args", {})
                 if not isinstance(name, str):
                     return False
-
                 handler = self._custom_conditions.get(name)
-                if handler is not None:
-                    return handler(state, args)
-                return False
+                return bool(handler(state, args)) if handler else False
 
             return False
 
-        # Logical combinators
+        # Logical combinators: and / or / not
         if "and" in cond and isinstance(cond["and"], (list, tuple)):
             return all(self._evaluate_condition(item, state) for item in cond["and"])
         if "or" in cond and isinstance(cond["or"], (list, tuple)):
@@ -362,7 +341,7 @@ class WorkflowEngine:
         if "not" in cond:
             return not self._evaluate_condition(cond["not"], state)
 
-        # Standard key-operator-value conditions
+        # Standard key: {operator: value} syntax
         for key, val in cond.items():
             actual = self._get_state_value(key, state)
             if isinstance(val, dict):
@@ -370,6 +349,7 @@ class WorkflowEngine:
                     if not self._compare(actual, op_name, target):
                         return False
             else:
+                # Simple equality check
                 if actual != val:
                     return False
         return True
@@ -378,8 +358,8 @@ class WorkflowEngine:
         self, condition_name: str, state: AgentState, args: Optional[dict] = None
     ) -> bool:
         """
-        Unified method to evaluate conditions registered via @workflow.condition.
-        Handles both old and new condition signatures safely.
+        Evaluate a named custom condition registered via @workflow.condition decorator.
+        Falls back to built-in evaluator if no custom handler exists.
         """
         handler = self._custom_conditions.get(condition_name)
         if handler is not None:
@@ -401,7 +381,7 @@ class WorkflowEngine:
                 )
                 return False
 
-        # Fallback to built-in evaluator
+        # Fallback to built-in condition evaluator
         return self._evaluate_condition(condition_name, state)
 
     # ===================================================================
@@ -409,7 +389,7 @@ class WorkflowEngine:
     # ===================================================================
     def _build_objective_reminder(self) -> str:
         return (
-            f"OBJECTIVE LOCKED:\nTask: {self.agent.task}\n"
+            f"OBJECTIVE LOCKED:\nTask: {self.agent.state.task}\n"
             f"You MUST NOT output {self.FINAL_ANSWER_MARKER} until the goal is 100% complete.\n"
             f"Only append exactly {self.FINAL_ANSWER_MARKER} after verification passes."
         )
@@ -777,8 +757,8 @@ class WorkflowEngine:
             self.switch_workflow(workflow)
 
         self.agent._reset_state()
-        self.agent.task = user_prompt
-        self.agent.goal = user_prompt
+        self.agent.state.task = user_prompt
+        self.agent.state.goal = user_prompt
         self.agent.system_prompt = system_prompt
         self.agent.temperature = temperature
         self.agent.max_tokens = max_tokens

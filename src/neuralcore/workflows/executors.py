@@ -6,6 +6,7 @@ from typing import AsyncIterator, Dict, Any, List, Optional, Tuple
 from neuralcore.agents.state import AgentState
 from neuralcore.actions.actions import ActionSet
 from neuralcore.utils.logger import Logger
+from neuralcore.actions.manager import registry
 
 logger = Logger.get_logger()
 
@@ -371,7 +372,9 @@ class AgentExecutors:
         yield ("phase_changed", {"phase": state.phase.value})
 
         original_query = (
-            state.current_task or self.agent.goal or "Complete the assigned micro-task"
+            state.current_task
+            or self.agent.state.goal
+            or "Complete the assigned micro-task"
         )
 
         async for event, payload in self._goal_driven_task_loop(
@@ -457,7 +460,7 @@ class AgentExecutors:
         refined_query = refined_query.strip().strip("\"'").strip()
         logger.info(f"[FindTool] REFINED search query → '{refined_query}'")
 
-        all_tools = self.agent.registry.list_all_tools(limit=120)
+        all_tools = registry.list_all_tools(limit=120)
         tool_list_str = "\n".join(
             f"• {t['name']} (@{t['set_name']}) — {t['description'][:110]}"
             for t in all_tools
@@ -491,7 +494,7 @@ class AgentExecutors:
             params = choice.get("parameters", {}) or {}
             reason = choice.get("reason", "")
 
-            if tool_name and tool_name in self.agent.registry.all_actions:
+            if tool_name and tool_name in registry.all_actions:
                 self.agent.manager.load_tools([tool_name])
                 logger.info(f"[FindTool] LLM selected → {tool_name} | reason: {reason}")
 
@@ -520,7 +523,7 @@ class AgentExecutors:
                 f"[FindTool] Selection JSON parse failed: {e}. Falling back..."
             )
 
-        fallback_results = self.agent.registry.search(refined_query, limit=3)
+        fallback_results = registry.search(refined_query, limit=3)
         if fallback_results:
             names = [a.name for a, _ in fallback_results]
             self.agent.manager.load_tools(names)
@@ -537,10 +540,10 @@ class AgentExecutors:
 
     # ====================== HELPERS ======================
     def _build_objective_reminder(self) -> str:
-        return f"Current goal: {self.agent.goal or 'No goal set'}"
+        return f"Current goal: {self.agent.state.goal or 'No goal set'}"
 
     def _build_sub_agent_objective_reminder(self) -> str:
-        base = f"Current goal: {self.agent.goal or 'Complete the assigned micro-task'}"
+        base = f"Current goal: {self.agent.state.goal or 'Complete the assigned micro-task'}"
         return (
             base
             + "\n\nWhen you have fully completed the task, end your response with exactly: [FINAL_ANSWER_COMPLETE]"
