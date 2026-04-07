@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 from typing import Any, Callable, Dict, List, Optional, Awaitable
 from inspect import signature
@@ -111,10 +112,21 @@ class Action:
         return hasattr(obj, "agent_id") and isinstance(getattr(obj, "agent_id"), str)
 
     # ====================== EXECUTION ======================
-
     async def __call__(self, **kwargs) -> Any:
+        """Execute the action and automatically record the FULL tool outcome."""
         logger.info(f"[ACTION START] {self.name}")
         logger.debug(f"[ACTION INPUT] {self.name} kwargs={kwargs}")
+
+        # ====================== BOUND AGENT REPORT ======================
+        if self._bound_agent is not None:
+            agent_id = getattr(self._bound_agent, "agent_id", "NO_AGENT_ID")
+            agent_type = type(self._bound_agent).__name__
+            logger.debug(
+                f"[ACTION BOUND] {self.name} → bound to {agent_type} "
+                f"(agent_id={agent_id})"
+            )
+        else:
+            logger.debug(f"[ACTION BOUND] {self.name} → NO AGENT BOUND")
 
         if self.require_confirmation:
             preview = self.confirmation_preview(kwargs)
@@ -126,16 +138,13 @@ class Action:
 
             if self._needs_agent:
                 if self._bound_agent is None:
-                    # Improved error message with clear guidance (helps debugging DeploySubAgent etc.)
                     raise RuntimeError(
                         f"Action '{self.name}' expects agent/self as first parameter, "
-                        f"but no agent was bound.\n"
-                        f"→ Make sure you called .bind_agent(agent) or used "
-                        f"ActionSet.get_executor(name, agent=...) before invoking the action."
+                        f"but no agent was bound."
                     )
                 call_args.append(self._bound_agent)
 
-            # Execute the underlying function
+            # ====================== EXECUTE ======================
             result = self.executor(*call_args, **kwargs)
 
             if asyncio.iscoroutine(result) or isinstance(result, Awaitable):
@@ -144,35 +153,123 @@ class Action:
 
             self.usage_count += 1
 
-            # Normalize empty results (common for many tools)
-            if result in (None, "", {}):
-                normalized = {
-                    "status": "success",
-                    "action": self.name,
-                    "message": f"{self.name} executed successfully",
-                    "args": kwargs,
-                }
-                logger.info(f"[ACTION NORMALIZED EMPTY RESULT] {self.name}")
-                return normalized
+            # ====================== PREPARE RESULT ======================
+            success = not (isinstance(result, dict) and result.get("status") == "error")
+
+            # Convert to nice string for LLM
+            if isinstance(result, (dict, list, tuple)):
+                try:
+                    final_result = json.dumps(result, ensure_ascii=False, indent=2)
+                except Exception:
+                    final_result = str(result)
+            else:
+                final_result = str(result) if result is not None else ""
+
+            # Fallback for empty results
+            if not final_result or final_result.strip() in ("{}", "[]", "None", ""):
+                final_result = (
+                    f"{self.name} executed successfully.\n"
+                    f"No output was returned by the tool."
+                )
+                logger.debug(f"[ACTION NORMALIZED EMPTY RESULT] {self.name}")
+
+            # ====================== DEBUG: ACTUAL RESULT BEFORE RECORDING ======================
+            result_preview = (
+                final_result[:400] + "..." if len(final_result) > 400 else final_result
+            )
+            logger.debug(
+                f"[TOOL RESULT BEFORE RECORD] {self.name} | "
+                f"size={len(final_result):,} chars | success={success}\n"
+                f"Preview: {result_preview}"
+            )
+
+            # ====================== RECORD FULL RESULT ======================
+            if self._bound_agent is not None:
+                recorded = False
+
+                # 1. ContextManager (feeds _get_recent_tool_outcomes)
+                if hasattr(self._bound_agent, "context_manager"):
+                    try:
+                        await self._bound_agent.context_manager.record_tool_outcome(
+                            tool_name=self.name,
+                            result=final_result,
+                            metadata={
+                                "args": kwargs,
+                                "action_type": self.type,
+                                "usage_count": self.usage_count,
+                                "success": success,
+                                "raw_type": type(result).__name__,
+                            },
+                        )
+                        recorded = True
+                        logger.info(
+                            f"✅ Recorded full tool outcome: {self.name} "
+                            f"({len(final_result):,} chars)"
+                        )
+                    except Exception as e:
+                        logger.warning(f"[RECORD TOOL OUTCOME FAILED] {self.name}: {e}")
+
+                # 2. AgentState
+                if hasattr(self._bound_agent, "state"):
+                    try:
+                        self._bound_agent.state.add_tool_result(
+                            tool_name=self.name,
+                            result=final_result,
+                            success=success,
+                        )
+                    except Exception as e:
+                        logger.warning(f"[ADD TOOL RESULT FAILED] {self.name}: {e}")
+
+                if not recorded:
+                    logger.warning(
+                        f"[ACTION] {self.name} executed but recording skipped"
+                    )
 
             logger.info(f"[ACTION SUCCESS] {self.name}")
-            return result
+            return final_result
 
         except ConfirmationRequired:
             raise
+
         except Exception as exc:
             logger.error(f"[ACTION ERROR] {self.name} error={exc}", exc_info=True)
-            return {
+
+            error_result = {
                 "status": "error",
                 "action": self.name,
                 "error": str(exc),
                 "args": kwargs,
             }
-        finally:
-            # Always reset binding after execution to prevent stale agent references
-            # This is especially important for persistent tools like DeploySubAgent
-            # that may be called multiple times across turns
-            self._bound_agent = None
+
+            if self._bound_agent is not None:
+                if hasattr(self._bound_agent, "context_manager"):
+                    try:
+                        await self._bound_agent.context_manager.record_tool_outcome(
+                            tool_name=self.name,
+                            result=error_result,
+                            metadata={
+                                "args": kwargs,
+                                "action_type": self.type,
+                                "error": True,
+                            },
+                        )
+                        logger.info(f"✅ Recorded error outcome for: {self.name}")
+                    except Exception as e:
+                        logger.warning(
+                            f"[RECORD ERROR OUTCOME FAILED] {self.name}: {e}"
+                        )
+
+                if hasattr(self._bound_agent, "state"):
+                    try:
+                        await self._bound_agent.state.add_tool_result(
+                            tool_name=self.name,
+                            result=error_result,
+                            success=False,
+                        )
+                    except Exception as e:
+                        logger.warning(f"[ADD ERROR RESULT FAILED] {self.name}: {e}")
+
+            return error_result
 
 
 class ActionSet:

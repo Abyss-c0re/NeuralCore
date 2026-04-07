@@ -205,9 +205,6 @@ class DynamicActionManager:
 
         self._persistent_tools: Set[str] = {
             "FindTool",
-            "GetContext",
-            "DeploySubAgent",
-            "GetDeploymentStatus",
         }
         self._discovered_tools: Set[str] = set()
 
@@ -232,7 +229,7 @@ class DynamicActionManager:
             self._discovered_tools.add(action.name)
 
         # === KEY FIX: Bind agent immediately when the action is added to DynamicCore ===
-        if self._agent is not None and action._needs_agent:
+        if self._agent is not None:
             try:
                 action.bind_agent(self._agent)
                 logger.debug(f"[BIND ON ADD] {action.name} → agent bound at load time")
