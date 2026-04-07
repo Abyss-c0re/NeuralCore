@@ -110,11 +110,11 @@ async def agentic_loop(agent, state: AgentState):
     ...
 
 class AgentFlow:
-    @workflow.set("orchestrator", name="plan_microtasks")
+    @workflow.step("orchestrator", name="plan_microtasks")
     async def _wf_plan_microtasks(self, iteration: int, state: AgentState):
         ...
 
-    @workflow.set("orchestrator", name="launch_next_subtask")
+    @workflow.step("orchestrator", name="launch_next_subtask")
     async def _wf_launch_next_subtask(self, iteration: int, state: AgentState):
         ...
 ```
