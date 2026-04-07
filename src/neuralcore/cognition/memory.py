@@ -5,13 +5,14 @@ import time
 import numpy as np
 import hashlib
 import json
-from typing import Tuple, List, Dict, Any
+from typing import Tuple, List, Dict, Any, Optional
 from neuralcore.utils.logger import Logger
 from neuralcore.utils.prompt_builder import PromptBuilder as PromptHelper
 from neuralcore.utils.config import get_loader
 from neuralcore.clients.factory import get_clients
 from neuralcore.utils.text_tokenizer import TextTokenizer
 from neuralcore.utils.search import keyword_score, cosine_sim
+from neuralcore.agents.state import AgentState
 
 # scikit-learn for sparse vectors
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -1017,21 +1018,25 @@ class ContextManager:
         min_history_tokens: int = 2000,
         max_kb_tokens: int = 5000,
         chat: bool = False,
+        state: Optional["AgentState"] = None,
     ) -> List[Dict[str, Any]]:
         messages: List[Dict[str, Any]] = []
 
+        logger.debug(
+            f"provide_context called | query='{query[:100]}...' | chat={chat} | has_state={state is not None}"
+        )
+
         if chat:
-            # ── RICH CHAT MODE: history + relevant KB/files, no agentic pollution ──
+            logger.debug("→ Entering CHAT mode")
+            # ── RICH CHAT MODE (unchanged) ──
             clean_system = system_prompt.strip()
             messages.append({"role": "system", "content": clean_system})
 
-            # Recent conversation history
             if self.pure_chat_history:
-                recent = self.pure_chat_history[-12:]  # bigger history
+                recent = self.pure_chat_history[-12:]
                 for msg in recent:
                     messages.append({"role": msg["role"], "content": msg["content"]})
 
-            # Light KB + files (relevant only)
             if query.strip() and self.knowledge_base:
                 kb_text = await self._retrieve_relevant_knowledge(
                     query, max_kb_tokens // 2
@@ -1044,7 +1049,6 @@ class ContextManager:
                         }
                     )
 
-            # Current user query
             messages.append(
                 {
                     "role": "user",
@@ -1052,8 +1056,8 @@ class ContextManager:
                 }
             )
 
-            # Light prune only if over limit
             total_tokens = self.count_tokens(messages)
+            logger.debug(f"CHAT mode - tokens before prune: {total_tokens}")
             if total_tokens > max_input_tokens - reserved_for_output:
                 self.prune_to_fit_context(
                     messages,
@@ -1066,7 +1070,8 @@ class ContextManager:
                 )
             return messages
 
-        # ── AGENTIC MODE (unchanged) ──
+        # ── AGENTIC MODE ──
+        logger.debug("→ Entering AGENTIC mode")
         base_system = system_prompt.strip()
         summary = self.get_context_summary()
         full_system = base_system
@@ -1087,7 +1092,107 @@ class ContextManager:
 
         messages.append({"role": "system", "content": full_system})
         tokens_used = self.count_tokens(messages)
+        logger.debug(f"Base system + summary → tokens_used = {tokens_used}")
 
+        # ====================== IMPROVED RECENT TOOL RESULTS (State + KB) ======================
+        recent_tool_text = ""
+
+        if state is not None:
+            logger.debug(
+                f"AgentState provided | tool_results count = {len(state.tool_results)}"
+            )
+            # Priority 1: Use fresh data from AgentState.tool_results
+            if state.tool_results:
+                parts: List[str] = []
+                for entry in reversed(state.tool_results[-8:]):  # last 8 results
+                    name = entry.get("name", "unknown")
+                    result = entry.get("result", "")
+                    success = entry.get("success", True)
+                    ts = entry.get("timestamp")
+
+                    ts_str = (
+                        f"Executed: {time.strftime('%H:%M:%S', time.localtime(ts))}\n"
+                        if ts
+                        else ""
+                    )
+                    status = "✅ SUCCESS" if success else "❌ FAILED"
+
+                    block = (
+                        f"Tool: {name}  {status}\n"
+                        f"{ts_str}"
+                        f"Result:\n{result}\n"
+                        f"{'─' * 80}\n"
+                    )
+                    parts.append(block)
+
+                recent_tool_text = "\n".join(parts)
+                logger.info(
+                    f"✅ Used {len(state.tool_results)} recent results DIRECTLY from AgentState"
+                )
+            else:
+                logger.debug("AgentState has no tool_results → falling back to KB")
+        else:
+            logger.debug("No AgentState passed → using only KB recent tools")
+
+        # Fallback to KB if state didn't provide anything
+        if not recent_tool_text:
+            logger.debug("Falling back to _get_recent_tool_outcomes from KB")
+            recent_tool_text = await self._get_recent_tool_outcomes(
+                limit=4,
+                max_tokens_per_result=2500,
+                max_total_tokens=8000,
+            )
+
+        if recent_tool_text:
+            recent_block = (
+                "=== MOST RECENT TOOL RESULTS (HIGHEST PRIORITY) ===\n"
+                + recent_tool_text
+                + "\n=== END RECENT TOOL RESULTS ===\n"
+                + "These are the exact results from the tools you just executed. "
+                + "Use them directly in your reasoning."
+            )
+            messages.append({"role": "system", "content": recent_block})
+            tokens_used = self.count_tokens(messages)
+            logger.debug(
+                f"Added recent tool results block → tokens_used now = {tokens_used}"
+            )
+        else:
+            logger.debug("No recent tool results available from state or KB")
+
+        # ====================== GOAL & STATE AWARENESS ======================
+        if state is not None:
+            goal_block = []
+            goal_block.append(f"Current Goal: {state.goal or state.task or 'None'}")
+
+            if state.goal_achieved:
+                goal_block.append("✅ Goal has been achieved")
+            elif state.is_complete:
+                goal_block.append("✅ Task marked as complete")
+
+            if state.current_task:
+                goal_block.append(
+                    f"Current sub-task ({state.current_task_index + 1}): {state.current_task}"
+                )
+
+            if state.loop_count > 0:
+                goal_block.append(
+                    f"Loop count: {state.loop_count} | Empty loops: {state.empty_loops}"
+                )
+
+            if goal_block:
+                status_text = "\n".join(goal_block)
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": f"=== CURRENT AGENT STATE ===\n{status_text}\n=== END STATE ===",
+                    }
+                )
+                tokens_used = self.count_tokens(messages)
+                logger.debug(
+                    f"Added AgentState goal/status block → tokens_used = {tokens_used}"
+                )
+
+        # ====================== TOKEN BUDGETING ======================
         query_tokens = (
             self.count_tokens([{"role": "user", "content": query}])
             if query.strip()
@@ -1096,8 +1201,14 @@ class ContextManager:
         target = max_input_tokens - reserved_for_output
         remaining = max(0, target - tokens_used - query_tokens)
 
+        logger.debug(
+            f"Token budget → target={target} | used={tokens_used} | remaining={remaining} | query_tokens={query_tokens}"
+        )
+
         kb_tokens = min(max_kb_tokens, remaining // 2)
         history_budget = max(remaining - kb_tokens, min_history_tokens)
+
+        logger.debug(f"Allocated → KB={kb_tokens} | History={history_budget}")
 
         if query.strip() and kb_tokens > 500:
             kb_text = await self._retrieve_relevant_knowledge(query, kb_tokens)
@@ -1111,7 +1222,9 @@ class ContextManager:
                 tokens_used = self.count_tokens(messages)
                 remaining = max(0, target - tokens_used - query_tokens)
                 history_budget = max(remaining, min_history_tokens)
+                logger.debug(f"Added KB context → tokens_used now = {tokens_used}")
 
+        # History
         recent_msgs: List[Dict[str, str]] = []
         for msg, t in zip(
             reversed(self.current_topic.history),
@@ -1123,6 +1236,7 @@ class ContextManager:
             history_budget -= t
             tokens_used += t
         messages.extend(recent_msgs)
+        logger.debug(f"Added history messages → tokens_used = {tokens_used}")
 
         messages.append(
             {
@@ -1131,7 +1245,10 @@ class ContextManager:
             }
         )
 
-        if self.count_tokens(messages) > target:
+        final_tokens = self.count_tokens(messages)
+        logger.debug(f"Final context before prune → {final_tokens} tokens")
+
+        if final_tokens > target:
             removed, pruned_turns = self.prune_to_fit_context(
                 messages,
                 max_tokens=target,
@@ -1143,7 +1260,11 @@ class ContextManager:
             )
             if pruned_turns:
                 self.current_topic.archived_history.extend(pruned_turns)
+            logger.debug(f"Pruned {removed} turns to fit token limit")
 
+        logger.debug(
+            f"provide_context finished | final messages count = {len(messages)}"
+        )
         return messages
 
     def prune_to_fit_context(
@@ -1267,46 +1388,144 @@ class ContextManager:
         return "".join(parts)
 
     async def record_tool_outcome(
-        self, tool_name: str, result: Any, metadata: dict | None = None
+        self,
+        tool_name: str,
+        result: Any,
+        metadata: dict | None = None,
     ):
+        """Record FULL tool result — no early truncation, maximum fidelity."""
         metadata = metadata or {}
+        timestamp = time.time()
 
-        if not isinstance(result, str):
+        # ── 1. Convert to string with maximum fidelity (no size cap) ──
+        if isinstance(result, (dict, list, tuple)):
             try:
-                result = json.dumps(result, ensure_ascii=False, default=str)[:4000]
+                result_str = json.dumps(result, ensure_ascii=False, indent=2)
             except Exception:
-                result = str(result)[:2000]
+                result_str = str(result)
+        else:
+            result_str = str(result) if result is not None else ""
 
-        # Pre-clean obvious noise
-        result = re.sub(
+        original_size = len(result_str)
+
+        # ── 2. Minimal cleaning only ──
+        result_str = re.sub(
             r"(?i)You are a helpful Terminal AI agent.*?(?=\n\n|\Z)",
             "",
-            result,
-            flags=re.DOTALL,
-        )
-        result = re.sub(
-            r"(?i)CONTEXT WINDOW STATUS.*?=== END.*?(?=\n\n|\Z)",
-            "",
-            result,
+            result_str,
             flags=re.DOTALL,
         )
 
-        if len(result.strip()) < 20 or "No output" in result and len(result) < 100:
-            logger.debug(f"[TOOL OUTCOME] Skipped empty/noise result from {tool_name}")
+        cleaned_size = len(result_str)
+
+        if cleaned_size < 30:
+            logger.debug(f"[TOOL OUTCOME] Skipped tiny/empty result from {tool_name}")
             return
 
+        # ── 3. DEBUG: Show exactly what we are about to save ──
+        preview = result_str[:600] + ("..." if len(result_str) > 600 else "")
+        logger.debug(
+            f"[RECORDING FULL] {tool_name} | "
+            f"original={original_size:,} chars | "
+            f"after_clean={cleaned_size:,} chars\n"
+            f"Preview:\n{preview}"
+        )
+
+        # ── 4. Build content block ──
+        content = (
+            f"Tool: {tool_name}\n"
+            f"Executed: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp))}\n"
+            f"Result size: {original_size:,} characters\n\n"
+            f"{result_str}"
+        )
+
+        # ── 5. Save to knowledge base (full result) ──
         await self.add_external_content(
             source_type="tool_outcome",
-            content=f"Tool: {tool_name}\nResult: {result}",
+            content=content,
             metadata={
                 "tool": tool_name,
+                "timestamp": timestamp,
+                "original_length": original_size,
                 **metadata,
-                "negative": any(
-                    x in result.lower()
-                    for x in ["not found", "no such", "error", "failed"]
-                ),
             },
         )
 
         self.tools_executed.append(tool_name)
-        self._log_action("tool_outcome", f"{tool_name} → {result[:80]}...", metadata)
+        self._log_action(
+            "tool_outcome", f"{tool_name} → {result_str[:120]}...", metadata
+        )
+
+        logger.info(
+            f"✅ Recorded full tool outcome: {tool_name} ({original_size:,} chars)"
+        )
+
+    async def _get_recent_tool_outcomes(
+        self,
+        limit: int = 4,
+        max_tokens_per_result: int = 2000,
+        max_total_tokens: int = 5000,
+    ) -> str:
+        """Guaranteed to return the MOST RECENT tool result (full directory listing)."""
+        if not self.knowledge_base:
+            logger.debug("No entries in knowledge_base")
+            return ""
+
+        tool_items = []
+        for key, item in self.knowledge_base.items():
+            if item.source_type == "tool_outcome":
+                ts = item.metadata.get("timestamp", 0)
+                tool_name = item.metadata.get("tool", "unknown")
+                size = len(item.content)
+                tool_items.append((ts, key, item, tool_name, size))
+
+        # Sort by timestamp (newest first)
+        tool_items.sort(reverse=True)
+
+        logger.info(f"_get_recent_tool_outcomes: Found {len(tool_items)} tool outcomes")
+        for i, (ts, _, _, name, size) in enumerate(tool_items[:3]):
+            logger.info(f"  #{i + 1} → {name} | {size:,} chars | ts={ts:.3f}")
+
+        parts: List[str] = []
+        used_tokens = 0
+
+        for ts, key, item, tool_name, size in tool_items[:limit]:
+            timestamp_str = (
+                f"Executed: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts))}\n"
+                if ts > 0
+                else ""
+            )
+
+            block = (
+                f"🔥 LATEST TOOL: {tool_name}\n"
+                f"{timestamp_str}"
+                f"Result size: {size:,} characters\n\n"
+                f"{item.content}\n"
+                f"{'─' * 90}\n"
+            )
+
+            block_tokens = (
+                self.tokenizer.count_tokens(block)
+                if self.tokenizer
+                else len(block) // 4
+            )
+
+            if used_tokens + block_tokens > max_total_tokens:
+                logger.debug(f"Token budget reached after {len(parts)} results")
+                break
+
+            parts.append(block)
+            used_tokens += block_tokens
+
+            logger.info(
+                f"→ Included {tool_name} ({size:,} chars, ~{block_tokens} tokens)"
+            )
+
+        if not parts:
+            logger.warning("No recent tool results returned")
+            return ""
+
+        logger.info(
+            f"_get_recent_tool_outcomes → RETURNED {len(parts)} results ({used_tokens} tokens)"
+        )
+        return "\n".join(parts)
