@@ -24,16 +24,32 @@ logger = Logger.get_logger()
 
 
 @tool("ContextManager", name="GetContext", description="Search your own memory")
-async def provide_context(agent, query: str, *, agent_metadata: Optional[dict] = None):
-    agent_metadata = agent_metadata or {}
-    agent_metadata.setdefault("is_sub_agent", getattr(agent, "sub_agent", False))
-    agent_metadata.setdefault("agent_id", getattr(agent, "agent_id", "unknown"))
-
-    # Only use parent if it exists
+async def provide_context(agent, query: str):
     parent_agent = getattr(agent, "parent", None)
-    if getattr(agent, "sub_agent", False) and parent_agent:
-        return await parent_agent.context_manager.provide_context(query)
-    return await agent.context_manager.provide_context(query)
+    target_agent = (
+        parent_agent if (getattr(agent, "sub_agent", False) and parent_agent) else agent
+    )
+    context_manager = getattr(target_agent, "context_manager", None)
+
+    if context_manager is None:
+        raise AttributeError(
+            f"Target agent '{target_agent}' (ID: {getattr(target_agent, 'agent_id', 'unknown')}) "
+            f"missing required 'context_manager' attribute."
+        )
+    provide_method = getattr(context_manager, "provide_context", None)
+
+    if provide_method is None:
+        raise AttributeError(
+            f"ContextManager of agent '{target_agent}' missing required 'provide_context' method."
+        )
+    try:
+        result = await provide_method(query)
+        return result
+    except (TypeError, AttributeError) as e:
+        raise RuntimeError(
+            f"Failed to await context_manager.provide_context on agent '{target_agent}'. "
+            f"Error: {e}"
+        ) from e
 
 
 @tool(
@@ -258,8 +274,6 @@ class Agent:
         self.default_workflow: str = self.config.get("default", "default")
         self._status: str = "idle"
         self._background_task: Optional[asyncio.Task] = None
-
-        # Production-ready: every Agent (main or sub) starts with clean internal state
         self._reset_state()
 
     def is_sub_agent(self) -> bool:
@@ -380,8 +394,6 @@ class Agent:
         self.executed_signatures: set[tuple] = set()
         self.steps: List[str] = []
         self._stop_event: Optional[asyncio.Event] = None
-
-        # UPGRADE: reset runtime state
         self.current_task = ""
         self._status = "idle"
 
@@ -395,8 +407,6 @@ class Agent:
             item = {"role": "user", **message}
             if "role" not in item or item["role"] != "user":
                 item["role"] = "user"
-        else:
-            item = {"role": "user", "content": str(message)}
 
         await self.message_queue.put(item)
         self._input_counter += 1
@@ -410,8 +420,6 @@ class Agent:
             item = {"role": "system", "content": message}
         elif isinstance(message, dict):
             item = {"role": "system", **message}
-        else:
-            item = {"role": "system", "content": str(message)}
 
         await self.message_queue.put(item)
         logger.debug(
@@ -426,13 +434,10 @@ class Agent:
             item = dict(control)
             if not any(k in item for k in ("event", "action", "control")):
                 item["event"] = "custom_control"
-        else:
-            item = {"event": "custom_control", "payload": str(control)}
 
         await self.message_queue.put(item)
         logger.debug(f"Agent '{self.name}' ← control posted: {str(control)[:80]}...")
 
-    
     async def on_background_event(self, event: str, payload: Any) -> None:
         """Generic hook for background/headless events.
         Default: logs the event (keeps NeuralCore generic).
