@@ -159,3 +159,54 @@ class AgentState:
         self.is_complete = True
         msg = f"Goal achieved: {reason}" if reason else "Goal achieved."
         logger.info(f"✅ {msg}")
+
+    def get_objective_reminder(self) -> str:
+        """Generate a rich, context-aware objective reminder based on current state."""
+        parts = []
+
+        # Core goal
+        goal_text = self.goal or self.task or "No goal set"
+        parts.append(f"Current goal: {goal_text}")
+
+        # Progress information (multi-step aware)
+        if self.planned_tasks:
+            total = len(self.planned_tasks)
+            current = self.current_task_index + 1
+            if total > 1:
+                parts.append(f"Progress: Sub-task {current}/{total}")
+                if self.current_task:
+                    parts.append(f"Current sub-task: {self.current_task[:120]}...")
+
+        # Tool & execution status
+        if self.tool_results:
+            parts.append(f"Tool results available: {len(self.tool_results)}")
+
+        if self.empty_loops > 0:
+            parts.append(f"Empty loops: {self.empty_loops}/3")
+
+        if self.action_restarts > 0:
+            parts.append(f"Action restarts: {self.action_restarts}")
+
+        # Mode & phase
+        if self.phase:
+            parts.append(f"Current phase: {self.phase}")
+
+        if self.mode == "casual":
+            parts.append("Mode: Casual conversation - be natural and friendly")
+
+        # Timing / health
+        if self.duration > 60:
+            parts.append(f"Running for {self.duration:.0f}s")
+
+        # Instructions for tool usage
+        reminder = "\n".join(parts)
+
+        return f"""OBJECTIVE REMINDER:
+        {reminder}
+
+        CRITICAL INSTRUCTIONS:
+        - Stay focused on the current goal and sub-task.
+        - If the required tool for the current action is missing or not available, FIRST use the FindTool tool to discover and load it.
+        - Only after the needed tool has been successfully loaded via FindTool should you call the actual tool.
+        - When a sub-task is complete, output exactly: [FINAL_ANSWER_COMPLETE]
+        - Use only verified information from state.tool_results when summarizing."""

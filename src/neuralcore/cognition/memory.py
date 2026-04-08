@@ -1161,37 +1161,23 @@ class ContextManager:
 
         # ====================== GOAL & STATE AWARENESS ======================
         if state is not None:
-            goal_block = []
-            goal_block.append(f"Current Goal: {state.goal or state.task or 'None'}")
+            logger.debug("Adding centralized objective reminder from _build_objective_reminder")
 
-            if state.goal_achieved:
-                goal_block.append("✅ Goal has been achieved")
-            elif state.is_complete:
-                goal_block.append("✅ Task marked as complete")
+            # Choose the right reminder based on mode
+            if chat or state.mode == "casual":
+                objective_text = f"Current goal: {state.goal or state.task or 'None'}"
+            else:
+                # Task / agentic mode → rich reminder with FindTool rule
+                objective_text = state.get_objective_reminder()
 
-            if state.current_task:
-                goal_block.append(
-                    f"Current sub-task ({state.current_task_index + 1}): {state.current_task}"
-                )
-
-            if state.loop_count > 0:
-                goal_block.append(
-                    f"Loop count: {state.loop_count} | Empty loops: {state.empty_loops}"
-                )
-
-            if goal_block:
-                status_text = "\n".join(goal_block)
-                messages.append(
-                    {
-                        "role": "system",
-                        "content": f"=== CURRENT AGENT STATE ===\n{status_text}\n=== END STATE ===",
-                    }
-                )
-                tokens_used = self.count_tokens(messages)
-                logger.debug(
-                    f"Added AgentState goal/status block → tokens_used = {tokens_used}"
-                )
-
+            messages.append(
+                {
+                    "role": "system",
+                    "content": f"=== OBJECTIVE & CURRENT STATE ===\n{objective_text}\n=== END STATE ===",
+                }
+            )
+            tokens_used = self.count_tokens(messages)
+            logger.debug(f"Added AgentState objective block → tokens_used = {tokens_used}")
         # ====================== TOKEN BUDGETING ======================
         query_tokens = (
             self.count_tokens([{"role": "user", "content": query}])
