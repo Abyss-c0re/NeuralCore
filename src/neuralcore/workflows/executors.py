@@ -330,6 +330,7 @@ class AgentExecutors:
         )
 
         await self.agent.context_manager.add_message("assistant", final_reply)
+        state.reset_for_new_task()
 
         yield (
             "llm_response",
@@ -526,11 +527,51 @@ class AgentExecutors:
 
     # ====================== HELPERS ======================
     def _build_objective_reminder(self) -> str:
+        """Build a rich objective reminder using the full state context."""
+        if hasattr(self.agent, "state") and self.agent.state:
+            return self.agent.state.get_objective_reminder()
         return f"Current goal: {self.agent.state.goal or 'No goal set'}"
 
     def _build_sub_agent_objective_reminder(self) -> str:
-        base = f"Current goal: {self.agent.state.goal or 'Complete the assigned micro-task'}"
-        return (
-            base
-            + "\n\nWhen you have fully completed the task, end your response with exactly: [FINAL_ANSWER_COMPLETE]"
+        """Rich, state-aware objective reminder for sub-agents."""
+        state = self.agent.state
+
+        base = f"Current goal: {state.goal or 'Complete the assigned micro-task'}"
+
+        parts = [base]
+
+        # Sub-task / progress awareness
+        if state.planned_tasks and len(state.planned_tasks) > 1:
+            current_idx = state.current_task_index + 1
+            total = len(state.planned_tasks)
+            parts.append(f"Progress: Sub-task {current_idx}/{total}")
+
+        if state.current_task:
+            parts.append(f"Current micro-task: {state.current_task[:150]}...")
+
+        # Tool & execution status
+        if state.tool_results:
+            parts.append(f"Available tool results: {len(state.tool_results)}")
+
+        if state.empty_loops > 0:
+            parts.append(f"Empty loops counter: {state.empty_loops}")
+
+        if state.phase:
+            parts.append(f"Current phase: {state.phase}")
+
+        # Strong FindTool reminder (this is the key part you wanted)
+        parts.append(
+            "CRITICAL TOOL USAGE RULE:\n"
+            "- If the tool you need is missing or not available, FIRST call FindTool to discover and load it.\n"
+            "- ONLY after FindTool has successfully loaded the required tool should you call the actual tool.\n"
+            "- Do not guess or hallucinate tool names."
         )
+
+        # Termination instruction
+        parts.append(
+            "\nWhen you have FULLY completed the current micro-task, "
+            "you MUST end your final response with exactly this marker:\n"
+            "[FINAL_ANSWER_COMPLETE]"
+        )
+
+        return "\n\n".join(parts)
