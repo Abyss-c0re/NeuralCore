@@ -44,30 +44,49 @@ class AgentExecutors:
         Never mention tools, internal steps, thinking process, or knowledge base unless the user explicitly asks about them."""
 
     async def _is_multi_step_task(self, query: str) -> bool:
-        """Cheap LLM check: is this request naturally multi-step?"""
-        prompt = f"""Does this user request require multiple distinct steps/actions?
+        """Pure LLM-based check: determines if the request naturally requires multiple steps.
+        No hardcoded keywords."""
+
+        prompt = f"""You are an expert at analyzing user requests.
+
+        Determine if this request is:
+        - SIMPLE → can be completed with **one direct action** (one tool call or one simple command)
+        - COMPLEX → requires **multiple distinct steps**, planning, or multiple tool uses
+
+        Be strict. Most file operations, listings, reads, deletes, etc. are SIMPLE.
+
+        Examples:
+        - "list files in this dir"          → SIMPLE
+        - "show me the files"               → SIMPLE
+        - "read config.json"                → SIMPLE
+        - "delete temp.txt"                 → SIMPLE
+        - "deploy a web app with database"  → COMPLEX
+        - "analyze logs and create report"  → COMPLEX
+        - "set up monitoring + alerts"      → COMPLEX
 
         Request: {query}
 
-        Answer with exactly one word: YES or NO"""
+        Answer with **exactly one word**: SIMPLE or COMPLEX"""
 
         try:
             result = await self.agent.client.chat(
                 prompt, temperature=0.0, max_tokens=10
             )
-            return "YES" in result.upper()
-        except Exception:
-            # Fallback: if it contains words like "then", "after", "first", "second", etc.
-            keywords = [
-                "then",
-                "after that",
-                "next",
-                "followed by",
-                "first",
-                "second",
-                "finally",
-            ]
-            return any(kw in query.lower() for kw in keywords)
+
+            result_upper = result.strip().upper()
+            is_complex = "COMPLEX" in result_upper
+
+            logger.info(
+                f"[MULTI-STEP] LLM decided → {'COMPLEX (multi-step)' if is_complex else 'SIMPLE (single-step)'} | Query: {query[:100]}..."
+            )
+
+            return is_complex  # True = multi-step planning
+
+        except Exception as e:
+            logger.warning(
+                f"_is_multi_step_task LLM call failed: {e}. Defaulting to single-step."
+            )
+            return False  # safer default: treat as simple
 
     async def _goal_driven_task_loop(
         self,
@@ -75,16 +94,18 @@ class AgentExecutors:
         state: AgentState,
         is_sub_agent: bool = False,
     ) -> AsyncIterator[Tuple[str, Any]]:
-        """Goal-driven loop with multi-step support + smart loop counter reset on FindTool and Next Action."""
+        """TRULY STATE-DRIVEN goal loop.
+        - ALL loop control lives in AgentState + its methods
+        - FindTool triggers FULL state reset + immediate restart
+        - If tool_results appear in state, stop loop immediately
+        """
 
-        logger.info(f"[TASK LOOP] Starting for: {original_query[:120]}...")
+        logger.info(f"[STATE-DRIVEN TASK LOOP] Starting for: {original_query[:120]}...")
 
         yield ("phase_changed", {"phase": "thinking"})
 
-        # ====================== MULTI-STEP PLANNING ======================
-        planned_tasks = getattr(state, "planned_tasks", []) or []
-
-        if not planned_tasks:
+        # ====================== MULTI-STEP PLANNING (once only) ======================
+        if not state.planned_tasks:
             is_multi_step = await self._is_multi_step_task(original_query)
             if is_multi_step:
                 logger.info("[MULTI-STEP] Detected → planning")
@@ -93,54 +114,49 @@ class AgentExecutors:
                     state, original_query
                 ):
                     yield ev, pl
-                planned_tasks = getattr(state, "planned_tasks", []) or []
             else:
-                planned_tasks = [original_query]
+                state.planned_tasks = [original_query]
 
-        is_multi_step = len(planned_tasks) > 1
-        current_task_idx = getattr(state, "current_task_index", 0)
-
-        if is_multi_step:
-            yield ("phase_changed", {"phase": "multi_step_execution"})
-        else:
-            yield ("phase_changed", {"phase": "single_step_execution"})
-
-        # ====================== LOOP CONTROL ======================
-        max_loops = 10
-        max_action_restarts = 5
-        loop_count = 0
-        empty_loops = 0
-        action_restarts = 0
+        is_multi_step = len(state.planned_tasks) > 1
         marker = "[FINAL_ANSWER_COMPLETE]"
 
-        while loop_count < max_loops:
-            loop_count += 1
+        self.agent.manager.unload_all()
+
+        # ====================== STATE-DRIVEN MAIN LOOP ======================
+        max_loops = 8
+
+        while not state.goal_reached and state.loop_count < max_loops:
+            state.increment_loop()
+
             text_buffer = ""
             tools_called_this_turn = False
             tool_browser_detected = False
             browse_query = original_query
 
-            # Build query for current sub-task
-            if is_multi_step and current_task_idx < len(planned_tasks):
-                task_desc = planned_tasks[current_task_idx]
+            # ====================== BUILD QUERY (state-aware) ======================
+            if is_multi_step and state.current_task_index < len(state.planned_tasks):
+                task_desc = state.planned_tasks[state.current_task_index]
                 current_query = (
                     f"USER ORIGINAL REQUEST: {original_query}\n\n"
-                    f"CURRENT SUB-TASK ({current_task_idx + 1}/{len(planned_tasks)}): {task_desc}\n\n"
-                    "Focus ONLY on this sub-task. When finished, end with exactly:\n"
-                    f"{marker}\n"
-                    "Previous results are in KB."
+                    f"CURRENT SUB-TASK ({state.current_task_index + 1}/{len(state.planned_tasks)}): {task_desc}\n\n"
+                    "Focus ONLY on this sub-task. "
+                    f"When finished with this sub-task, end with exactly:\n{marker}\n"
+                    "All previous tool results are already in state.tool_results."
                 )
             else:
                 current_query = (
                     original_query
-                    if loop_count == 1
+                    if state.loop_count == 1
                     else (
                         f"USER ORIGINAL REQUEST: {original_query}\n\n"
-                        "Previous results are in KB. Continue or prepare final answer."
+                        "Previous results are in state.tool_results. Continue or prepare final answer."
                     )
                 )
 
             yield ("phase_changed", {"phase": "searching_tools"})
+
+            # Record tool result count BEFORE LLM turn (we detect external population)
+            prev_tool_result_count = len(state.tool_results)
 
             messages = await self.agent.context_manager.provide_context(
                 query=current_query,
@@ -150,6 +166,7 @@ class AgentExecutors:
                 + f"\n\nWhen you finish the current sub-task, you MUST output exactly: {marker}",
                 include_logs=True,
                 chat=False,
+                state=state,
             )
 
             queue = await self.agent.client.stream_with_tools(
@@ -169,36 +186,20 @@ class AgentExecutors:
                         yield ("content_delta", content)
 
                     elif kind in ("tool_delta", "tool_complete", "needs_confirmation"):
+                        tools_called_this_turn = True
                         if isinstance(payload, dict):
                             tool_name = (
                                 payload.get("tool_name")
                                 or payload.get("name")
                                 or "unknown"
                             )
-                            result = payload.get("result") or payload.get("output")
-                            args = payload.get("args", {})
-
                             if "FindTool" in tool_name:
                                 tool_browser_detected = True
-                                browse_query = args.get("query", original_query)
+                                browse_query = payload.get("args", {}).get(
+                                    "query", original_query
+                                )
                                 yield ("phase_changed", {"phase": "handling_findtool"})
                                 break
-
-                            tools_called_this_turn = True
-                            content_str = (
-                                json.dumps(result, ensure_ascii=False, default=str)
-                                if isinstance(result, dict)
-                                else str(result or "No output")
-                            )
-                            await self.agent.context_manager.record_tool_outcome(
-                                tool_name=tool_name,
-                                result=content_str,
-                                metadata={
-                                    "loop": loop_count,
-                                    "sub_agent": is_sub_agent,
-                                },
-                            )
-                            break
 
                     elif kind == "finish":
                         break
@@ -211,19 +212,36 @@ class AgentExecutors:
                 yield "error", str(e)
                 return
 
+            # ====================== FINDTOOL RESTART (STATE-DRIVEN + FULL RESET) ======================
             if tool_browser_detected:
-                logger.info("[FindTool] Resetting loop counters (new tools loaded)")
-                loop_count = 0
-                empty_loops = 0
+                logger.info(
+                    "[FindTool] Detected → handling interception + FULL state reset"
+                )
+
+                # THIS IS THE CRITICAL FIX (original behavior restored via state)
+                state.loop_count = 0
+                state.empty_loops = 0
+                state.action_restarts = 0
+
                 await self._handle_browse_tools_interception(browse_query)
-                continue
+                continue  # ← immediate restart with clean counters
 
             final_reply = text_buffer.strip()
             has_marker = marker in final_reply
             if has_marker:
                 final_reply = final_reply.replace(marker, "").strip()
 
-            # ====================== ACTION / NEXT ACTION RESTART LOGIC ======================
+            # ====================== KEY STATE-DRIVEN CHECK: TOOL RESULTS POPPED UP? ======================
+            # We never add results ourselves — we only detect when they appear in state
+            if len(state.tool_results) > prev_tool_result_count:
+                logger.info(
+                    f"Tool results appeared in state ({len(state.tool_results)} total). "
+                    "Stopping loop and moving to final answer."
+                )
+                state.mark_goal_achieved("Tool results populated in state")
+                break
+
+            # ====================== ACTION RESTART LOGIC ======================
             action_restart_triggered = False
             action_continuation = None
             detected_keyword = None
@@ -234,13 +252,11 @@ class AgentExecutors:
                 last_100_lower = last_100_lines.lower()
 
                 action_keywords = ["next action:", "next action", "action:", "action"]
-
                 for kw in action_keywords:
                     pos = last_100_lower.rfind(kw)
                     if pos != -1:
                         after_pos = last_100_lines.rfind(kw) + len(kw)
                         candidate = last_100_lines[after_pos:].strip()
-
                         if candidate and len(candidate) > 15:
                             action_continuation = candidate
                             action_restart_triggered = True
@@ -248,117 +264,87 @@ class AgentExecutors:
                             break
 
             if action_restart_triggered and action_continuation:
-                action_restarts += 1
-                if action_restarts > max_action_restarts:
-                    logger.warning(
-                        f"Max action restarts ({max_action_restarts}) reached. Forcing completion."
-                    )
+                state.increment_action_restart()
+                if state.action_restarts > 3:
+                    logger.warning("Max action restarts reached → forcing completion")
+                    state.mark_goal_achieved("Max action restarts reached")
+                    break
                 else:
                     logger.info(
-                        f"[Action Restart #{action_restarts}] Detected '{detected_keyword}' "
-                        f"in last 100 lines. New continuation: {action_continuation[:100]}..."
+                        f"[Action Restart #{state.action_restarts}] Detected '{detected_keyword}'"
                     )
-
-                    loop_count = 0
-                    empty_loops = 0
-
-                    current_query = (
-                        f"USER ORIGINAL REQUEST: {original_query}\n\n"
-                        f"NEW ACTION DIRECTIVE: {action_continuation}\n\n"
-                        "Execute the above directive precisely as the next step. "
-                        "Use tools if needed. When this step is complete, output the marker if the overall task is done."
-                    )
-
-                    yield ("phase_changed", {"phase": "action_restart"})
                     continue
-            # ====================== END ACTION RESTART LOGIC ======================
 
-            # ====================== TERMINATION LOGIC ======================
-            task_fully_complete = False
-
+            # ====================== TERMINATION / EMPTY LOOP LOGIC ======================
             if has_marker:
-                if not is_multi_step:
-                    task_fully_complete = True
+                if (
+                    not is_multi_step
+                    or state.current_task_index >= len(state.planned_tasks) - 1
+                ):
+                    state.mark_goal_achieved("Marker detected + all sub-tasks done")
+                    break
                 else:
-                    if current_task_idx >= len(planned_tasks) - 1:
-                        task_fully_complete = True
-                    else:
-                        logger.info(
-                            f"[MULTI-STEP] Sub-task {current_task_idx + 1} done → advancing"
-                        )
-                        state.current_task_index = current_task_idx + 1
-                        empty_loops = 0
-                        continue
+                    logger.info(f"[MULTI-STEP] Sub-task done → advancing index")
+                    state.current_task_index += 1
+                    continue
 
             if (
                 not tools_called_this_turn
                 and not has_marker
                 and not action_restart_triggered
             ):
-                empty_loops += 1
-                logger.debug(f"Empty loop detected ({empty_loops}/3)")
-                if empty_loops >= 3:
-                    logger.warning("3 consecutive empty loops → forcing completion")
-                    if is_multi_step and current_task_idx < len(planned_tasks) - 1:
-                        state.current_task_index += 1
-                        empty_loops = 0
-                        continue
-                    else:
-                        task_fully_complete = True
+                state.increment_empty_loop()
+                if state.empty_loops >= 3:
+                    logger.warning("3+ empty loops → forcing completion")
+                    state.mark_goal_achieved("Forced completion after empty loops")
+                    break
             else:
-                empty_loops = 0
+                state.empty_loops = 0
 
-            if (
-                tools_called_this_turn
-                and loop_count < max_loops
-                and not has_marker
-                and not task_fully_complete
-            ):
+            # Tools were called but results not yet in state → continue (executor will populate)
+            if tools_called_this_turn:
                 yield ("phase_changed", {"phase": "executing_tools"})
                 continue
 
-            # ====================== FINAL SYNTHESIS ======================
-            yield ("phase_changed", {"phase": "generating_final_answer"})
+        # ====================== FINAL SYNTHESIS (always reached when loop exits) ======================
+        yield ("phase_changed", {"phase": "generating_final_answer"})
 
-            final_query = (
-                f"USER ORIGINAL REQUEST: {original_query}\n\n"
-                f"{'FINAL sub-task completed.' if task_fully_complete and is_multi_step else 'Current step completed.'}\n"
-                "Summarize using only verified tool results. Be concise."
+        final_query = (
+            f"USER ORIGINAL REQUEST: {original_query}\n\n"
+            f"Task is now complete (or max loops reached). "
+            "Summarize using ONLY the verified results from state.tool_results. Be concise."
+        )
+
+        final_messages = await self.agent.context_manager.provide_context(
+            query=final_query,
+            max_input_tokens=self.agent.max_tokens,
+            reserved_for_output=8000,
+            system_prompt=self._build_objective_reminder() + "\n\nFINAL ANSWER MODE",
+            include_logs=True,
+            chat=False,
+            state=state,
+        )
+
+        final_reply = await self.agent.client.chat(
+            final_messages, temperature=0.0, top_p=0.1
+        )
+
+        await self.agent.context_manager.add_message("assistant", final_reply)
+
+        yield (
+            "llm_response",
+            {
+                "full_reply": final_reply,
+                "tool_calls": [],
+                "is_complete": state.goal_reached,
+            },
+        )
+
+        if not state.goal_reached:
+            logger.warning(
+                f"Loop ended without explicit goal (loop_count={state.loop_count})"
             )
-
-            final_messages = await self.agent.context_manager.provide_context(
-                query=final_query,
-                max_input_tokens=self.agent.max_tokens,
-                reserved_for_output=8000,
-                system_prompt=self._build_objective_reminder()
-                + "\n\nFINAL ANSWER MODE",
-                include_logs=True,
-                chat=False,
-            )
-
-            final_reply = await self.agent.client.chat(
-                final_messages, temperature=0.0, top_p=0.1
-            )
-
-            await self.agent.context_manager.add_message("assistant", final_reply)
-
-            yield (
-                "llm_response",
-                {
-                    "full_reply": final_reply,
-                    "tool_calls": [],
-                    "is_complete": task_fully_complete,
-                },
-            )
-
-            if task_fully_complete:
-                break
-
-        else:
-            logger.warning(f"Max loops ({max_loops}) reached")
-            final_reply = "⚠️ Maximum iterations reached while executing the task."
-            await self.agent.context_manager.add_message("assistant", final_reply)
-            yield ("llm_response", {"full_reply": final_reply, "is_complete": False})
+            state.mark_goal_achieved("Loop termination")
 
     # ====================== REFACTORED AGENTIC LOOP (for sub-agents) ======================
     async def agentic_loop(
