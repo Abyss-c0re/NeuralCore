@@ -25,6 +25,10 @@ class Action:
         confirmation_preview: Optional[Callable[[dict], str]] = None,
         tags: Optional[List[str]] = None,
         aliases: Optional[List[str]] = None,
+        # ==================== NEW: PER-AGENT + SUB-AGENT HIDING ====================
+        hidden_for_agents: Optional[List[str]] = None,    # specific agent_ids
+        hidden_for_subagents: bool = False,               # optional sub-agent flag
+        # =========================================================================
     ):
         if action_type not in {"tool", "function"}:
             raise ValueError("action_type must be 'tool' or 'function'")
@@ -42,6 +46,9 @@ class Action:
         self.confirmation_preview = confirmation_preview or (
             lambda kwargs: f"Executing {name} with {kwargs}"
         )
+
+        self.hidden_for_agents = [str(a).strip() for a in hidden_for_agents] if hidden_for_agents else []
+        self.hidden_for_subagents = hidden_for_subagents
 
         self._bound_agent = None  # Only stores validated agent instances
 

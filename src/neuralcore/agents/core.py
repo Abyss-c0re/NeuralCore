@@ -64,6 +64,7 @@ async def provide_context(agent, query: str):
     - depends_on_task_id: Optional task ID this one depends on.
     - user_facing_name: Optional friendly name for logs/UI.
     """,
+    hidden_for_subagents=True,
 )
 async def deploy_sub_agent(
     agent,
@@ -132,7 +133,7 @@ async def deploy_sub_agent(
     return f"✅ Launched sub-task `{task_id}`{dep_info}: {task_description[:80]}..."
 
 
-@tool("DeployControls", name="GetDeploymentStatus")
+@tool("DeployControls", name="GetDeploymentStatus", hidden_for_subagents=True)
 async def get_deployment_status(agent, task_id: Optional[str] = None):
     # Auto-detect current task if no ID provided
     # if not task_id:
@@ -816,7 +817,7 @@ class Agent:
             "status": "pending",
             "started_at": asyncio.get_event_loop().time(),
             "description": task_description,
-            "assigned_tools": assigned_tools or [],
+            "assigned_tools": assigned_tools or ["DynamicCore"],
             "progress": 0,
             "task_obj": None,
             "result": None,
@@ -905,9 +906,7 @@ class Agent:
             assigned = getattr(sub_agent, "assigned_tools", None) or []
             if assigned:
                 # Filter only tools that actually exist
-                valid_tools = [
-                    t for t in assigned if t in registry.all_actions
-                ]
+                valid_tools = [t for t in assigned if t in registry.all_actions]
                 if valid_tools:
                     sub_agent.manager.unload_all()
                     sub_agent.manager.load_tools(valid_tools)
@@ -921,9 +920,8 @@ class Agent:
 
             # Always ensure core tools
             for core in ["GetContext", "GetDeploymentStatus"]:
-                if (
-                    core in registry.all_actions
-                    and not sub_agent.manager.is_loaded(core)
+                if core in registry.all_actions and not sub_agent.manager.is_loaded(
+                    core
                 ):
                     sub_agent.manager.load_tools([core])
 
@@ -1042,7 +1040,7 @@ class Agent:
                     f"[SUB-AGENT] '{self.name}' – no valid tools in assigned list: {assigned_tools}"
                 )
                 # Minimal safe fallback for sub-agents
-                core = ["FindTool", "GetContext", "GetDeploymentStatus"]
+                core = ["FindTool", "GetContext"]
                 self.manager.load_tools([t for t in core if t in registry.all_actions])
         else:
             # Main agent: load full tool_sets from config
@@ -1057,19 +1055,6 @@ class Agent:
                     self.manager.load_tools([action_name])
                 except Exception as e:
                     logger.warning(f"Failed to load tool '{action_name}': {e}")
-
-        # Always ensure the 4 persistent tools exist
-        critical_tools = [
-            "GetContext",
-            "DeploySubAgent",
-            "GetDeploymentStatus",
-            "FindTool",
-        ]
-        for tool_name in critical_tools:
-            if tool_name in registry.all_actions and not self.manager.is_loaded(
-                tool_name
-            ):
-                self.manager.load_tools([tool_name])
 
     def get_sub_tasks(self) -> Dict[str, Dict]:
         now = asyncio.get_event_loop().time()
@@ -1230,8 +1215,7 @@ class SubAgent(Agent):
         # --- ISOLATED queue for this sub-agent ---
         self.message_queue = asyncio.Queue()
         self.dispatcher = parent.agent_id
-        self.assigned_tools = assigned_tools or []
-
+        self.assigned_tools = assigned_tools or None
         # --- Shared context ---
         # self.context_manager = parent.context_manager
         self.task_context = parent.context_manager.create_task_context(task_name)

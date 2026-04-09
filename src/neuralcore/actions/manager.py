@@ -107,8 +107,14 @@ class ActionRegistry:
         )
         logger.debug(f"Added action '{action.name}' to index under set '{set_name}'")
 
-    def search(self, query: str, limit: int = 5):
-        """Pure dynamic lexical + semantic search. No hardcoded boosts."""
+    def search(
+        self,
+        query: str,
+        limit: int = 5,
+        current_agent_id: Optional[str] = None,
+        is_subagent: bool = False,
+    ):
+        """Pure dynamic lexical + semantic search with per-agent and sub-agent hiding."""
         query = query.lower().strip()
         if not query:
             return []
@@ -118,18 +124,26 @@ class ActionRegistry:
 
         for entry in self._index:
             action = entry["action"]
-            text = entry["text"]  # name + desc + tags + set
+
+            # ==================== HIDING LOGIC ====================
+            if current_agent_id and getattr(action, "hidden_for_agents", None):
+                if current_agent_id in action.hidden_for_agents:
+                    continue
+
+            if is_subagent and getattr(action, "hidden_for_subagents", False):
+                continue
+            # =====================================================
+
+            text = entry["text"]
             name_tokens = entry["name_tokens"]
 
-            # Core scoring
+            # Core scoring (unchanged)
             k_score = keyword_score(query_words, text) * 5.0
             f_score = fuzzy_score(query, text) * 3.0
 
-            # Strong name priority
             name_match = len(set(query_words) & set(name_tokens))
             name_boost = name_match * 8.0
 
-            # Bigram bonus for phrases like "web search", "read pdf"
             bigram_bonus = 0.0
             if len(query_words) >= 2:
                 query_bigrams = {
@@ -144,7 +158,7 @@ class ActionRegistry:
 
             total_score = k_score + f_score + name_boost + bigram_bonus
 
-            if total_score > 3.0:  # reasonable threshold
+            if total_score > 3.0:
                 results.append((total_score, action, entry["set"]))
 
         results.sort(key=lambda x: x[0], reverse=True)
@@ -629,14 +643,27 @@ class ToolBrowser(Action):
             executor=self._search,
             required=["query"],
         )
-        registry = registry
         self.manager = manager
         manager.current_set.add(self)
         logger.info("ToolBrowser (FindTool) added to DynamicCore as persistent tool")
 
     async def _search(self, query: str):
         logger.info(f"ToolBrowser search executed: query='{query}'")
-        results = registry.search(query, limit=3)
+
+        # === Detect current agent context ===
+        current_agent_id = None
+        is_subagent = False
+        if self.manager and getattr(self.manager, "_agent", None):
+            agent = self.manager._agent
+            current_agent_id = getattr(agent, "agent_id", None)
+            is_subagent = getattr(
+                agent, "sub_agent", False
+            )  # ← uses the flag from your Agent class
+
+        results = registry.search(
+            query, limit=3, current_agent_id=current_agent_id, is_subagent=is_subagent
+        )
+
         if not results:
             logger.info("ToolBrowser: no matches found")
             return {
@@ -729,6 +756,8 @@ class AgentActionHelper:
             parameters=parameters,
             required=required,
             executor=executor,
+            hidden_for_agents=kwargs.get("hidden_for_agents"),
+            hidden_for_subagents=kwargs.get("hidden_for_subagents", False),
         )
 
         action.aliases = aliases
@@ -863,6 +892,8 @@ def tool(set_name: str, **kwargs):
             executor=executor,
             tags=tags,
             aliases=aliases,
+            hidden_for_agents=kwargs.get("hidden_for_agents"),
+            hidden_for_subagents=kwargs.get("hidden_for_subagents", False),
         )
 
         # Add to registry
