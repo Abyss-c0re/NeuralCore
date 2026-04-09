@@ -101,6 +101,13 @@ class AgentExecutors:
         """
 
         logger.info(f"[STATE-DRIVEN TASK LOOP] Starting for: {original_query[:120]}...")
+        if state.goal_reached or state.loop_count > 0 or len(state.tool_results) > 0:
+            logger.info("[DEFENSIVE] State was dirty on entry → resetting")
+            state.reset_for_new_task(
+                new_task=original_query,
+                new_goal=original_query
+            )
+            state.planned_tasks = []
 
         yield ("phase_changed", {"phase": "thinking"})
 
@@ -390,9 +397,6 @@ class AgentExecutors:
         await self.agent.context_manager.add_message("user", original_user_query)
         logger.info(f"[CHAT INTENT] {intent} | '{original_user_query[:80]}...'")
 
-        state.mode = "casual" if intent == "CASUAL" else "task"
-        logger.info(f"→ Agent mode set to: {state.mode.upper()}")
-
         if intent == "CASUAL":
             logger.info("[CASUAL MODE] Pure basic chat")
             yield ("phase_changed", {"phase": "casual chat"})
@@ -414,6 +418,15 @@ class AgentExecutors:
             await self.agent.context_manager.add_message("assistant", final_reply)
             yield ("llm_response", {"full_reply": final_reply, "is_complete": True})
             return
+
+        # ====================== TASK PATH – FULL CLEAN RESET ======================
+        logger.info("→ [MODE SWITCH] Casual → TASK → full state reset")
+        state.reset_for_new_task(
+            new_task=original_user_query,
+            new_goal=original_user_query
+        )
+        state.mode = "task"                    # just in case
+        state.planned_tasks = []               # force re-planning on first loop
 
         # TASK path — use the shared robust loop
         async for event, payload in self._goal_driven_task_loop(
