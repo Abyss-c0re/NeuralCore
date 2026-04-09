@@ -118,7 +118,9 @@ class ClientFactory:
         clients_cfg = self.loader.config.get("clients", {})
 
         for name, cfg in clients_cfg.items():
-            if not cfg.get("register_as_tool"):
+            if (
+                cfg.get("register_as_tool") is not True
+            ):  # ← changed to strict bool check
                 continue
 
             client = self.clients.get(name)
@@ -132,19 +134,14 @@ class ClientFactory:
             action_set = ActionSet(name=toolset_name)
             action_set.description = cfg.get("description", f"Client {name}")
 
-            methods_cfg = cfg.get("methods")
-
-            # 🔹 If no methods specified → fallback defaults
-            if not methods_cfg:
-                methods_cfg = [
-                    {"target": "ask"},
-                    {"target": "chat"},
-                ]
+            methods_cfg = cfg.get("methods") or [
+                {"target": "ask"},
+                {"target": "chat"},
+            ]
 
             for mcfg in methods_cfg:
                 method_name = mcfg["target"]
                 method = getattr(client, method_name, None)
-
                 if not method:
                     continue
 
@@ -156,23 +153,30 @@ class ClientFactory:
                 for pname, param in sig.parameters.items():
                     if pname == "self":
                         continue
-
                     parameters[pname] = {
                         "type": "string",
                         "description": f"{pname} parameter",
                     }
-
                     if param.default is inspect.Parameter.empty:
                         required.append(pname)
                     else:
                         parameters[pname]["default"] = param.default
 
-                # 🔥 SAFE EXECUTOR (fixes your kwargs bug)
-                async def executor_wrapper(_method=method, _sig=sig, **kwargs):
-                    filtered = {k: v for k, v in kwargs.items() if k in _sig.parameters}
+                async def executor_wrapper(_method=method, _sig=sig, **input_kwargs):
+                    # 1. Filter to only valid parameters
+                    filtered = {
+                        k: v
+                        for k, v in input_kwargs.items()
+                        if k in _sig.parameters
+                        and k != "kwargs"  # ← never pass literal "kwargs"
+                    }
+
+                    # 2. Call the real method
                     result = _method(**filtered)
+
                     if inspect.iscoroutine(result):
                         result = await result
+
                     return result
 
                 action = Action(

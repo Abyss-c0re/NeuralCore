@@ -869,6 +869,47 @@ class WorkflowEngine:
                         f"Agent has no manager. Skipping tool config for '{step_name}'."
                     )
 
+                # =============================================================
+                # Apply per-step overrides (client + other params)
+                # =============================================================
+                # Save originals for clean restoration
+                original_client = self.agent.client
+                original_params = {
+                    "temperature": self.agent.temperature,
+                    "max_tokens": self.agent.max_tokens,
+                    "system_prompt": self.agent.system_prompt,
+                }
+
+                client_overridden = False
+
+                # Client override (lightweight - no 'clients' dict needed)
+                if "client" in overrides:
+                    client_name = overrides["client"]
+                    try:
+                        from neuralcore.clients.factory import get_clients
+
+                        all_clients = get_clients()
+                        if client_name in all_clients:
+                            self.agent.client = all_clients[client_name]
+                            client_overridden = True
+                            logger.info(
+                                f"Step '{step_name}' → using client override: {client_name}"
+                            )
+                        else:
+                            logger.warning(
+                                f"Client override '{client_name}' not found for step '{step_name}'"
+                            )
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to apply client override '{client_name}': {e}"
+                        )
+
+                # Other common overrides
+                for k in ("temperature", "max_tokens", "system_prompt"):
+                    if k in overrides:
+                        setattr(self.agent, k, overrides[k])
+
+                # Toolset override (existing logic)
                 if "toolset" in overrides:
                     toolset_value = overrides.pop("toolset")
                     if toolset_value:
@@ -889,20 +930,7 @@ class WorkflowEngine:
                         {"step": step_name, "overrides": dict(overrides)},
                     )
 
-                original_params = {
-                    k: getattr(self.agent, k)
-                    for k in ("client", "temperature", "max_tokens", "system_prompt")
-                }
-
-                if "client" in overrides and overrides["client"] in getattr(
-                    self.agent, "clients", {}
-                ):
-                    self.agent.client = self.agent.clients[overrides["client"]]
-
-                for k in ("temperature", "max_tokens", "system_prompt"):
-                    if k in overrides:
-                        setattr(self.agent, k, overrides[k])
-
+                # ====================== EXECUTE STEP ======================
                 go_to_target: Optional[Union[str, int]] = None
                 go_to_data: Optional[dict] = None
                 attempt = 0
@@ -987,8 +1015,13 @@ class WorkflowEngine:
 
                     attempt += 1
 
+                # ====================== RESTORE ORIGINAL VALUES ======================
+                self.agent.client = original_client
                 for k, v in original_params.items():
                     setattr(self.agent, k, v)
+
+                if client_overridden:
+                    logger.debug(f"Restored original client after step '{step_name}'")
 
                 if not step_success:
                     step_index += 1
@@ -1056,7 +1089,3 @@ class WorkflowEngine:
                 step_index = next_step_index
 
             self._log_iteration_state(iteration, state)
-
-        # Final summary can be re-enabled here if needed
-        # async for ev, pl in self._generate_final_summary(state):
-        #     yield (ev, pl)
