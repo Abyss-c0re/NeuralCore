@@ -771,7 +771,7 @@ class WorkflowEngine:
             await self.agent.context_manager.add_message("user", user_prompt)
 
         iteration = 0
-        state = AgentState()
+        state = self.agent.state
 
         MAX_ITERATIONS = getattr(self.agent, "max_iterations", 20)
         MAX_STEPS_PER_ITERATION = getattr(self.agent, "max_steps_per_iteration", 100)
