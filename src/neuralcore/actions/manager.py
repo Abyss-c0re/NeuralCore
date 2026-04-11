@@ -621,6 +621,18 @@ class DynamicActionManager:
     def by_name(self):
         return self.current_set.by_name
 
+    @property
+    def loaded_tools(self) -> List[str]:
+        """Public, read-only list of currently loaded tool names.
+        Generic observability API — safe for any client bridge / dashboard.
+        """
+        return list(self._loaded_tools)
+
+    @property
+    def loaded_toolsets(self) -> List[str]:
+        """Public list of toolsets that have active tools loaded."""
+        return self.get_loaded_toolsets()
+
 
 # ─────────────────────────────────────────────────────────────
 # Tool Browser — PURE DYNAMIC SEARCH
