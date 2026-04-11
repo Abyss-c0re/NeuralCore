@@ -15,10 +15,9 @@ logger = Logger.get_logger()
 
 class WorkflowEngine:
     """
-    Cleaned-up WorkflowEngine (single-config.yaml mode).
-    - All workflows come from top-level 'workflows:' in config.yaml
-    - No folder scanning / duplicate loading
-    - AgentFlow only supplies the _wf_* step handlers
+    WorkflowEngine.
+    - All workflows come from top-level 'workflows:'
+    - Supports both file-based config and live dict injection
     """
 
     FINAL_ANSWER_MARKER = "[FINAL_ANSWER_COMPLETE]"
@@ -29,7 +28,7 @@ class WorkflowEngine:
         # === REGISTRIES ===
         self.registered_workflows: Dict[str, Dict[str, Any]] = {}
         self._step_handlers: Dict[str, Optional[Callable]] = {}
-        self.workflow = workflow_registry  # kept for metadata / loop support
+        self.workflow = workflow_registry
 
         self.current_workflow_name: str = "default"
         self.workflow_steps: List[Union[str, Dict[str, Any]]] = []
@@ -39,10 +38,10 @@ class WorkflowEngine:
 
         self.sequence_registry = SequenceRegistry(self)
 
-        # Load everything from config (single source of truth)
+        # Load from config
         self.load_workflow_from_config()
 
-        logger.info("✅ WorkflowEngine ready — workflows loaded from config.yaml")
+        logger.info("✅ WorkflowEngine ready")
 
     # ===================================================================
     # REGISTRATION
@@ -79,17 +78,19 @@ class WorkflowEngine:
         )
 
     # ===================================================================
-    # WORKFLOW LOADING (single config.yaml mode)
+    # WORKFLOW LOADING — now universal
     # ===================================================================
-    def load_workflow_from_config(self):
-        """Load all workflows defined under top-level 'workflows:' in config.yaml."""
+    def load_workflow_from_config(self, config_override: dict | None = None):
+        """Load workflows. Accepts live override dict for dynamic updates."""
         loader = get_loader()
 
-        # Let the simplified loader handle the global workflows dict
-        loader.load_workflow_sets(self)
+        global_workflows = (
+            config_override.get("workflows", {})
+            if config_override
+            else loader.config.get("workflows", {})
+        )
 
-        # Register every workflow from config into the engine
-        global_workflows = loader.config.get("workflows", {})
+        # Register every workflow from source
         for name, wf_data in global_workflows.items():
             if name not in self.registered_workflows:
                 self.register_workflow(
@@ -99,7 +100,7 @@ class WorkflowEngine:
                     hidden_toolsets=wf_data.get("hidden_toolsets"),
                 )
 
-        # Apply the primary workflow for this agent
+        # Apply primary workflow for this agent
         agent_workflow_cfg = getattr(self.agent, "config", {}).get("workflow")
         primary_name = None
 
@@ -111,7 +112,6 @@ class WorkflowEngine:
         if primary_name and primary_name in self.registered_workflows:
             self.switch_workflow(primary_name)
         else:
-            # Ultimate fallback
             self.current_workflow_name = "default"
             self.workflow_description = "Default workflow"
             logger.warning("No primary workflow found in agent config — using default")
@@ -119,6 +119,20 @@ class WorkflowEngine:
         logger.info(
             f"Workflow loaded: {self.current_workflow_name} — {self.workflow_description}"
         )
+
+    # NEW: Live reload support (clean, no external references)
+    def reload_workflow_config(self, new_config: dict | None = None) -> bool:
+        """Reload workflows from a fresh config dict."""
+        try:
+            if isinstance(new_config, dict):
+                self.load_workflow_from_config(config_override=new_config)
+                logger.info("WorkflowEngine reloaded from live config")
+                return True
+            logger.warning("reload_workflow_config expects a dict")
+            return False
+        except Exception as e:
+            logger.error(f"Workflow reload failed: {e}")
+            return False
 
     def switch_workflow(self, name: str) -> bool:
         if name not in self.registered_workflows:

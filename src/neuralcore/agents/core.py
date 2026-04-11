@@ -222,7 +222,7 @@ class Agent:
         config_file: Optional[Path] = None,
         config_override: Optional[dict] = None,
         sub_agent: bool = False,
-        action_registry: ActionRegistry = registry
+        action_registry: ActionRegistry = registry,
     ):
         self.agent_id: str = agent_id
         self.loader = loader
@@ -230,7 +230,7 @@ class Agent:
         self.registry = action_registry
         self.state: AgentState = AgentState()
 
-        # === CONFIG HANDLING (supports both main agents and SubAgent override) ===
+        # === CONFIG HANDLING — now uses universal parser (no duplication) ===
         self.sub_agent: bool = sub_agent
         if config_override is not None:
             logger.debug(
@@ -238,10 +238,23 @@ class Agent:
             )
             self.config = dict(config_override)
         else:
-            self.config = self._load_agent_config(agent_id, config_file)
+            if config_file:
+                # parse full config, then extract the specific agent section
+                full_config = self.loader.parse_config(config_file)
+                agent_cfg = full_config.get("agents", {}).get(agent_id, {})
+                self.config = dict(agent_cfg) if isinstance(agent_cfg, dict) else {}
+            else:
+                # classic loader path — get_agent_config already returns the dict
+                self.config = self.loader.get_agent_config(agent_id)
+
+        if not isinstance(self.config, dict) or not self.config:
+            raise ValueError(f"Agent config for '{agent_id}' is empty or not found")
 
         clients = get_clients()
-        self.client = clients[self.config.get("client", "main")]
+        client_name = self.config.get("client", "main")
+        if client_name not in clients:
+            raise ValueError(f"Client '{client_name}' not found for agent '{agent_id}'")
+        self.client = clients[client_name]
 
         self.name = self.config.get("name", f"Agent-{agent_id}")
         self.description = self.config.get("description", "")
@@ -262,7 +275,7 @@ class Agent:
         ToolBrowser(self.registry, self.manager)
         logger.debug("ToolBrowser registered")
 
-        # Sub-agent flags (default for main agents)
+        # Sub-agent flags
         self.dispatcher: str = "user"
         self.message_queue: asyncio.Queue[Any] = asyncio.Queue()
         self._input_event: asyncio.Event = asyncio.Event()
@@ -273,7 +286,6 @@ class Agent:
         self.task_context: Optional["ContextManager.TaskContext"] = None
         self.assigned_tools: Optional[List[str]] = None
 
-        # === UPGRADE: Current task/role, default workflow, background support ===
         self.current_task: str = ""
         self.current_role: str = self.config.get("role", "general_assistant")
         self.default_workflow: str = self.config.get("default", "default")
@@ -282,76 +294,33 @@ class Agent:
         self._reset_state()
 
     def is_sub_agent(self) -> bool:
-        """Return True if this agent is a sub-agent."""
         return getattr(self, "sub_agent", False)
 
     def get_parent_agent(self) -> Optional["Agent"]:
-        """Return parent agent if sub-agent, else None."""
         return getattr(self, "parent", None)
 
-    def _load_agent_config(self, agent_id: str, config_file: Optional[Path]) -> dict:
-        logger.debug(f"Loading config for agent_id='{agent_id}'")
-
-        cfg: Dict[str, Any] = {}
-
-        if config_file:
-            logger.debug(f"Using config file: {config_file}")
-
-            if config_file.exists():
-                with open(config_file, "r") as f:
-                    raw = yaml.safe_load(f)
-
-                if not isinstance(raw, dict):
-                    logger.warning("Config root is not a dict")
-                    raw = {}
-
-                logger.debug(
-                    f"Config file loaded, keys at top level: {list(raw.keys())}"
-                )
-
-                agents = raw.get("agents")
-                if not isinstance(agents, dict):
-                    logger.warning("'agents' section is missing or not a dict")
-                    agents = {}
-
-                agent_cfg = agents.get(agent_id)
-                if isinstance(agent_cfg, dict):
-                    cfg = agent_cfg
+    def reload_config(self, new_config: dict | str | Path) -> None:
+            """Allow NeuralLabs to push a new config dict/string/Path and re-wire the agent instantly."""
+            try:
+                parsed = self.loader.parse_config(new_config)
+                # Support both full config and direct agent dict
+                if isinstance(parsed.get("agents"), dict):
+                    agent_cfg = parsed["agents"].get(self.agent_id, {})
                 else:
-                    logger.warning(
-                        f"Agent config for '{agent_id}' is missing or invalid"
-                    )
+                    agent_cfg = parsed  # direct agent dict passed
 
-            else:
-                logger.warning(f"Config file does not exist: {config_file}")
-
-        else:
-            logger.debug("Using loader.config")
-            loader_cfg = getattr(self.loader, "config", {})
-
-            if not isinstance(loader_cfg, dict):
-                logger.warning("loader.config is not a dict")
-                loader_cfg = {}
-
-            loader_agents = loader_cfg.get("agents")
-            if not isinstance(loader_agents, dict):
-                logger.warning("'agents' in loader.config is not a dict")
-                loader_agents = {}
-
-            logger.debug(f"Agents in loader.config: {list(loader_agents.keys())}")
-
-            agent_cfg = loader_agents.get(agent_id)
-            if isinstance(agent_cfg, dict):
-                cfg = agent_cfg
-            else:
-                logger.warning(f"Agent config for '{agent_id}' is missing or invalid")
-
-        if not cfg:
-            logger.error(f"Agent '{agent_id}' not found in config")
-            raise ValueError(f"Agent '{agent_id}' not found")
-
-        logger.debug(f"Loaded config for agent '{agent_id}': {list(cfg.keys())}")
-        return cfg
+                if isinstance(agent_cfg, dict) and agent_cfg:
+                    self.config = dict(agent_cfg)
+                    # Re-apply important runtime attributes
+                    self.name = self.config.get("name", self.name)
+                    self.temperature = self.config.get("temperature", self.temperature)
+                    self.max_tokens = self.config.get("max_tokens", self.max_tokens)
+                    self.system_prompt = self.config.get("system_prompt", self.system_prompt)
+                    logger.info(f"Agent '{self.name}' reloaded config from NeuralLabs")
+                else:
+                    logger.warning("reload_config received invalid or empty agent section")
+            except Exception as e:
+                logger.error(f"reload_config failed: {e}")
 
     def _load_agent_tools(self):
         tool_sets = self.config.get("tool_sets", [])
@@ -1174,7 +1143,6 @@ class Agent:
             return f"✅ The deployment task **{task}** has been completed successfully."
 
 
-# --- SubAgent constructor (isolated queue + controlled reporting) ---
 class SubAgent(Agent):
     def __init__(
         self,
@@ -1206,7 +1174,6 @@ class SubAgent(Agent):
         if agent_id_override is None:
             agent_id_override = f"{parent.agent_id}_sub_unknown"
 
-        # --- Initialize base Agent ---
         super().__init__(
             agent_id=agent_id_override,
             loader=parent.loader,
@@ -1215,15 +1182,11 @@ class SubAgent(Agent):
             sub_agent=True,
         )
 
-        # --- ISOLATED queue for this sub-agent ---
         self.message_queue = asyncio.Queue()
         self.dispatcher = parent.agent_id
         self.assigned_tools = assigned_tools or None
-        # --- Shared context ---
-        # self.context_manager = parent.context_manager
         self.task_context = parent.context_manager.create_task_context(task_name)
 
-        # --- Sub-agent tuned defaults ---
         self.temperature = temperature or self.config.get("temperature", 0.25)
         self.max_iterations = max_iterations or self.config.get("max_iterations", 15)
         self.max_tokens = self.config.get("max_tokens", 20000)
@@ -1238,11 +1201,8 @@ class SubAgent(Agent):
                 "using only the tools you have been given."
             )
 
-        # --- Load assigned tools only ---
         self.attach_tools(assigned_tools=assigned_tools)
 
-        # === CRITICAL: Inherit workflows and steps from parent ===
-        # Because AgentFlow is in the external app and not instantiated here
         if hasattr(parent, "workflow") and parent.workflow is not None:
             self.workflow.inherit_workflows_from_parent(parent.workflow)
         else:
