@@ -319,6 +319,40 @@ class Agent:
     def status(self, value: str) -> None:
         self.state.status = value
 
+    def get_full_state_dict(self) -> Dict[str, Any]:
+        """Public, generic snapshot of the entire agent for any transport layer.
+        Used by WebSocketBridge
+        """
+        return {
+            "agent_id": self.agent_id,
+            "name": self.name,
+            "state": self.state.to_dict(),
+            "loaded_tools": self.manager.loaded_tools,
+            "loaded_toolsets": self.manager.loaded_toolsets,
+            "sub_tasks": self.get_sub_tasks(),
+            "context_summary": self.context_manager.get_context_summary(
+                max_messages=12, max_chars=2000
+            ),
+            "timestamp": time.time(),
+        }
+
+    def get_detailed_status(self) -> Dict[str, Any]:
+        """Lightweight version for heartbeats / dashboards."""
+        return {
+            "agent_id": self.agent_id,
+            "name": self.name,
+            "status": self.state.status,
+            "phase": self.state.phase,
+            "current_task": self.state.current_task_name,
+            "goal": self.state.goal,
+            "duration": round(self.state.duration, 1),
+            "loop_count": self.state.loop_count,
+            "total_tool_calls": self.state.total_tool_calls,
+            "error_count": self.state.error_count,
+            "sub_tasks_count": len(self.sub_tasks),
+            "timestamp": time.time(),
+        }
+
     # ====================== BASIC UTILS ======================
     def is_sub_agent(self) -> bool:
         return self.sub_agent
