@@ -5,6 +5,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Union
 
 from neuralcore.utils.logger import Logger
 from neuralcore.actions.manager import (
+    ActionRegistry,
     AgentActionHelper,
     ToolBrowser,
     DynamicActionManager,
@@ -221,10 +222,12 @@ class Agent:
         config_file: Optional[Path] = None,
         config_override: Optional[dict] = None,
         sub_agent: bool = False,
+        action_registry: ActionRegistry = registry
     ):
         self.agent_id: str = agent_id
         self.loader = loader
         self.app_root = app_root
+        self.registry = action_registry
         self.state: AgentState = AgentState()
 
         # === CONFIG HANDLING (supports both main agents and SubAgent override) ===
@@ -251,12 +254,12 @@ class Agent:
             self.client.system_prompt if hasattr(self.client, "system_prompt") else "",
         )
 
-        self.manager = DynamicActionManager(registry, self)
+        self.manager = DynamicActionManager(self.registry, self)
         self.context_manager = ContextManager(self.max_tokens)
 
         self.agent_tools = AgentActionHelper(self)
         self.workflow = WorkflowEngine(self, workflow)
-        ToolBrowser(registry, self.manager)
+        ToolBrowser(self.registry, self.manager)
         logger.debug("ToolBrowser registered")
 
         # Sub-agent flags (default for main agents)
