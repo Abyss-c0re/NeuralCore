@@ -1,4 +1,4 @@
-import yaml
+import time
 import asyncio
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Union
@@ -228,23 +228,20 @@ class Agent:
         self.loader = loader
         self.app_root = app_root
         self.registry = action_registry
-        self.state: AgentState = AgentState()
 
-        # === CONFIG HANDLING — now uses universal parser (no duplication) ===
+        # ====================== STATE IS NOW THE SOURCE OF TRUTH ======================
+        self.state: AgentState = AgentState(agent_id=agent_id)
+
+        # ====================== CONFIG HANDLING ======================
         self.sub_agent: bool = sub_agent
         if config_override is not None:
-            logger.debug(
-                f"Using config_override for agent '{agent_id}' (sub-agent mode)"
-            )
             self.config = dict(config_override)
         else:
             if config_file:
-                # parse full config, then extract the specific agent section
                 full_config = self.loader.parse_config(config_file)
                 agent_cfg = full_config.get("agents", {}).get(agent_id, {})
                 self.config = dict(agent_cfg) if isinstance(agent_cfg, dict) else {}
             else:
-                # classic loader path — get_agent_config already returns the dict
                 self.config = self.loader.get_agent_config(agent_id)
 
         if not isinstance(self.config, dict) or not self.config:
@@ -264,153 +261,183 @@ class Agent:
         self.max_tokens = self.config.get("max_tokens", 12048)
         self.system_prompt: str = self.config.get(
             "system_prompt",
-            self.client.system_prompt if hasattr(self.client, "system_prompt") else "",
+            getattr(self.client, "system_prompt", ""),
         )
 
+        # ====================== INFRASTRUCTURE (never goes into state) ======================
         self.manager = DynamicActionManager(self.registry, self)
         self.context_manager = ContextManager(self.max_tokens)
-
         self.agent_tools = AgentActionHelper(self)
         self.workflow = WorkflowEngine(self, workflow)
         ToolBrowser(self.registry, self.manager)
-        logger.debug("ToolBrowser registered")
 
-        # Sub-agent flags
-        self.dispatcher: str = "user"
+        # Async runtime only
         self.message_queue: asyncio.Queue[Any] = asyncio.Queue()
         self._input_event: asyncio.Event = asyncio.Event()
         self._input_counter: int = 0
-        self.max_sub_agents = self.config.get("max_sub_agents", 6)
+        self._background_task: Optional[asyncio.Task] = None
+        self._stop_event: Optional[asyncio.Event] = None
+
+        # Light operational containers
         self.sub_tasks: Dict[str, Dict[str, Any]] = {}
         self._sub_task_counter: int = 0
         self.task_context: Optional["ContextManager.TaskContext"] = None
         self.assigned_tools: Optional[List[str]] = None
 
-        self.current_task: str = ""
-        self.current_role: str = self.config.get("role", "general_assistant")
-        self.default_workflow: str = self.config.get("default", "default")
-        self._status: str = "idle"
-        self._background_task: Optional[asyncio.Task] = None
         self._reset_state()
 
+    # ====================== STATE DELEGATION HELPERS ======================
+    @property
+    def current_task(self) -> str:
+        return self.state.current_task
+
+    @current_task.setter
+    def current_task(self, value: str) -> None:
+        self.state.current_task = value
+
+    @property
+    def current_role(self) -> str:
+        return self.state.current_role
+
+    @current_role.setter
+    def current_role(self, value: str) -> None:
+        self.state.current_role = value
+
+    @property
+    def current_workflow(self) -> str:
+        return self.state.current_workflow
+
+    @current_workflow.setter
+    def current_workflow(self, value: str) -> None:
+        self.state.current_workflow = value
+
+    @property
+    def status(self) -> str:
+        return self.state.status
+
+    @status.setter
+    def status(self, value: str) -> None:
+        self.state.status = value
+
+    # ====================== BASIC UTILS ======================
     def is_sub_agent(self) -> bool:
-        return getattr(self, "sub_agent", False)
+        return self.sub_agent
 
     def get_parent_agent(self) -> Optional["Agent"]:
         return getattr(self, "parent", None)
 
+    def _reset_state(self) -> None:
+        """Reset everything through the state object."""
+        self.state.reset_for_new_task()
+        self.message_queue = asyncio.Queue()  # fresh queue
+        self._input_event.clear()
+        self._input_counter = 0
+        self._stop_event = None
+        self.sub_tasks.clear()
+        self._sub_task_counter = 0
+
+    # ====================== CONFIG & TOOLS ======================
     def reload_config(self, new_config: dict | str | Path) -> None:
-            """Allow NeuralLabs to push a new config dict/string/Path and re-wire the agent instantly."""
-            try:
-                parsed = self.loader.parse_config(new_config)
-                # Support both full config and direct agent dict
-                if isinstance(parsed.get("agents"), dict):
-                    agent_cfg = parsed["agents"].get(self.agent_id, {})
-                else:
-                    agent_cfg = parsed  # direct agent dict passed
+        try:
+            parsed = self.loader.parse_config(new_config)
+            if isinstance(parsed.get("agents"), dict):
+                agent_cfg = parsed["agents"].get(self.agent_id, {})
+            else:
+                agent_cfg = parsed
 
-                if isinstance(agent_cfg, dict) and agent_cfg:
-                    self.config = dict(agent_cfg)
-                    # Re-apply important runtime attributes
-                    self.name = self.config.get("name", self.name)
-                    self.temperature = self.config.get("temperature", self.temperature)
-                    self.max_tokens = self.config.get("max_tokens", self.max_tokens)
-                    self.system_prompt = self.config.get("system_prompt", self.system_prompt)
-                    logger.info(f"Agent '{self.name}' reloaded config from NeuralLabs")
-                else:
-                    logger.warning("reload_config received invalid or empty agent section")
-            except Exception as e:
-                logger.error(f"reload_config failed: {e}")
+            if isinstance(agent_cfg, dict) and agent_cfg:
+                self.config = dict(agent_cfg)
+                self.name = self.config.get("name", self.name)
+                self.temperature = self.config.get("temperature", self.temperature)
+                self.max_tokens = self.config.get("max_tokens", self.max_tokens)
+                self.system_prompt = self.config.get(
+                    "system_prompt", self.system_prompt
+                )
 
-    def _load_agent_tools(self):
-        tool_sets = self.config.get("tool_sets", [])
-        self.loader.load_tool_sets(sets_to_load=tool_sets)
-        for action_name in registry.all_actions:
-            self.manager.load_tools([action_name])
+                # Sync important fields into state
+                self.state.current_role = self.config.get(
+                    "role", self.state.current_role
+                )
+                logger.info(f"Agent '{self.name}' reloaded config from NeuralLabs")
+        except Exception as e:
+            logger.error(f"reload_config failed: {e}")
+
+    def attach_tools(self, assigned_tools: Optional[List[str]] = None) -> None:
+        if self.sub_agent and assigned_tools:
+            valid_tools = [t for t in assigned_tools if t in registry.all_actions]
+            if valid_tools:
+                self.manager.unload_all()
+                self.manager.load_tools(valid_tools)
+                logger.info(
+                    f"[SUB-AGENT] '{self.name}' loaded {len(valid_tools)} tools"
+                )
+            else:
+                core = ["FindTool", "GetContext"]
+                self.manager.load_tools([t for t in core if t in registry.all_actions])
+        else:
+            tool_sets = self.config.get("tool_sets", [])
+            if tool_sets:
+                self.loader.load_tool_sets(sets_to_load=tool_sets)
+            for action_name in list(registry.all_actions.keys()):
+                try:
+                    self.manager.load_tools([action_name])
+                except Exception as e:
+                    logger.warning(f"Failed to load tool '{action_name}': {e}")
 
     def _resolve_workflow(
         self, chat_mode: bool = False, workflow_override: Optional[str] = None
     ) -> str:
-        """
-        Return the workflow to use.
-        Priority:
-          1. Explicit override
-          2. workflow key from agent config (string or dict form)
-          3. First workflow defined in config.yaml
-          4. Never fall back to literal string "default"
-        """
         if workflow_override:
             return workflow_override
 
-        # 1. Check explicit "workflow" key in agent config (this is what you set in config.yaml)
         workflow_cfg = self.config.get("workflow")
         if isinstance(workflow_cfg, str):
             return workflow_cfg.strip()
         if isinstance(workflow_cfg, dict) and workflow_cfg:
             return next(iter(workflow_cfg.keys()))
 
-        # 2. Fallback: use first workflow from the full config (via loader)
         if hasattr(self.loader, "config"):
             global_workflows = self.loader.config.get("workflows", {})
             if global_workflows:
                 return next(iter(global_workflows.keys()))
 
-        # Ultimate safe fallback - should never reach here with proper config
-        logger.warning(
-            "No workflow found in agent config or global config. Using first available."
-        )
-        return "deploy_chat"  # or raise, but we keep it running
+        logger.warning("No workflow found, using fallback")
+        return "deploy_chat"
 
-    def _reset_state(self):
-        """Reset both AgentState and legacy agent attributes."""
-        # Reset the rich state object (this is the source of truth)
-        self.state.reset_for_new_task()
-        self.executed_signatures: set[tuple] = set()
-        self.steps: List[str] = []
-        self._stop_event: Optional[asyncio.Event] = None
-        self.current_task = ""
-        self._status = "idle"
-
-    # ---------------- PUBLIC API ----------------
-
+    # ====================== MESSAGING ======================
     async def post_message(self, message: str | Dict[str, Any]) -> None:
-        """Post a message as USER."""
         if isinstance(message, str):
             item = {"role": "user", "content": message}
-        elif isinstance(message, dict):
+        else:
             item = {"role": "user", **message}
-            if "role" not in item or item["role"] != "user":
-                item["role"] = "user"
 
         await self.message_queue.put(item)
         self._input_counter += 1
         self._input_event.set()
-        logger.debug(
-            f"Agent '{self.name}' ← user message posted: {str(message)[:80]}..."
-        )
+        self.state.add_message(item)
+        logger.debug(f"Agent '{self.name}' ← user message posted")
 
     async def post_system_message(self, message: str | Dict[str, Any]) -> None:
         if isinstance(message, str):
             item = {"role": "system", "content": message}
-        elif isinstance(message, dict):
+        else:
             item = {"role": "system", **message}
 
         await self.message_queue.put(item)
-        logger.debug(
-            f"Agent '{self.name}' ← system alert posted: {str(message)[:100]}..."
-        )
-        self._input_event.set()
+        self.state.add_message(item)
+        logger.debug(f"Agent '{self.name}' ← system message posted")
 
     async def post_control(self, control: str | Dict[str, Any]) -> None:
         if isinstance(control, str):
             item = {"event": control}
-        elif isinstance(control, dict):
+        else:
             item = dict(control)
             if not any(k in item for k in ("event", "action", "control")):
                 item["event"] = "custom_control"
 
         await self.message_queue.put(item)
-        logger.debug(f"Agent '{self.name}' ← control posted: {str(control)[:80]}...")
+        self.state.add_message(item)
+        logger.debug(f"Agent '{self.name}' ← control posted")
 
     async def on_background_event(self, event: str, payload: Any) -> None:
         """Generic hook for background/headless events.
@@ -423,29 +450,22 @@ class Agent:
         )
 
     async def get_agent_status(self) -> Dict[str, Any]:
-        """Retrieve current agent status with rich LLM-generated summary.
-        Uses ContextManager.get_context_summary() as requested."""
         try:
-            # Use the rich summary already available in ContextManager
             context_summary = self.context_manager.get_context_summary(
                 max_messages=8, max_chars=1200
             )
 
-            status_prompt = f"""You are a status reporter for an AI agent.
+            status_prompt = f"""Agent: {self.name} (ID: {self.agent_id})
+Role: {self.state.current_role}
+Current Task: {self.state.current_task or "Idle"}
+Status: {self.state.status}
+Phase: {self.state.phase}
+Duration: {self.state.duration:.1f}s
+Sub-tasks: {len(self.sub_tasks)}
 
-            Agent: {self.name} (ID: {self.agent_id})
-            Role: {self.current_role}
-            Current Task: {self.current_task or "None / Idle"}
-            Status: {self._status}
-            Default Workflow: {self.default_workflow}
-            Background Mode: {"Yes" if self._background_task and not self._background_task.done() else "No"}
-            Active Sub-tasks: {len(self.sub_tasks)}
+Context: {context_summary}
 
-            === CONTEXT SUMMARY ===
-            {context_summary}
-
-            Provide a clear, friendly 4-7 sentence status report for the user. 
-            Include what the agent is working on, any progress, and next expected steps."""
+Provide a clear 4-7 sentence status report."""
 
             summary = await self.client.chat(
                 [{"role": "user", "content": status_prompt}],
@@ -456,31 +476,29 @@ class Agent:
             return {
                 "agent_id": self.agent_id,
                 "name": self.name,
-                "role": self.current_role,
-                "task": self.current_task,
-                "status": self._status,
-                "default_workflow": self.default_workflow,
+                "role": self.state.current_role,
+                "task": self.state.current_task,
+                "goal": self.state.goal,
+                "status": self.state.status,
+                "phase": self.state.phase,
+                "duration": round(self.state.duration, 1),
                 "background_running": bool(
                     self._background_task and not self._background_task.done()
                 ),
                 "sub_tasks_count": len(self.sub_tasks),
-                "sub_tasks": self.get_sub_tasks(),
                 "context_summary": context_summary[:800] + "..."
                 if len(context_summary) > 800
                 else context_summary,
                 "llm_summary": summary.strip(),
-                "timestamp": asyncio.get_event_loop().time(),
+                "timestamp": time.time(),
             }
-
         except Exception as e:
-            logger.warning(f"get_agent_status failed for {self.name}: {e}")
+            logger.warning(f"get_agent_status failed: {e}")
             return {
                 "agent_id": self.agent_id,
                 "name": self.name,
-                "status": self._status,
-                "task": self.current_task,
+                "status": self.state.status,
                 "error": str(e),
-                "llm_summary": "Status summary generation failed.",
             }
 
     async def run_background(
@@ -492,18 +510,11 @@ class Agent:
         workflow: Optional[str] = None,
         **kwargs,
     ) -> asyncio.Task:
-        """Run the agent fully in the background.
-        Bidirectional communication:
-          • Input  → post_message / post_system_message / post_control
-          • Output → events are automatically forwarded as control messages
-        Returns the background task so it can be awaited/cancelled.
-        """
         if self._background_task and not self._background_task.done():
-            logger.warning(f"Background task already active for agent '{self.name}'")
             return self._background_task
 
-        self.current_task = user_prompt or "background processing"
-        self._status = "running_background"
+        self.state.current_task = user_prompt or "background processing"
+        self.state.status = "running_background"
 
         async def _background_consumer():
             try:
@@ -516,37 +527,32 @@ class Agent:
                     chat_mode=False,
                     **kwargs,
                 ):
-                    # Forward every workflow event as a control message (bidirectional comms)
-                    control_msg = {
-                        "event": "background_event",
-                        "type": event,
-                        "payload": payload
-                        if isinstance(payload, dict)
-                        else {"content": str(payload)},
-                    }
-                    await self.post_control(control_msg)
-                    logger.debug(f"[BG] {self.name} → {event}")
-
+                    await self.post_control(
+                        {
+                            "event": "background_event",
+                            "type": event,
+                            "payload": payload
+                            if isinstance(payload, dict)
+                            else {"content": str(payload)},
+                        }
+                    )
             except asyncio.CancelledError:
-                logger.info(f"Background run for '{self.name}' was cancelled")
+                logger.info(f"Background task for '{self.name}' cancelled")
                 raise
             except Exception as exc:
-                logger.error(f"Background run error in '{self.name}'", exc_info=True)
+                logger.error(f"Background error in '{self.name}'", exc_info=True)
                 await self.post_control(
                     {"event": "background_error", "error": str(exc)}
                 )
             finally:
-                self._status = "idle"
-                self.current_task = ""
+                self.state.status = "idle"
+                self.state.current_task = ""
                 self._background_task = None
-                logger.info(f"Agent '{self.name}' background run finished")
 
         self._background_task = asyncio.create_task(
             _background_consumer(), name=f"bg_{self.agent_id}"
         )
-        logger.info(
-            f"Agent '{self.name}' started in BACKGROUND mode (task={self._background_task.get_name()})"
-        )
+        logger.info(f"Agent '{self.name}' started in BACKGROUND mode")
         return self._background_task
 
     async def execute_loop(
@@ -612,24 +618,17 @@ class Agent:
             yield event, payload
 
     async def _handle_control_message(self, msg: Dict[str, Any]) -> bool:
-        """Handle control events from the message queue.
-        Returns True if the run should terminate."""
         event = msg.get("event")
-        logger.debug(f"Headless received control: {event}")
-
+        if event in ("finish", "cancelled", "break"):
+            logger.info(f"Termination signal: {event}")
+            return True
         if event == "switch_workflow":
-            wf_name = msg.get("name", self.default_workflow)
-            logger.info(f"Switching workflow to: {wf_name}")
+            wf_name = msg.get("name", self.state.current_workflow)
             try:
                 self.workflow.switch_workflow(wf_name)
+                self.state.current_workflow = wf_name
             except Exception as e:
                 logger.warning(f"Workflow switch failed: {e}")
-            return False
-
-        elif event in ("finish", "cancelled", "break"):
-            logger.info(f"Termination signal received: {event}")
-            return True
-
         return False
 
     async def _run_headless_loop(
@@ -640,49 +639,36 @@ class Agent:
         workflow_name: str,
         stop_event: asyncio.Event,
     ) -> AsyncIterator[Tuple[str, Any]]:
-        """Continuous headless consumer with proper bootstrap + timeout safety."""
         processed_initial = False
 
-        while True:
-            if stop_event.is_set():
-                logger.debug("Headless run stopped via stop_event")
-                break
-
+        while not stop_event.is_set():
             try:
-                # Short timeout on first iteration to catch the seeded message immediately
                 timeout = 1.0 if not processed_initial else 30.0
                 msg = await asyncio.wait_for(self.message_queue.get(), timeout=timeout)
             except asyncio.TimeoutError:
-                if not processed_initial and self.message_queue.empty():
-                    logger.warning(
-                        "[HEADLESS] No initial message after bootstrap — idling"
-                    )
                 continue
 
-            # Control message?
             if isinstance(msg, dict) and "event" in msg:
-                should_stop = await self._handle_control_message(msg)
-                self.message_queue.task_done()
-                if should_stop:
+                if await self._handle_control_message(msg):
                     break
+                self.message_queue.task_done()
                 continue
 
-            # Normal user message
             content = msg.get("content") if isinstance(msg, dict) else str(msg).strip()
             if not content:
                 self.message_queue.task_done()
                 continue
 
-            logger.info(f"[HEADLESS] Processing prompt: {content[:120]}...")
             processed_initial = True
+            logger.info(f"[HEADLESS] Processing: {content[:120]}...")
 
-            async for event, payload in self._run_workflow_once(
+            async for event, payload in self.workflow.run(
                 user_prompt=content,
                 system_prompt=system_prompt,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                workflow_name=workflow_name,
                 stop_event=stop_event,
+                workflow=workflow_name,
             ):
                 yield event, payload
 
@@ -702,63 +688,58 @@ class Agent:
     ) -> AsyncIterator[Tuple[str, Any]]:
         stop_event = stop_event or asyncio.Event()
 
-        (
-            system_prompt,
-            temperature,
-            max_tokens,
-            workflow_name,
-        ) = self._setup_for_run(
-            user_prompt, system_prompt, temperature, max_tokens, workflow, chat_mode
+        system_prompt = system_prompt or self.system_prompt
+        temperature = temperature if temperature is not None else self.temperature
+        max_tokens = max_tokens if max_tokens is not None else self.max_tokens
+
+        self._reset_state()
+
+        if user_prompt:
+            self.state.task = user_prompt
+            self.state.goal = user_prompt
+            self.state.current_task = user_prompt
+
+        self.state.status = "running"
+        workflow_name = self._resolve_workflow(
+            chat_mode=chat_mode, workflow_override=workflow
         )
 
-        # ← NEW: Ensure tools are loaded before any headless execution
         if not chat_mode:
-            logger.info(f"[HEADLESS] Ensuring tools for workflow '{workflow_name}'")
             self.manager.reset_to_default_package("headless_bootstrap", self.workflow)
-            self.attach_tools()  # safe, respects assigned_tools for sub-agents
+            self.attach_tools()
 
         try:
             if chat_mode:
                 logger.info(
-                    f"Agent '{self.name}' → Starting CHAT mode with workflow '{workflow_name}'"
+                    f"Agent '{self.name}' → CHAT mode | workflow={workflow_name}"
                 )
-                if user_prompt and str(user_prompt).strip():
+                if user_prompt:
                     await self.post_message(user_prompt)
 
-                async for event, payload in self._run_workflow_once(
+                async for event, payload in self.workflow.run(
                     user_prompt="",
                     system_prompt=system_prompt,
                     temperature=temperature,
                     max_tokens=max_tokens,
-                    workflow_name=workflow_name,
                     stop_event=stop_event,
+                    workflow=workflow_name,
                 ):
                     yield event, payload
 
             else:
-                # HEADLESS MODE — now properly bootstrapped
                 logger.info(
-                    f"Agent '{self.name}' → Starting HEADLESS mode with workflow '{workflow_name}'"
+                    f"Agent '{self.name}' → HEADLESS mode | workflow={workflow_name}"
                 )
-
-                if user_prompt and str(user_prompt).strip():
+                if user_prompt:
                     await self.post_message(user_prompt)
-                    logger.debug(
-                        f"[HEADLESS] Seeded initial prompt: {user_prompt[:100]}..."
-                    )
 
                 async for event, payload in self._run_headless_loop(
-                    system_prompt=system_prompt,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    workflow_name=workflow_name,
-                    stop_event=stop_event,
+                    system_prompt, temperature, max_tokens, workflow_name, stop_event
                 ):
                     yield event, payload
 
         finally:
-            self._status = "idle"
-            self.current_task = ""
+            self.state.status = "idle"
             logger.info(f"Agent '{self.name}' run finished")
 
     # ====================== IMPROVED COMPLEX DEPLOYMENT ======================
@@ -995,38 +976,6 @@ class Agent:
             )
 
             sub_agent.context_manager.prune_sub_agent_noise()
-
-    def attach_tools(self, assigned_tools: Optional[List[str]] = None):
-        """Load tools for main agent or sub-agent."""
-        if getattr(self, "sub_agent", False) and assigned_tools:
-            # Sub-agent: only load the explicitly assigned tools
-            valid_tools = [t for t in assigned_tools if t in registry.all_actions]
-            if valid_tools:
-                self.manager.unload_all()  # clear previous
-                self.manager.load_tools(valid_tools)
-                logger.info(
-                    f"[SUB-AGENT] '{self.name}' loaded {len(valid_tools)} valid tools: {valid_tools}"
-                )
-            else:
-                logger.warning(
-                    f"[SUB-AGENT] '{self.name}' – no valid tools in assigned list: {assigned_tools}"
-                )
-                # Minimal safe fallback for sub-agents
-                core = ["FindTool", "GetContext"]
-                self.manager.load_tools([t for t in core if t in registry.all_actions])
-        else:
-            # Main agent: load full tool_sets from config
-            tool_sets = self.config.get("tool_sets", [])
-            if tool_sets:
-                logger.debug(f"Loading tool sets for main agent: {tool_sets}")
-                self.loader.load_tool_sets(sets_to_load=tool_sets)
-
-            # Load everything from registry (safe for main agents)
-            for action_name in list(registry.all_actions.keys()):
-                try:
-                    self.manager.load_tools([action_name])
-                except Exception as e:
-                    logger.warning(f"Failed to load tool '{action_name}': {e}")
 
     def get_sub_tasks(self) -> Dict[str, Dict]:
         now = asyncio.get_event_loop().time()

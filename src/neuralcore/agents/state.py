@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Any, List, Dict, Optional
 import time
+import asyncio
 
 from neuralcore.utils.logger import Logger
 
@@ -9,53 +10,66 @@ logger = Logger.get_logger()
 
 @dataclass
 class AgentState:
-    # ==================== Core ReAct / Execution State ====================
+    # ==================== Core Identity & Goal ====================
+    agent_id: str = ""
+    task: str = ""
+    goal: str = ""
+    current_role: str = "general_assistant"
+    current_task: str = ""
+    current_workflow: str = "default"
+
+    # ==================== Execution State ====================
+    phase: str = "idle"  # idle | planning | execution | reflection | verification | waiting | complete
+    status: str = (
+        "idle"  # idle | thinking | tool_call | waiting_approval | error | paused
+    )
+    is_complete: bool = False
+    goal_achieved: bool = False
+
+    # ==================== ReAct / Tool Execution ====================
     tool_calls: Optional[List[Dict[str, Any]]] = None
     full_reply: str = ""
-    is_complete: bool = False          # Final answer / termination flag
-    phase: Any = None        # "planning", "execution", "verification", "reflection", etc.
-
-    # ==================== Mode ====================
-    mode: str = "task"                 # "task" or "casual"
-
-    # ==================== Tool Execution History ====================
     tool_results: List[Dict[str, Any]] = field(default_factory=list)
+    executed_functions: List[Dict[str, Any]] = field(default_factory=list)
+
+    # ==================== Planning & Orchestration ====================
+    planned_tasks: List[str] = field(default_factory=list)
+    current_task_index: int = 0
+    task_tool_assignments: Dict[int, List[str]] = field(default_factory=dict)
+    task_dependencies: Dict[int, Optional[str]] = field(default_factory=dict)
+
+    # ==================== Sub-agent & Hub Coordination ====================
+    sub_task_ids: List[str] = field(default_factory=list)
+    task_id_map: Dict[int, str] = field(default_factory=dict)
+    sub_agent_results: Dict[str, Any] = field(default_factory=dict)
+    active_sub_agents: List[str] = field(default_factory=list)
+
+    # ==================== Messaging & Inter-agent Communication ====================
+    pending_messages: List[Dict[str, Any]] = field(default_factory=list)
+    message_count: int = 0
+    last_message_time: float = 0.0
 
     # ==================== Human-in-the-Loop ====================
     needs_approval: bool = False
 
-    # ==================== Planning & Orchestration ====================
-    planned_tasks: List[str] = field(default_factory=list)
-    task_tool_assignments: Dict[int, List[str]] = field(default_factory=dict)
-    task_dependencies: Dict[int, Optional[str]] = field(default_factory=dict)
-    current_task_index: int = 0
-
-    # ==================== Sub-agent / Deployment Tracking ====================
-    sub_task_ids: List[str] = field(default_factory=list)
-    task_id_map: Dict[int, str] = field(default_factory=dict)
+    # ==================== History & Debugging ====================
+    iteration_history: List[Dict[str, Any]] = field(default_factory=list)
     complex_reason: str = ""
 
-    # ==================== History & Debugging ====================
-    executed_functions: List[Dict[str, Any]] = field(default_factory=list)
-    iteration_history: List[Dict[str, Any]] = field(default_factory=list)
+    # ==================== Control & Safety ====================
+    last_error: Optional[str] = None
+    error_count: int = 0
 
-    # ==================== Timing ====================
+    # ==================== Timing & Metrics ====================
     start_time: float = field(default_factory=time.time)
-
-    # ==================== Task & Goal Tracking ====================
-    task: str = ""                     # Original user prompt / main task
-    goal: str = ""                     # Refined or clarified goal
     loop_count: int = 0
     total_tool_calls: int = 0
     empty_loops: int = 0
     action_restarts: int = 0
 
-    # Goal achievement (preferred over just is_complete in most workflows)
-    goal_achieved: bool = False
-
     # ==================== Properties ====================
     @property
-    def current_task(self) -> Optional[str]:
+    def current_task_name(self) -> Optional[str]:
         if 0 <= self.current_task_index < len(self.planned_tasks):
             return self.planned_tasks[self.current_task_index]
         return None
@@ -66,48 +80,60 @@ class AgentState:
 
     @property
     def goal_reached(self) -> bool:
-        """Convenient alias used in many workflows"""
         return self.goal_achieved or self.is_complete
 
     @property
     def duration(self) -> float:
-        """How long this agent state has been running (in seconds)"""
         return time.time() - self.start_time
 
-    # ==================== Methods with Logging ====================
-    def reset_for_new_task(self, new_task: str = "", new_goal: str = ""):
-        """Reset state when starting a new complex task or iteration cycle."""
-        logger.info(f"Resetting AgentState for new task. Task: '{new_task[:100]}...'")
+    # ==================== Core Methods ====================
+    def reset_for_new_task(self, new_task: str = "", new_goal: str = "") -> None:
+        """Reset state for a new task or iteration cycle."""
+        logger.info(f"Resetting AgentState for new task: '{new_task[:100]}...'")
 
         self.planned_tasks.clear()
         self.task_tool_assignments.clear()
         self.task_dependencies.clear()
         self.sub_task_ids.clear()
         self.task_id_map.clear()
-        self.phase = None
+        self.sub_agent_results.clear()
+        self.active_sub_agents.clear()
+        self.pending_messages.clear()
+
+        self.phase = "idle"
+        self.status = "idle"
         self.current_task_index = 0
         self.is_complete = False
         self.goal_achieved = False
         self.tool_calls = None
         self.full_reply = ""
         self.tool_results.clear()
-        self.needs_approval = False
         self.executed_functions.clear()
         self.iteration_history.clear()
+
         self.complex_reason = ""
+        self.needs_approval = False
+        self.last_error = None
+        self.error_count = 0
         self.loop_count = 0
+        self.total_tool_calls = 0
         self.empty_loops = 0
         self.action_restarts = 0
-        self.total_tool_calls = 0
+        self.message_count = 0
+        self.last_message_time = 0.0
+
         self.start_time = time.time()
-        self.mode = "task"
 
         self.task = new_task
         self.goal = new_goal or new_task
+        self.current_task = ""
+        self.current_workflow = "default"
 
-        logger.debug(f"AgentState reset complete. Goal set to: '{self.goal[:80]}...'")
+        logger.debug(f"AgentState reset complete. Goal: '{self.goal[:80]}...'")
 
-    def add_tool_result(self, tool_name: str, result: Any, success: bool = True):
+    def add_tool_result(
+        self, tool_name: str, result: Any, success: bool = True
+    ) -> None:
         entry: Dict[str, Any] = {
             "name": tool_name,
             "result": result,
@@ -125,7 +151,7 @@ class AgentState:
 
     def add_executed_function(
         self, function_name: str, args: Optional[Dict[str, Any]] = None
-    ):
+    ) -> None:
         entry: Dict[str, Any] = {
             "name": function_name,
             "args": args or {},
@@ -133,51 +159,63 @@ class AgentState:
         }
         self.executed_functions.append(entry)
 
-        logger.debug(f"Function recorded: {function_name} (args: {bool(args)})")
+        logger.debug(f"Function recorded: {function_name}")
 
-    def increment_loop(self):
+    def increment_loop(self) -> None:
         self.loop_count += 1
-        if self.loop_count % 5 == 0:  # Log every 5 loops to avoid spam
-            logger.info(f"Agent loop count: {self.loop_count} | duration: {self.duration:.1f}s")
+        if self.loop_count % 5 == 0:
+            logger.info(
+                f"Agent loop count: {self.loop_count} | duration: {self.duration:.1f}s"
+            )
 
-    def increment_tool_call(self):
+    def increment_tool_call(self) -> None:
         self.total_tool_calls += 1
         logger.debug(f"Total tool calls: {self.total_tool_calls}")
 
-    def increment_empty_loop(self):
+    def increment_empty_loop(self) -> None:
         self.empty_loops += 1
         if self.empty_loops >= 3:
-            logger.warning(f"Empty loop detected ({self.empty_loops} times). Possible stall.")
+            logger.warning(
+                f"Empty loop detected ({self.empty_loops} times). Possible stall."
+            )
 
-    def increment_action_restart(self):
+    def increment_action_restart(self) -> None:
         self.action_restarts += 1
-        logger.warning(f"Action restart triggered. Total restarts: {self.action_restarts}")
+        logger.warning(
+            f"Action restart triggered. Total restarts: {self.action_restarts}"
+        )
 
-    def mark_goal_achieved(self, reason: str = ""):
-        """Explicitly mark that the main goal has been reached."""
+    def mark_goal_achieved(self, reason: str = "") -> None:
         self.goal_achieved = True
         self.is_complete = True
         msg = f"Goal achieved: {reason}" if reason else "Goal achieved."
         logger.info(f"✅ {msg}")
 
+    def record_error(self, error_msg: str) -> None:
+        self.last_error = error_msg
+        self.error_count += 1
+        self.status = "error"
+        logger.error(f"Agent error recorded: {error_msg}")
+
+    def add_message(self, message: Dict[str, Any]) -> None:
+        self.pending_messages.append(message)
+        self.message_count += 1
+        self.last_message_time = time.time()
+
     def get_objective_reminder(self) -> str:
-        """Generate a rich, context-aware objective reminder based on current state."""
         parts = []
 
-        # Core goal
         goal_text = self.goal or self.task or "No goal set"
         parts.append(f"Current goal: {goal_text}")
 
-        # Progress information (multi-step aware)
         if self.planned_tasks:
             total = len(self.planned_tasks)
             current = self.current_task_index + 1
             if total > 1:
                 parts.append(f"Progress: Sub-task {current}/{total}")
-                if self.current_task:
-                    parts.append(f"Current sub-task: {self.current_task[:120]}...")
+                if self.current_task_name:
+                    parts.append(f"Current sub-task: {self.current_task_name[:120]}...")
 
-        # Tool & execution status
         if self.tool_results:
             parts.append(f"Tool results available: {len(self.tool_results)}")
 
@@ -187,26 +225,23 @@ class AgentState:
         if self.action_restarts > 0:
             parts.append(f"Action restarts: {self.action_restarts}")
 
-        # Mode & phase
         if self.phase:
             parts.append(f"Current phase: {self.phase}")
 
-        if self.mode == "casual":
-            parts.append("Mode: Casual conversation - be natural and friendly")
+        if self.status != "idle":
+            parts.append(f"Status: {self.status}")
 
-        # Timing / health
         if self.duration > 60:
             parts.append(f"Running for {self.duration:.0f}s")
 
-        # Instructions for tool usage
         reminder = "\n".join(parts)
 
         return f"""OBJECTIVE REMINDER:
-        {reminder}
+{reminder}
 
-        CRITICAL INSTRUCTIONS:
-        - Stay focused on the current goal and sub-task.
-        - If the required tool for the current action is missing or not available, FIRST use the FindTool tool to discover and load it.
-        - Only after the needed tool has been successfully loaded via FindTool should you call the actual tool.
-        - When a sub-task is complete, output exactly: [FINAL_ANSWER_COMPLETE]
-        - Use only verified information from state.tool_results when summarizing."""
+CRITICAL INSTRUCTIONS:
+- Stay focused on the current goal and sub-task.
+- If the required tool for the current action is missing, FIRST use the FindTool tool to discover and load it.
+- Only after the needed tool has been successfully loaded via FindTool should you call the actual tool.
+- When a sub-task is complete, output exactly: [FINAL_ANSWER_COMPLETE]
+- Use only verified information from tool_results when summarizing."""
