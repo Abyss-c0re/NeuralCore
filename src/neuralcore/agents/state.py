@@ -237,11 +237,29 @@ class AgentState:
         reminder = "\n".join(parts)
 
         return f"""OBJECTIVE REMINDER:
-{reminder}
+        {reminder}
 
-CRITICAL INSTRUCTIONS:
-- Stay focused on the current goal and sub-task.
-- If the required tool for the current action is missing, FIRST use the FindTool tool to discover and load it.
-- Only after the needed tool has been successfully loaded via FindTool should you call the actual tool.
-- When a sub-task is complete, output exactly: [FINAL_ANSWER_COMPLETE]
-- Use only verified information from tool_results when summarizing."""
+        CRITICAL INSTRUCTIONS:
+        - Stay focused on the current goal and sub-task.
+        - If the required tool for the current action is missing, FIRST use the FindTool tool to discover and load it.
+        - Only after the needed tool has been successfully loaded via FindTool should you call the actual tool.
+        - When a sub-task is complete, output exactly: [FINAL_ANSWER_COMPLETE]
+        - Use only verified information from tool_results when summarizing."""
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Generic, serializable snapshot — safe for any transport layer."""
+        exclude = {"message_queue", "_input_event", "_stop_event", "_background_task"}  # non-serializable
+        data = {
+            k: v
+            for k, v in self.__dict__.items()
+            if not k.startswith("_") and k not in exclude
+        }
+        # Convert complex objects
+        if self.tool_calls is not None:
+            data["tool_calls"] = self.tool_calls
+        data["tool_results"] = self.tool_results
+        data["executed_functions"] = self.executed_functions
+        data["iteration_history"] = self.iteration_history[-10:]  # limit size
+        data["pending_messages"] = self.pending_messages[-20:]
+        data["duration"] = round(self.duration, 2)
+        return data
