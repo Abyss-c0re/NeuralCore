@@ -20,6 +20,7 @@ dependencies = [
     "rapidfuzz>=3.14.3",
     "scikit-learn>=1.8.0",
     "tokenizers>=0.22.2",
+    "websockets>=16.0",
 ]
 
 # Optional dev dependencies
