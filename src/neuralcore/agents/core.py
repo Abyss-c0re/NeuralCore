@@ -456,16 +456,16 @@ class Agent:
             )
 
             status_prompt = f"""Agent: {self.name} (ID: {self.agent_id})
-Role: {self.state.current_role}
-Current Task: {self.state.current_task or "Idle"}
-Status: {self.state.status}
-Phase: {self.state.phase}
-Duration: {self.state.duration:.1f}s
-Sub-tasks: {len(self.sub_tasks)}
+            Role: {self.state.current_role}
+            Current Task: {self.state.current_task or "Idle"}
+            Status: {self.state.status}
+            Phase: {self.state.phase}
+            Duration: {self.state.duration:.1f}s
+            Sub-tasks: {len(self.sub_tasks)}
 
-Context: {context_summary}
+            Context: {context_summary}
 
-Provide a clear 4-7 sentence status report."""
+            Provide a clear 4-7 sentence status report."""
 
             summary = await self.client.chat(
                 [{"role": "user", "content": status_prompt}],
