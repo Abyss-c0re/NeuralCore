@@ -217,7 +217,7 @@ class Action:
                     try:
                         self._bound_agent.state.add_tool_result(
                             tool_name=self.name,
-                            result=final_result,
+                            result=result_preview,
                             success=success,
                         )
                     except Exception as e:
