@@ -320,10 +320,8 @@ class Agent:
         self.state.status = value
 
     def get_full_state_dict(self) -> Dict[str, Any]:
-        """Public, generic snapshot of the entire agent for any transport layer.
-        Used by WebSocketBridge
-        """
-        return {
+        """Public, generic snapshot of the entire agent for any transport layer."""
+        base = {
             "agent_id": self.agent_id,
             "name": self.name,
             "state": self.state.to_dict(),
@@ -336,20 +334,38 @@ class Agent:
             "timestamp": time.time(),
         }
 
+        # Extra top-level waiting info for quick access
+        base["waiting"] = getattr(self.state, "waiting", False)
+        base["wait_type"] = getattr(self.state, "wait_type", None)
+        base["wait_prompt"] = getattr(self.state, "wait_prompt", "")
+
+        return base
+
     def get_detailed_status(self) -> Dict[str, Any]:
-        """Lightweight version for heartbeats / dashboards."""
+        """Lightweight version for heartbeats / dashboards / NeuralHub."""
+
+        # Safe wait elapsed calculation
+        wait_elapsed: Optional[float] = None
+        wait_start = getattr(self.state, "wait_start_time", None)
+        if wait_start is not None:
+            wait_elapsed = round(time.time() - wait_start, 1)
+
         return {
             "agent_id": self.agent_id,
             "name": self.name,
             "status": self.state.status,
             "phase": self.state.phase,
-            "current_task": self.state.current_task_name,
+            "current_task": self.state.current_task,
             "goal": self.state.goal,
             "duration": round(self.state.duration, 1),
             "loop_count": self.state.loop_count,
             "total_tool_calls": self.state.total_tool_calls,
             "error_count": self.state.error_count,
             "sub_tasks_count": len(self.sub_tasks),
+            # Waiting state
+            "waiting": getattr(self.state, "waiting", False),
+            "wait_type": getattr(self.state, "wait_type", None),
+            "wait_elapsed": wait_elapsed,  # ← now type-safe
             "timestamp": time.time(),
         }
 
@@ -489,6 +505,13 @@ class Agent:
                 max_messages=8, max_chars=1200
             )
 
+            # Safe wait elapsed calculation
+            wait_elapsed: Optional[float] = None
+            wait_start = getattr(self.state, "wait_start_time", None)
+            if wait_start is not None:
+                wait_elapsed = round(time.time() - wait_start, 1)
+
+            # Rich status prompt for LLM
             status_prompt = f"""Agent: {self.name} (ID: {self.agent_id})
             Role: {self.state.current_role}
             Current Task: {self.state.current_task or "Idle"}
@@ -496,6 +519,13 @@ class Agent:
             Phase: {self.state.phase}
             Duration: {self.state.duration:.1f}s
             Sub-tasks: {len(self.sub_tasks)}
+
+            Waiting: {
+                "YES (" + str(getattr(self.state, "wait_type", "unknown")) + ")"
+                if getattr(self.state, "waiting", False)
+                else "No"
+            }
+            Wait Prompt: {getattr(self.state, "wait_prompt", "")[:150] or "None"}
 
             Context: {context_summary}
 
@@ -516,6 +546,14 @@ class Agent:
                 "status": self.state.status,
                 "phase": self.state.phase,
                 "duration": round(self.state.duration, 1),
+                # === Waiting State - fully exposed for NeuralHub / VR / dashboards ===
+                "waiting": getattr(self.state, "waiting", False),
+                "wait_type": getattr(self.state, "wait_type", None),
+                "wait_prompt": getattr(self.state, "wait_prompt", ""),
+                "wait_target": getattr(self.state, "wait_target", None),
+                "wait_timeout": getattr(self.state, "wait_timeout", None),
+                "wait_completed": getattr(self.state, "wait_completed", False),
+                "wait_elapsed": wait_elapsed,  # ← fixed here
                 "background_running": bool(
                     self._background_task and not self._background_task.done()
                 ),
@@ -526,6 +564,7 @@ class Agent:
                 "llm_summary": summary.strip(),
                 "timestamp": time.time(),
             }
+
         except Exception as e:
             logger.warning(f"get_agent_status failed: {e}")
             return {
@@ -533,6 +572,7 @@ class Agent:
                 "name": self.name,
                 "status": self.state.status,
                 "error": str(e),
+                "timestamp": time.time(),
             }
 
     async def run_background(

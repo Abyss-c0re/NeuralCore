@@ -745,6 +745,243 @@ class WorkflowEngine:
 
         yield ("loop_completed", {"loop_name": loop_name})
 
+    async def _step_wait(
+        self, iteration: int, state: AgentState, **kwargs
+    ) -> AsyncIterator[Tuple[str, Any]]:
+        """
+        Universal wait step — fully integrated with AgentState.
+        Supports: time | human | subtask | agent | condition
+        Works between any workflow steps and inside execute_loop.
+        """
+        config = kwargs.get("step_config", {}) or {}
+
+        wait_type = config.get("wait_type", "time").lower()
+        timeout = config.get("timeout", 600.0)
+        prompt = config.get("prompt", f"Waiting... (type: {wait_type})")
+
+        # Common params
+        seconds = config.get("seconds", 5.0)
+        task_id = config.get("task_id") or config.get("subtask_id")
+        agent_ids = config.get("agent_ids") or config.get("agent_id")
+        if isinstance(agent_ids, str):
+            agent_ids = [agent_ids]
+        condition_name = config.get("condition")
+
+        # === Initialize waiting state (centralized in AgentState) ===
+        state.start_wait(
+            wait_type=wait_type,
+            prompt=prompt,
+            target=task_id or (",".join(agent_ids) if agent_ids else None),
+            timeout=timeout,
+        )
+
+        yield (
+            "wait_started",
+            {
+                "type": wait_type,
+                "prompt": prompt,
+                "timeout": timeout,
+                "iteration": iteration,
+                "task_id": task_id,
+                "agent_ids": agent_ids,
+                "wait_start_time": state.wait_start_time,
+            },
+        )
+
+        await self.agent.post_control(
+            {
+                "event": f"waiting_for_{wait_type}",
+                "prompt": prompt,
+                "timeout": timeout,
+                "details": config,
+            }
+        )
+
+        start_time = asyncio.get_event_loop().time()
+
+        while state.waiting:
+            # Global timeout guard
+            if state.wait_timeout and (
+                asyncio.get_event_loop().time() - start_time > state.wait_timeout
+            ):
+                yield "wait_timeout", {"type": wait_type, "config": config}
+                await self.agent.post_control(
+                    {"event": "wait_timeout", "type": wait_type}
+                )
+                state.complete_wait("timeout")
+                return
+
+            # === TIME ===
+            if wait_type == "time":
+                remaining = max(
+                    0.0, seconds - (asyncio.get_event_loop().time() - start_time)
+                )
+                if remaining <= 0:
+                    state.complete_wait("time_elapsed")
+                    yield "wait_completed", {"type": "time", "seconds": seconds}
+                    return
+                yield (
+                    "wait_progress",
+                    {"type": "time", "remaining": round(remaining, 1)},
+                )
+                await asyncio.sleep(min(0.5, remaining))
+                continue
+
+            # === HUMAN ===
+            elif wait_type == "human":
+                try:
+                    msg = await asyncio.wait_for(
+                        self.agent.message_queue.get(), timeout=0.5
+                    )
+                    self.agent.message_queue.task_done()
+
+                    if isinstance(msg, dict):
+                        ev = msg.get("event") or msg.get("action") or ""
+                        content = msg.get("content") or str(msg)
+                        if ev in (
+                            "confirm",
+                            "approved",
+                            "yes",
+                            "proceed",
+                            "continue",
+                            "input",
+                        ):
+                            state.complete_wait("human_confirmed")
+                            yield "wait_completed", {"type": "human", "input": content}
+                            await self.agent.post_system_message(
+                                f"✅ Human confirmation received: {content[:300]}"
+                            )
+                            return
+                        if ev in ("cancel", "reject", "no"):
+                            state.complete_wait("human_rejected")
+                            yield (
+                                "wait_cancelled",
+                                {"type": "human", "reason": "rejected"},
+                            )
+                            return
+                except asyncio.TimeoutError:
+                    pass
+                await asyncio.sleep(0.1)
+                continue
+
+            # === SUBTASK ===
+            elif wait_type in ("subtask", "sub_task", "sub"):
+                tasks = self.agent.get_sub_tasks()
+                if not tasks:
+                    state.complete_wait("no_subtasks")
+                    yield "wait_completed", {"type": "subtask", "reason": "no_subtasks"}
+                    return
+
+                if task_id:
+                    status = tasks.get(task_id, {}).get("status", "unknown")
+                    if status in ("completed", "failed", "cancelled"):
+                        state.complete_wait(f"subtask_{status}")
+                        yield (
+                            "wait_completed",
+                            {"type": "subtask", "task_id": task_id, "status": status},
+                        )
+                        return
+                else:
+                    # wait for all
+                    if all(
+                        t.get("status") in ("completed", "failed", "cancelled")
+                        for t in tasks.values()
+                    ):
+                        state.complete_wait("all_subtasks_completed")
+                        yield (
+                            "wait_completed",
+                            {"type": "subtask", "reason": "all_completed"},
+                        )
+                        return
+
+                yield (
+                    "wait_progress",
+                    {"type": "subtask", "task_id": task_id, "active": len(tasks)},
+                )
+                await asyncio.sleep(1.0)
+                continue
+
+            # === OTHER AGENT ===
+            elif wait_type in ("agent", "other_agent"):
+                if not agent_ids:
+                    yield "wait_error", "No agent_ids provided"
+                    state.complete_wait("error_no_agent_ids")
+                    return
+
+                all_satisfied = True
+                current_states = {}
+
+                for aid in agent_ids:
+                    # Fast path: own sub-task
+                    if aid in self.agent.sub_tasks:
+                        status = self.agent.sub_tasks[aid].get("status", "unknown")
+                    else:
+                        # Generic external agent lookup (kept abstract for NeuralCore)
+                        status = "unknown"
+                        try:
+                            if hasattr(self.agent, "hub") and hasattr(
+                                self.agent.hub, "get_agent_status"
+                            ):
+                                ext = await self.agent.hub.get_agent_status(aid)
+                                status = ext.get("status", "unknown")
+                            elif hasattr(self.agent.loader, "get_agent_status"):
+                                ext = await self.agent.loader.get_agent_status(aid)
+                                status = ext.get("status", "unknown")
+                        except Exception as e:
+                            logger.debug(f"Agent {aid} status query failed: {e}")
+
+                    current_states[aid] = status
+                    if status not in ("completed", "failed", "cancelled", "idle"):
+                        all_satisfied = False
+                        break
+
+                if all_satisfied:
+                    state.complete_wait("agents_ready")
+                    yield (
+                        "wait_completed",
+                        {
+                            "type": "agent",
+                            "agent_ids": agent_ids,
+                            "states": current_states,
+                        },
+                    )
+                    await self.agent.post_system_message(
+                        f"✅ All waited agents ready: {agent_ids}"
+                    )
+                    return
+
+                yield (
+                    "wait_progress",
+                    {"type": "agent", "agent_ids": agent_ids, "states": current_states},
+                )
+                await asyncio.sleep(1.5)
+                continue
+
+            # === CONDITION ===
+            elif wait_type == "condition" and condition_name:
+                if self.evaluate_named_condition(condition_name, state):
+                    state.complete_wait(f"condition_{condition_name}")
+                    yield (
+                        "wait_completed",
+                        {"type": "condition", "condition": condition_name},
+                    )
+                    return
+                yield (
+                    "wait_progress",
+                    {"type": "condition", "condition": condition_name},
+                )
+                await asyncio.sleep(0.5)
+                continue
+
+            # Fallback
+            else:
+                await asyncio.sleep(1.0)
+
+        # Safety exit
+        if not state.wait_completed:
+            state.complete_wait("fallback")
+        yield "wait_completed", {"type": wait_type, "reason": "step_end"}
+
     async def _run_step_handler(
         self,
         handler: Callable,

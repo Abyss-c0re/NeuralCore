@@ -1,6 +1,6 @@
 from functools import wraps
 from typing import Any, Callable, Dict, List, Optional, Union
-from inspect import signature, iscoroutinefunction  # ← restored exact original imports
+from inspect import signature, iscoroutinefunction
 
 from neuralcore.workflows.engine import WorkflowEngine
 from neuralcore.utils.logger import Logger
@@ -10,8 +10,8 @@ logger = Logger.get_logger()
 
 class Workflow:
     """
-    Unified Workflow Registry with Steps, Loops, and Conditions.
-    100% backward compatible with original @workflow.set agent binding.
+    Unified Workflow Registry with Steps, Loops, Conditions, and Universal Waits.
+    100% backward compatible.
     """
 
     def __init__(self):
@@ -19,18 +19,17 @@ class Workflow:
         self.workflows: Dict[str, Dict[str, Any]] = {}
         self.metadata: Dict[str, Dict[str, Any]] = {}
 
-        # Merged Loops + Conditions
         self.loops: Dict[str, Dict[str, Any]] = {}
         self.conditions: Dict[str, Callable] = {}
 
-        logger.debug("Workflow registry initialized (steps + loops + conditions)")
+        logger.debug(
+            "Workflow registry initialized (steps + loops + conditions + waits)"
+        )
 
     # ===================================================================
     # CONDITIONS
     # ===================================================================
     def condition(self, name: str, description: str = ""):
-        """Decorator: @workflow.condition('name')"""
-
         def decorator(fn: Callable):
             self.conditions[name] = fn
             logger.info(
@@ -43,7 +42,6 @@ class Workflow:
     def evaluate_condition(
         self, condition_name: str, state: Any, args: Optional[dict] = None
     ) -> bool:
-        """Evaluate condition registered with @workflow.condition"""
         if condition_name not in self.conditions:
             logger.warning(f"Condition '{condition_name}' not found.")
             return False
@@ -59,12 +57,66 @@ class Workflow:
                 return bool(handler(state))
             else:
                 return bool(handler(state, args))
-
         except Exception as e:
             logger.error(
                 f"Error evaluating condition '{condition_name}': {e}", exc_info=True
             )
             return False
+
+    # ===================================================================
+    # UNIVERSAL WAIT (clean + mypy-safe)
+    # ===================================================================
+    def wait(
+        self,
+        name: Optional[str] = None,
+        *,
+        wait_type: str = "time",
+        description: Optional[str] = None,
+        default_seconds: Optional[float] = 5.0,
+        default_timeout: Optional[float] = 600.0,
+        **default_config,
+    ):
+        """Decorator for reusable wait points."""
+
+        def decorator(fn: Optional[Callable] = None):
+            step_name = name or (fn.__name__ if fn else f"wait_{wait_type}")
+
+            if fn is not None:
+                self.handlers[step_name] = fn
+                uses_universal = False
+                logger.info(f"✅ Custom wait handler registered: '{step_name}'")
+            else:
+                # Dummy callable - will be replaced in bind_to_engine
+                self.handlers[step_name] = lambda *args, **kwargs: None
+                uses_universal = True
+
+            if "wait" not in self.workflows:
+                self.workflows["wait"] = {
+                    "description": "Internal universal wait primitives",
+                    "steps": [],
+                }
+
+            self.metadata[step_name] = {
+                "type": "wait",
+                "wait_type": wait_type,
+                "description": description or f"Universal wait ({wait_type})",
+                "default_config": {
+                    "wait_type": wait_type,
+                    "seconds": default_seconds,
+                    "timeout": default_timeout,
+                    **default_config,
+                },
+                "requires_agent": True,
+                "uses_universal_wait": uses_universal,
+            }
+
+            logger.info(
+                f"✅ Wait primitive '{step_name}' registered "
+                f"(type={wait_type}, default_timeout={default_timeout}s)"
+            )
+            return fn
+
+        return decorator
 
     # ===================================================================
     # LOOPS
@@ -88,7 +140,6 @@ class Workflow:
                 "description": description or fn.__doc__ or f"Loop: {loop_name}",
             }
 
-            # Register as hidden step
             step_name = f"_loop_{loop_name}"
             self.handlers[step_name] = fn
 
@@ -101,7 +152,7 @@ class Workflow:
         return decorator
 
     # ===================================================================
-    # STEPS — ORIGINAL AGENT BINDING LOGIC (100% unchanged)
+    # STEPS (unchanged)
     # ===================================================================
     def step(
         self,
@@ -131,13 +182,12 @@ class Workflow:
             norm_tools = self._normalize_list(tools)
             norm_hidden = self._normalize_list(hidden_toolsets)
 
-            # ====================== ORIGINAL AGENT BINDING LOGIC ======================
-            sig = signature(fn)  # ← now correctly imported
+            sig = signature(fn)
             param_list = list(sig.parameters.items())
             skip_first = bool(param_list and param_list[0][0] in ("agent", "self"))
 
             if skip_first:
-                if iscoroutinefunction(fn):  # ← now correctly imported
+                if iscoroutinefunction(fn):
 
                     @wraps(fn)
                     async def async_step_wrapper(*args, **kwargs):
@@ -145,17 +195,13 @@ class Workflow:
                             hasattr(args[0], "agent_id") or args[0] is not None
                         ):
                             return await fn(*args, **kwargs)
-
-                        agent = getattr(self, "_current_agent", None)
-                        if agent is None:
-                            agent = kwargs.pop("agent", None)
-
+                        agent = getattr(self, "_current_agent", None) or kwargs.pop(
+                            "agent", None
+                        )
                         if agent is None:
                             raise RuntimeError(
-                                f"Step '{step_name}' expects 'agent' as first parameter "
-                                f"but no agent instance was provided or bound."
+                                f"Step '{step_name}' expects 'agent' as first parameter"
                             )
-
                         return await fn(agent, *args, **kwargs)
 
                     executor = async_step_wrapper
@@ -167,24 +213,19 @@ class Workflow:
                             hasattr(args[0], "agent_id") or args[0] is not None
                         ):
                             return fn(*args, **kwargs)
-
-                        agent = getattr(self, "_current_agent", None)
-                        if agent is None:
-                            agent = kwargs.pop("agent", None)
-
+                        agent = getattr(self, "_current_agent", None) or kwargs.pop(
+                            "agent", None
+                        )
                         if agent is None:
                             raise RuntimeError(
-                                f"Step '{step_name}' expects 'agent' as first parameter "
-                                f"but no agent instance was provided or bound."
+                                f"Step '{step_name}' expects 'agent' as first parameter"
                             )
-
                         return fn(agent, *args, **kwargs)
 
                     executor = sync_step_wrapper
             else:
                 executor = fn
 
-            # Register
             self.handlers[step_name] = executor
 
             if workflow_name not in self.workflows:
@@ -229,16 +270,33 @@ class Workflow:
         return []
 
     # ===================================================================
-    # Engine binding + helpers (unchanged)
+    # BIND TO ENGINE
     # ===================================================================
     def bind_to_engine(self, engine: "WorkflowEngine", instance=None):
-        for step_name, handler in self.handlers.items():
-            bound_handler = handler
-            if instance is not None:
-                bound_handler = handler.__get__(instance, instance.__class__)
+        """Bind everything to the engine. Universal waits are specially handled."""
+        for step_name, handler in list(self.handlers.items()):
+            meta = self.metadata.get(step_name, {})
+
+            if meta.get("type") == "wait" and meta.get("uses_universal_wait", False):
+                # Route to universal wait implementation
+                if hasattr(engine, "_step_wait"):
+                    bound_handler = engine._step_wait
+                    logger.info(
+                        f"🔗 Bound universal wait '{step_name}' (type={meta.get('wait_type')})"
+                    )
+                else:
+                    logger.warning(f"Engine missing _step_wait for '{step_name}'")
+                    bound_handler = handler
+            else:
+                # Normal step or custom handler
+                bound_handler = handler
+                if instance is not None:
+                    bound_handler = handler.__get__(instance, instance.__class__)
+
             engine.register_step(step_name, bound_handler)
             logger.info(f"🔗 Bound step '{step_name}' to engine")
 
+        # Register workflows
         registered_count = 0
         for wf_name, wf_meta in self.workflows.items():
             if wf_name not in engine.registered_workflows:
@@ -251,6 +309,8 @@ class Workflow:
 
         if registered_count > 0:
             logger.info(f"✅ Synced {registered_count} workflows from decorators")
+
+        # Bind conditions
         for cond_name, handler in self.conditions.items():
             engine.register_custom_condition(
                 name=cond_name,
@@ -270,15 +330,20 @@ class Workflow:
 
     def debug_print(self):
         print("\n" + "=" * 120)
-        print("📋 WORKFLOW REGISTRY — Steps | Loops | Conditions")
+        print("📋 WORKFLOW REGISTRY — Steps | Loops | Conditions | Waits")
         print("=" * 120)
-        # ... (same debug output as before)
+
         for wf_name, wf_meta in self.workflows.items():
             print(f"\n🔹 Workflow: {wf_name} ({len(wf_meta['steps'])} steps)")
             for step in wf_meta["steps"]:
                 meta = self.metadata.get(step, {})
+                wait_info = (
+                    f" [wait:{meta.get('wait_type')}]"
+                    if meta.get("type") == "wait"
+                    else ""
+                )
                 print(
-                    f"   • {step:35} toolsets={meta.get('toolsets') or '-':20} hidden={meta.get('hidden_toolsets') or '-':15}"
+                    f"   • {step:35} toolsets={meta.get('toolsets') or '-':20} hidden={meta.get('hidden_toolsets') or '-':15}{wait_info}"
                 )
 
         print(f"\n🔄 Loops ({len(self.loops)}):")
@@ -290,12 +355,13 @@ class Workflow:
         for name in sorted(self.conditions.keys()):
             print(f"   • {name}")
 
+        wait_count = sum(1 for m in self.metadata.values() if m.get("type") == "wait")
         print(
             f"\nTotal: {len(self.workflows)} workflows | {len(self.metadata)} steps | "
-            f"{len(self.loops)} loops | {len(self.conditions)} conditions"
+            f"{len(self.loops)} loops | {len(self.conditions)} conditions | {wait_count} waits"
         )
         print("=" * 120)
 
 
-# Global singleton (replaces both old workflow and condition)
+# Global singleton
 workflow = Workflow()

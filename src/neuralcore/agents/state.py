@@ -49,8 +49,19 @@ class AgentState:
     message_count: int = 0
     last_message_time: float = 0.0
 
+    # ==================== Waiting & Pausing ====================
+    waiting: bool = False
+    wait_type: Optional[str] = None  # time | human | subtask | agent | condition
+    wait_start_time: Optional[float] = None
+    wait_target: Optional[str] = None  # task_id, agent_id(s), condition name, etc.
+    wait_prompt: str = ""
+    wait_timeout: Optional[float] = None
+    wait_completed: bool = False
+    last_wait_event: Optional[Dict[str, Any]] = None
+
     # ==================== Human-in-the-Loop ====================
     needs_approval: bool = False
+    pending_approval_prompt: str = ""
 
     # ==================== History & Debugging ====================
     iteration_history: List[Dict[str, Any]] = field(default_factory=list)
@@ -86,6 +97,13 @@ class AgentState:
     def duration(self) -> float:
         return time.time() - self.start_time
 
+    @property
+    def wait_elapsed(self) -> Optional[float]:
+        """Safe elapsed seconds since wait started."""
+        if self.wait_start_time is None:
+            return None
+        return round(time.time() - self.wait_start_time, 1)
+
     # ==================== Core Methods ====================
     def reset_for_new_task(self, new_task: str = "", new_goal: str = "") -> None:
         """Reset state for a new task or iteration cycle."""
@@ -112,7 +130,17 @@ class AgentState:
         self.iteration_history.clear()
 
         self.complex_reason = ""
+        self.waiting = False
+        self.wait_type = None
+        self.wait_start_time = None
+        self.wait_target = None
+        self.wait_prompt = ""
+        self.wait_timeout = None
+        self.wait_completed = False
+        self.last_wait_event = None
+
         self.needs_approval = False
+        self.pending_approval_prompt = ""
         self.last_error = None
         self.error_count = 0
         self.loop_count = 0
@@ -202,6 +230,37 @@ class AgentState:
         self.message_count += 1
         self.last_message_time = time.time()
 
+    def start_wait(
+        self,
+        wait_type: str,
+        prompt: str = "",
+        target: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> None:
+        self.waiting = True
+        self.wait_type = wait_type
+        self.wait_prompt = prompt
+        self.wait_target = target
+        self.wait_timeout = timeout
+        self.wait_start_time = time.time()
+        self.wait_completed = False
+        self.last_wait_event = None
+        self.status = "waiting"
+
+        logger.info(
+            f"Agent entered waiting state: {wait_type} | prompt={prompt[:100]}..."
+        )
+
+    def complete_wait(self, reason: str = "") -> None:
+        self.waiting = False
+        self.wait_completed = True
+        self.status = "idle"
+        if self.wait_start_time:
+            duration = time.time() - self.wait_start_time
+            logger.info(
+                f"Wait completed ({self.wait_type}) after {duration:.1f}s | reason={reason}"
+            )
+
     def get_objective_reminder(self) -> str:
         parts = []
 
@@ -247,19 +306,66 @@ class AgentState:
         - Use only verified information from tool_results when summarizing."""
 
     def to_dict(self) -> Dict[str, Any]:
-        """Generic, serializable snapshot — safe for any transport layer."""
-        exclude = {"message_queue", "_input_event", "_stop_event", "_background_task"}  # non-serializable
-        data = {
+        """Generic, serializable snapshot — safe for any transport layer (NeuralHub, WebSocket, VR, etc.)."""
+        # Base exclusion list
+        exclude = {
+            "message_queue",
+            "_input_event",
+            "_stop_event",
+            "_background_task",
+            "_task_contexts",  # if you have any internal private dicts
+        }
+
+        # Core data from __dict__
+        data: Dict[str, Any] = {
             k: v
             for k, v in self.__dict__.items()
             if not k.startswith("_") and k not in exclude
         }
-        # Convert complex objects
+
+        # Explicit handling of complex / list fields (limit size where needed)
+        data["tool_results"] = self.tool_results[-20:]  # keep recent only
+        data["executed_functions"] = self.executed_functions[-15:]
+        data["iteration_history"] = self.iteration_history[-10:]
+        data["pending_messages"] = self.pending_messages[-20:]
+
+        # Waiting state - explicitly included and cleaned
+        data["waiting"] = getattr(self, "waiting", False)
+        data["wait_type"] = getattr(self, "wait_type", None)
+        data["wait_prompt"] = getattr(self, "wait_prompt", "")
+        data["wait_target"] = getattr(self, "wait_target", None)
+        data["wait_timeout"] = getattr(self, "wait_timeout", None)
+        data["wait_completed"] = getattr(self, "wait_completed", False)
+        data["wait_start_time"] = getattr(self, "wait_start_time", None)
+        data["last_wait_event"] = getattr(self, "last_wait_event", None)
+
+        # Human-in-the-loop
+        data["needs_approval"] = getattr(self, "needs_approval", False)
+        data["pending_approval_prompt"] = getattr(self, "pending_approval_prompt", "")
+
+        # Ensure tool_calls is always present and serializable
         if self.tool_calls is not None:
             data["tool_calls"] = self.tool_calls
-        data["tool_results"] = self.tool_results
-        data["executed_functions"] = self.executed_functions
-        data["iteration_history"] = self.iteration_history[-10:]  # limit size
-        data["pending_messages"] = self.pending_messages[-20:]
+        else:
+            data["tool_calls"] = []
+
+        # Computed fields
         data["duration"] = round(self.duration, 2)
+        data["current_task_name"] = self.current_task_name
+        data["has_sub_tasks"] = self.has_sub_tasks
+        data["goal_reached"] = self.goal_reached
+
+        # Optional: add a clean wait summary for external consumers
+        if data["waiting"]:
+            data["wait_summary"] = {
+                "type": data["wait_type"],
+                "prompt": data["wait_prompt"][:200] + "..."
+                if len(data["wait_prompt"]) > 200
+                else data["wait_prompt"],
+                "elapsed": round(
+                    time.time() - (data["wait_start_time"] or time.time()), 1
+                ),
+                "target": data["wait_target"],
+            }
+
         return data
