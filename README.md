@@ -46,7 +46,7 @@ This separation delivers clean architecture, improved safety, and the flexibilit
 ### Neuroscience-Inspired Self-Audit of NeuralCore Memory System (2026-04-13)
 
 **Experiment Overview**  
-A NeuralCore-based agent performed a large-scale comparative RAG analysis between its own memory subsystem implementation (**~1500 lines of code** in `src/neuralcore/cognition/memory.py`) and **830 pages** of the canonical textbook *Neuroscience, Third Edition* (Purves et al., 2004).
+A NeuralCore-based agent performed a large-scale comparative RAG analysis between its own memory subsystem implementation (**~1675 lines of code** in `src/neuralcore/cognition/memory.py`) and **830 pages** of the canonical textbook *Neuroscience, Third Edition* (Purves et al., 2004).
 
 The analysis was executed via **Terminal Chat Agent (`agent_002`)** in natural conversation mode through the UI. The agent leveraged a dual-client setup:
 
