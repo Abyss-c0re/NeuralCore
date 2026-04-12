@@ -209,10 +209,6 @@ class Action:
                             },
                         )
                         recorded = True
-                        logger.info(
-                            f"✅ Recorded full tool outcome: {self.name} "
-                            f"({len(final_result):,} chars)"
-                        )
                     except Exception as e:
                         logger.warning(f"[RECORD TOOL OUTCOME FAILED] {self.name}: {e}")
 

@@ -1161,10 +1161,12 @@ class ContextManager:
 
         # ====================== GOAL & STATE AWARENESS ======================
         if state is not None:
-            logger.debug("Adding centralized objective reminder from _build_objective_reminder")
+            logger.debug(
+                "Adding centralized objective reminder from _build_objective_reminder"
+            )
 
             # Choose the right reminder based on mode
-            if chat or state.mode == "casual":
+            if chat:
                 objective_text = f"Current goal: {state.goal or state.task or 'None'}"
             else:
                 # Task / agentic mode → rich reminder with FindTool rule
@@ -1177,7 +1179,9 @@ class ContextManager:
                 }
             )
             tokens_used = self.count_tokens(messages)
-            logger.debug(f"Added AgentState objective block → tokens_used = {tokens_used}")
+            logger.debug(
+                f"Added AgentState objective block → tokens_used = {tokens_used}"
+            )
         # ====================== TOKEN BUDGETING ======================
         query_tokens = (
             self.count_tokens([{"role": "user", "content": query}])
