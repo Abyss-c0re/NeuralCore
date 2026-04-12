@@ -1,7 +1,6 @@
 from dataclasses import dataclass, field
 from typing import Any, List, Dict, Optional
 import time
-import asyncio
 
 from neuralcore.utils.logger import Logger
 
@@ -19,7 +18,7 @@ class AgentState:
     current_workflow: str = "default"
 
     # ==================== Execution State ====================
-    phase: str = "idle"  # idle | planning | execution | reflection | verification | waiting | complete
+    phase: Any = None
     status: str = (
         "idle"  # idle | thinking | tool_call | waiting_approval | error | paused
     )
@@ -118,7 +117,7 @@ class AgentState:
         self.active_sub_agents.clear()
         self.pending_messages.clear()
 
-        self.phase = "idle"
+        self.phase = None
         self.status = "idle"
         self.current_task_index = 0
         self.is_complete = False
