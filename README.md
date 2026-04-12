@@ -60,8 +60,7 @@ The report adopts a more rigorous computational-neuroscience lens, evaluating th
 
 **Significance**  
 - Demonstrates robust cross-domain RAG capability on large-scale scientific literature combined with production code (~1675 LOC).  
-- Exhibits early meta-cognitive behavior: the framework systematically analyzing and critiquing its own memory architecture through the lens of biological neuroscience.  
-- Validates strict separation of concerns — the entire experiment remained inside NeuralCore’s generic abstractions with no client-specific logic introduced.  
+- Exhibits early meta-cognitive behavior: the framework systematically analyzing and critiquing its own memory architecture through the lens of biological neuroscience.   
 - Serves as a canonical reference for reflective, scientifically grounded agent workflows built using NeuralVoid reference patterns.
 
 **Lab Setup**  
