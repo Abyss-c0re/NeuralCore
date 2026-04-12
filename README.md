@@ -73,7 +73,7 @@ The report adopts a more rigorous computational-neuroscience lens, evaluating th
 
 **Artifacts** (all inside this repository)  
 - Agent Generated Report → [`docs/experiments/neuroscience-memory-audit-2026-04-13.md`](docs/experiments/neuroscience-memory-audit-2026-04-13.md)  
-- Raw Experiment Log → [`logs/experiments/neuroscience-memory-audit-20260413.log`](logs/experiments/neuroscience-memory-audit-20260413.log)  
+- Raw Experiment Log → [`logs/experiments/neuroscience-memory-audit-20260413.log`](docs/experiments/neuroscience-memory-audit-20260413.log)  
 - Source under audit → [`src/neuralcore/cognition/memory.py`](src/neuralcore/cognition/memory.py)
 
 *Reproducible using NeuralVoid reference patterns (Terminal Chat Agent `agent_002` + orchestrator/sub-agent workflows).*
