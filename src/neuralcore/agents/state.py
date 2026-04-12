@@ -19,9 +19,7 @@ class AgentState:
 
     # ==================== Execution State ====================
     phase: Any = None
-    status: str = (
-        "idle"  # idle | thinking | tool_call | waiting_approval | error | paused
-    )
+    status: str = "idle"
     is_complete: bool = False
     goal_achieved: bool = False
 
@@ -35,7 +33,8 @@ class AgentState:
     planned_tasks: List[str] = field(default_factory=list)
     current_task_index: int = 0
     task_tool_assignments: Dict[int, List[str]] = field(default_factory=dict)
-    task_dependencies: Dict[int, Optional[str]] = field(default_factory=dict)
+    # FIXED & STABLE: List[int] only – eliminates str pollution and NoneType crashes
+    task_dependencies: Dict[int, List[int]] = field(default_factory=dict)
 
     # ==================== Sub-agent & Hub Coordination ====================
     sub_task_ids: List[str] = field(default_factory=list)
@@ -50,9 +49,9 @@ class AgentState:
 
     # ==================== Waiting & Pausing ====================
     waiting: bool = False
-    wait_type: Optional[str] = None  # time | human | subtask | agent | condition
+    wait_type: Optional[str] = None
     wait_start_time: Optional[float] = None
-    wait_target: Optional[str] = None  # task_id, agent_id(s), condition name, etc.
+    wait_target: Optional[str] = None
     wait_prompt: str = ""
     wait_timeout: Optional[float] = None
     wait_completed: bool = False
@@ -80,13 +79,16 @@ class AgentState:
     # ==================== Properties ====================
     @property
     def current_task_name(self) -> Optional[str]:
-        if 0 <= self.current_task_index < len(self.planned_tasks):
-            return self.planned_tasks[self.current_task_index]
+        """Safe, type-checker-friendly access."""
+        tasks: List[str] = self.planned_tasks
+        idx: int = self.current_task_index
+        if isinstance(idx, int) and 0 <= idx < len(tasks):
+            return tasks[idx]
         return None
 
     @property
     def has_sub_tasks(self) -> bool:
-        return len(self.sub_task_ids) > 0
+        return len(self.planned_tasks) > 0
 
     @property
     def goal_reached(self) -> bool:
@@ -98,14 +100,13 @@ class AgentState:
 
     @property
     def wait_elapsed(self) -> Optional[float]:
-        """Safe elapsed seconds since wait started."""
         if self.wait_start_time is None:
             return None
         return round(time.time() - self.wait_start_time, 1)
 
     # ==================== Core Methods ====================
     def reset_for_new_task(self, new_task: str = "", new_goal: str = "") -> None:
-        """Reset state for a new task or iteration cycle."""
+        """Reset state for a new task or iteration cycle – now also clears dependencies safely."""
         logger.info(f"Resetting AgentState for new task: '{new_task[:100]}...'")
 
         self.planned_tasks.clear()
@@ -261,7 +262,7 @@ class AgentState:
             )
 
     def get_objective_reminder(self) -> str:
-        parts = []
+        parts: List[str] = []
 
         goal_text = self.goal or self.task or "No goal set"
         parts.append(f"Current goal: {goal_text}")
@@ -292,6 +293,24 @@ class AgentState:
         if self.duration > 60:
             parts.append(f"Running for {self.duration:.0f}s")
 
+        # ==================== Dependency-aware reminder (fully safe) ====================
+        if self.task_dependencies:
+            dep_parts: List[str] = []
+            for idx, dep_list in self.task_dependencies.items():
+                if isinstance(idx, int) and 0 <= idx < len(self.planned_tasks):
+                    dep_names: List[str] = []
+                    # Critical guard: dep_list is guaranteed list but we protect against old state
+                    if isinstance(dep_list, list):
+                        for d in dep_list:
+                            if isinstance(d, int) and 0 <= d < len(self.planned_tasks):
+                                dep_names.append(self.planned_tasks[d])
+                    if dep_names:
+                        dep_parts.append(
+                            f"Step {idx + 1} depends on: {', '.join(dep_names[:2])}"
+                        )
+            if dep_parts:
+                parts.append("Dependencies:\n" + "\n".join(dep_parts[:4]))
+
         reminder = "\n".join(parts)
 
         return f"""OBJECTIVE REMINDER:
@@ -305,30 +324,26 @@ class AgentState:
         - Use only verified information from tool_results when summarizing."""
 
     def to_dict(self) -> Dict[str, Any]:
-        """Generic, serializable snapshot — safe for any transport layer (NeuralHub, WebSocket, VR, etc.)."""
-        # Base exclusion list
+        """Generic, serializable snapshot — safe for NeuralHub, WebSocket, VR, etc."""
         exclude = {
             "message_queue",
             "_input_event",
             "_stop_event",
             "_background_task",
-            "_task_contexts",  # if you have any internal private dicts
+            "_task_contexts",
         }
 
-        # Core data from __dict__
         data: Dict[str, Any] = {
             k: v
             for k, v in self.__dict__.items()
             if not k.startswith("_") and k not in exclude
         }
 
-        # Explicit handling of complex / list fields (limit size where needed)
-        data["tool_results"] = self.tool_results[-20:]  # keep recent only
+        data["tool_results"] = self.tool_results[-20:]
         data["executed_functions"] = self.executed_functions[-15:]
         data["iteration_history"] = self.iteration_history[-10:]
         data["pending_messages"] = self.pending_messages[-20:]
 
-        # Waiting state - explicitly included and cleaned
         data["waiting"] = getattr(self, "waiting", False)
         data["wait_type"] = getattr(self, "wait_type", None)
         data["wait_prompt"] = getattr(self, "wait_prompt", "")
@@ -338,31 +353,24 @@ class AgentState:
         data["wait_start_time"] = getattr(self, "wait_start_time", None)
         data["last_wait_event"] = getattr(self, "last_wait_event", None)
 
-        # Human-in-the-loop
         data["needs_approval"] = getattr(self, "needs_approval", False)
         data["pending_approval_prompt"] = getattr(self, "pending_approval_prompt", "")
 
-        # Ensure tool_calls is always present and serializable
-        if self.tool_calls is not None:
-            data["tool_calls"] = self.tool_calls
-        else:
-            data["tool_calls"] = []
+        data["tool_calls"] = self.tool_calls or []
 
-        # Computed fields
         data["duration"] = round(self.duration, 2)
         data["current_task_name"] = self.current_task_name
         data["has_sub_tasks"] = self.has_sub_tasks
         data["goal_reached"] = self.goal_reached
 
-        # Optional: add a clean wait summary for external consumers
-        if data["waiting"]:
+        if data.get("waiting"):
             data["wait_summary"] = {
                 "type": data["wait_type"],
                 "prompt": data["wait_prompt"][:200] + "..."
-                if len(data["wait_prompt"]) > 200
-                else data["wait_prompt"],
+                if len(data.get("wait_prompt", "")) > 200
+                else data.get("wait_prompt", ""),
                 "elapsed": round(
-                    time.time() - (data["wait_start_time"] or time.time()), 1
+                    time.time() - (data.get("wait_start_time") or time.time()), 1
                 ),
                 "target": data["wait_target"],
             }
