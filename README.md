@@ -76,7 +76,7 @@ The report adopts a more rigorous computational-neuroscience lens, evaluating th
 - Raw Experiment Log → [`logs/experiments/neuroscience-memory-audit-20260413.log`](logs/experiments/neuroscience-memory-audit-20260413.log)  
 - Source under audit → [`src/neuralcore/cognition/memory.py`](src/neuralcore/cognition/memory.py)
 
-*Reproducible using NeuralVoid reference patterns (Terminal Chat Agent `agent_002` + orchestrator/sub-agent workflows). Similar audit workflows can be designed and visualized in NeuralLabs.*
+*Reproducible using NeuralVoid reference patterns (Terminal Chat Agent `agent_002` + orchestrator/sub-agent workflows).*
 
 ---
 
