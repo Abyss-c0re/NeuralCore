@@ -26,8 +26,8 @@ class Action:
         tags: Optional[List[str]] = None,
         aliases: Optional[List[str]] = None,
         # ==================== NEW: PER-AGENT + SUB-AGENT HIDING ====================
-        hidden_for_agents: Optional[List[str]] = None,    # specific agent_ids
-        hidden_for_subagents: bool = False,               # optional sub-agent flag
+        hidden_for_agents: Optional[List[str]] = None,  # specific agent_ids
+        hidden_for_subagents: bool = False,  # optional sub-agent flag
         # =========================================================================
     ):
         if action_type not in {"tool", "function"}:
@@ -47,7 +47,9 @@ class Action:
             lambda kwargs: f"Executing {name} with {kwargs}"
         )
 
-        self.hidden_for_agents = [str(a).strip() for a in hidden_for_agents] if hidden_for_agents else []
+        self.hidden_for_agents = (
+            [str(a).strip() for a in hidden_for_agents] if hidden_for_agents else []
+        )
         self.hidden_for_subagents = hidden_for_subagents
 
         self._bound_agent = None  # Only stores validated agent instances
@@ -192,9 +194,28 @@ class Action:
 
             # ====================== RECORD FULL RESULT ======================
             if self._bound_agent is not None:
-                recorded = False
+                recorded_to_state = False
+                recorded_to_context = False
 
-                # 1. ContextManager (feeds _get_recent_tool_outcomes)
+                # 1. AgentState → lightweight structured preview (operational memory)
+                if hasattr(self._bound_agent, "state"):
+                    try:
+                        # Always use preview for State (keeps it serializable & fast)
+                        preview = (
+                            final_result[:800] + "..."
+                            if len(final_result) > 800
+                            else final_result
+                        )
+                        self._bound_agent.state.add_tool_result(
+                            tool_name=self.name,
+                            result=preview,
+                            success=success,
+                        )
+                        recorded_to_state = True
+                    except Exception as e:
+                        logger.warning(f"[STATE RECORD FAILED] {self.name}: {e}")
+
+                # 2. ContextManager → full fidelity (semantic KB / RAG)
                 if hasattr(self._bound_agent, "context_manager"):
                     try:
                         await self._bound_agent.context_manager.record_tool_outcome(
@@ -208,24 +229,13 @@ class Action:
                                 "raw_type": type(result).__name__,
                             },
                         )
-                        recorded = True
+                        recorded_to_context = True
                     except Exception as e:
-                        logger.warning(f"[RECORD TOOL OUTCOME FAILED] {self.name}: {e}")
+                        logger.warning(f"[CONTEXT RECORD FAILED] {self.name}: {e}")
 
-                # 2. AgentState
-                if hasattr(self._bound_agent, "state"):
-                    try:
-                        self._bound_agent.state.add_tool_result(
-                            tool_name=self.name,
-                            result=result_preview,
-                            success=success,
-                        )
-                    except Exception as e:
-                        logger.warning(f"[ADD TOOL RESULT FAILED] {self.name}: {e}")
-
-                if not recorded:
+                if not recorded_to_state and not recorded_to_context:
                     logger.warning(
-                        f"[ACTION] {self.name} executed but recording skipped"
+                        f"[ACTION] {self.name} executed but no recording occurred"
                     )
 
             logger.info(f"[ACTION SUCCESS] {self.name}")

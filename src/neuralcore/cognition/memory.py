@@ -164,6 +164,8 @@ class ContextManager:
         self._mode_lock = asyncio.Lock()
         self.pure_chat_history: List[Dict[str, str]] = []
         self._last_analysis_ts = 0.0
+        self.tools_executed: List[str] = []
+        self.tool_call_history: List[Dict[str, Any]] = []
 
     def _init_fastembed(self, embed_config: dict):
         """Helper method to initialize FastEmbed with full path handling."""
@@ -226,6 +228,82 @@ class ContextManager:
             old = self.mode
             self.mode = mode
             logger.info(f"ContextManager mode changed: {old} → {mode}")
+
+    def reset(self, hard: bool = True) -> None:
+        """Reset ContextManager to a clean state.
+
+        Args:
+            hard: If True (default), clears embedding cache and sparse index completely.
+                  If False, keeps cache for faster re-initialization.
+        """
+        logger.info(f"ContextManager.reset() called — hard={hard}")
+
+        # Core identity & mode
+        self.mode = "chat"
+        self.current_topic = Topic("Initial topic")
+        self.topics.clear()
+
+        # Knowledge Base & embeddings
+        self.knowledge_base.clear()
+        self.embedding_cache.clear() if hard else None
+        self._sparse_index_dirty = True
+        self.tfidf_matrix = None
+        self.kb_keys_ordered.clear()
+        self._last_rebuild_size = 0
+        self.tfidf_vectorizer = None  # will be re-created on next use
+
+        # Histories & topics
+        self.pure_chat_history.clear()
+        for topic in self.topics:
+            topic.history.clear()
+            topic.archived_history.clear()
+            topic.history_tokens.clear()
+            topic.history_embeddings.clear()
+        self.current_topic.history.clear()
+        self.current_topic.archived_history.clear()
+        self.current_topic.history_tokens.clear()
+        self.current_topic.history_embeddings.clear()
+
+        # Tool & action tracking
+        self.tools_executed.clear()
+        self.tool_call_history.clear()
+        self.action_log.clear()
+        self.files_checked.clear()
+
+        # Investigation & task state
+        self.investigation_state = {
+            "goal": "",
+            "subtasks": [],
+            "completed": [],
+            "pending": [],
+            "findings": [],
+            "hypotheses": [],
+            "unknowns": [],
+        }
+        if hasattr(self, "_task_contexts"):
+            self._task_contexts.clear()
+
+        # Stats & FS state
+        self.context_stats = {
+            "kb_added": 0,
+            "messages_added": 0,
+            "topics_switched": 0,
+            "prunes": 0,
+        }
+        self.fs_state = {"cwd": ".", "known_folders": [], "negative_findings": []}
+
+        # Clear any pending locks if needed (but _mode_lock stays alive)
+        logger.info(
+            f"ContextManager reset complete. "
+            f"KB cleared: {len(self.knowledge_base)} items remaining. "
+            f"Mode: {self.mode}"
+        )
+
+    def clear_tool_history(self) -> None:
+        """Light reset — only clears tool call history and executed list."""
+        self.tools_executed.clear()
+        self.tool_call_history.clear()
+        logger.info("Tool history cleared (KB and conversation preserved)")
 
     class TaskContext:
         def __init__(self, name: str, parent: "ContextManager"):
@@ -372,6 +450,24 @@ class ContextManager:
             self.context_stats["topics_switched"] += 1
         elif action_type == "prune":
             self.context_stats["prunes"] += 1
+
+    def _extract_potential_file_or_param_mentions(self, query: str) -> List[str]:
+        """Lightweight extraction of likely file paths, filenames, IDs from query."""
+        if not query:
+            return []
+        # Simple but effective: paths, filenames with extensions, quoted strings, etc.
+        patterns = [
+            r'["\']([^"\']+\.(?:py|js|ts|json|txt|md|log|csv|yaml|yml|toml))["\']',  # common extensions
+            r'["\']([/\\][^"\']+)["\']',  # paths
+            r"\b(\S+\.\S{2,5})\b",  # filename-like
+        ]
+        mentions = []
+        for pat in patterns:
+            mentions.extend(re.findall(pat, query))
+        # Also plain words that might be filenames/IDs (fallback)
+        words = re.findall(r"\b\w{3,}\b", query)
+        mentions.extend([w for w in words if "." in w or "/" in w or "\\" in w])
+        return list(dict.fromkeys(mentions))  # dedup preserve order
 
     # ─────────────────────────────────────────────────────────────
     # CONTEXT SUMMARY, PRUNING, INVESTIGATION STATE (unchanged)
@@ -715,7 +811,7 @@ class ContextManager:
     # KNOWLEDGE RETRIEVAL (now fully async)
     # ─────────────────────────────────────────────────────────────
     async def _retrieve_relevant_knowledge(self, query: str, max_kb_tokens: int) -> str:
-        """Fixed version with detailed logging + workaround for chat-mode embedding skip."""
+        """Hybrid RAG with parameter/file-aware boosting for exact tool matches."""
         if not self.knowledge_base or not query.strip():
             logger.debug(
                 "retrieve_relevant_knowledge: KB empty or query empty → returning ''"
@@ -727,17 +823,10 @@ class ContextManager:
             f"KB_size={len(self.knowledge_base)} | max_kb_tokens={max_kb_tokens}"
         )
 
-        # Workaround for chat-mode skip (len(text) < 200)
-        # We prepend a descriptive string so the embedding is always computed
         embedding_query = f"Search query for relevant tool results and context: {query}"
         query_emb = await self.fetch_embedding(embedding_query, prefix="query")
 
         sparse_scores = await self._sparse_retrieve(query)
-
-        logger.debug(
-            f"Embedding & sparse done | query_emb_size={query_emb.size} | "
-            f"dense_candidates={len(self.knowledge_base)} | sparse_hits={len(sparse_scores)}"
-        )
 
         # Dense ranking
         dense_ranked = []
@@ -755,10 +844,6 @@ class ContextManager:
             reverse=True,
         )[:50]
 
-        logger.debug(
-            f"RRF candidates → dense_top50={len(dense_ranked)}, sparse_top50={len(sparse_ranked)}"
-        )
-
         # RRF fusion
         rrf_scores: Dict[str, float] = {}
         k = 60
@@ -766,6 +851,42 @@ class ContextManager:
             rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (rank + k)
         for rank, (_, key) in enumerate(sparse_ranked, start=1):
             rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (rank + k)
+
+        # ── PARAMETER/FILE BOOST: If query mentions a file/param from any tool call ──
+        file_mentions = self._extract_potential_file_or_param_mentions(query)
+        if file_mentions:
+            logger.debug(f"Detected potential file/param mentions: {file_mentions}")
+            for key, item in self.knowledge_base.items():
+                if item.source_type != "tool_outcome":
+                    continue
+                boost = 0.0
+                meta_str = json.dumps(item.metadata, ensure_ascii=False).lower()
+                args_str = json.dumps(
+                    item.metadata.get("args", {}), ensure_ascii=False
+                ).lower()
+                content_lower = item.content.lower()
+
+                for mention in file_mentions:
+                    m_lower = mention.lower()
+                    if (
+                        m_lower in meta_str
+                        or m_lower in args_str
+                        or m_lower in content_lower
+                    ):
+                        boost += 5.0  # strong exact match in args/metadata
+                    elif any(
+                        word in content_lower
+                        for word in m_lower.split()
+                        if len(word) > 2
+                    ):
+                        boost += 2.0  # softer keyword overlap
+
+                if boost > 0:
+                    current = rrf_scores.get(key, 0.0)
+                    rrf_scores[key] = current + boost
+                    logger.debug(
+                        f"Boosted tool outcome {key} by {boost:.1f} for mentions {file_mentions}"
+                    )
 
         # Final scored list
         scored = sorted(
@@ -795,7 +916,6 @@ class ContextManager:
                 ]
             ):
                 blocked_count += 1
-                logger.debug(f"[KB GUARD] Blocked contaminated item: {item.key}")
                 continue
 
             if item.source_type == "tool_outcome":
@@ -831,6 +951,38 @@ class ContextManager:
         )
 
         return result
+
+    def _is_duplicate_tool_call(
+        self, tool_name: str, clean_args: Dict[str, Any]
+    ) -> bool:
+        """Check if the exact same tool + arguments was called recently.
+        Uses last 8 entries for deduplication window."""
+        if not self.tool_call_history or len(self.tool_call_history) < 2:
+            return False
+
+        # Normalize current args for comparisons
+        try:
+            current_key = json.dumps(clean_args, sort_keys=True, ensure_ascii=False)
+        except Exception:
+            current_key = str(clean_args)
+
+        # Check last N calls (excluding the one we just added)
+        for entry in reversed(
+            self.tool_call_history[:-1][-8:]
+        ):  # last 8 before this one
+            if entry["tool"] != tool_name:
+                continue
+            try:
+                entry_key = json.dumps(
+                    entry["args"], sort_keys=True, ensure_ascii=False
+                )
+            except Exception:
+                entry_key = str(entry["args"])
+
+            if entry_key == current_key:
+                return True
+
+        return False
 
     async def add_message(
         self, role: str, message: str, embedding: np.ndarray | None = None
@@ -1094,83 +1246,12 @@ class ContextManager:
         tokens_used = self.count_tokens(messages)
         logger.debug(f"Base system + summary → tokens_used = {tokens_used}")
 
-        # ====================== IMPROVED RECENT TOOL RESULTS (State + KB) ======================
-        recent_tool_text = ""
-
+        # ====================== GOAL & STATE AWARENESS (placed early for better reasoning) ======================
         if state is not None:
             logger.debug(
-                f"AgentState provided | tool_results count = {len(state.tool_results)}"
+                "Adding centralized objective reminder from AgentState.get_objective_reminder()"
             )
-            # Priority 1: Use fresh data from AgentState.tool_results
-            if state.tool_results:
-                parts: List[str] = []
-                for entry in reversed(state.tool_results[-8:]):  # last 8 results
-                    name = entry.get("name", "unknown")
-                    result = entry.get("result", "")
-                    success = entry.get("success", True)
-                    ts = entry.get("timestamp")
-
-                    ts_str = (
-                        f"Executed: {time.strftime('%H:%M:%S', time.localtime(ts))}\n"
-                        if ts
-                        else ""
-                    )
-                    status = "✅ SUCCESS" if success else "❌ FAILED"
-
-                    block = (
-                        f"Tool: {name}  {status}\n"
-                        f"{ts_str}"
-                        f"Result:\n{result}\n"
-                        f"{'─' * 80}\n"
-                    )
-                    parts.append(block)
-
-                recent_tool_text = "\n".join(parts)
-                logger.info(
-                    f"✅ Used {len(state.tool_results)} recent results DIRECTLY from AgentState"
-                )
-            else:
-                logger.debug("AgentState has no tool_results → falling back to KB")
-        else:
-            logger.debug("No AgentState passed → using only KB recent tools")
-
-        # Fallback to KB if state didn't provide anything
-        if not recent_tool_text:
-            logger.debug("Falling back to _get_recent_tool_outcomes from KB")
-            recent_tool_text = await self._get_recent_tool_outcomes(
-                limit=4,
-                max_tokens_per_result=2500,
-                max_total_tokens=8000,
-            )
-
-        if recent_tool_text:
-            recent_block = (
-                "=== MOST RECENT TOOL RESULTS (HIGHEST PRIORITY) ===\n"
-                + recent_tool_text
-                + "\n=== END RECENT TOOL RESULTS ===\n"
-                + "These are the exact results from the tools you just executed. "
-                + "Use them directly in your reasoning."
-            )
-            messages.append({"role": "system", "content": recent_block})
-            tokens_used = self.count_tokens(messages)
-            logger.debug(
-                f"Added recent tool results block → tokens_used now = {tokens_used}"
-            )
-        else:
-            logger.debug("No recent tool results available from state or KB")
-
-        # ====================== GOAL & STATE AWARENESS ======================
-        if state is not None:
-            logger.debug(
-                "Adding centralized objective reminder from _build_objective_reminder"
-            )
-
-            # Choose the right reminder based on mode
-            if chat:
-                objective_text = f"Current goal: {state.goal or state.task or 'None'}"
-            else:
-                # Task / agentic mode → rich reminder with FindTool rule
-                objective_text = state.get_objective_reminder()
+            objective_text = state.get_objective_reminder()
 
             messages.append(
                 {
@@ -1182,6 +1263,47 @@ class ContextManager:
             logger.debug(
                 f"Added AgentState objective block → tokens_used = {tokens_used}"
             )
+
+        # ====================== TOOL CALL HISTORY + LAST 3 FULL OUTPUTS ======================
+        # Lightweight call history (tools + params only) — always available for operational awareness
+        call_history_text = ""
+        if self.tool_call_history:
+            parts: List[str] = []
+            for entry in reversed(self.tool_call_history[-12:]):  # last 12 calls
+                ts_str = time.strftime("%H:%M:%S", time.localtime(entry["timestamp"]))
+                args_str = (
+                    json.dumps(entry["args"], ensure_ascii=False)
+                    if entry.get("args")
+                    else "{}"
+                )
+                parts.append(f"[{ts_str}] Tool: {entry['tool']} | Args: {args_str}")
+            call_history_text = "\n".join(parts)
+
+        # Full output from the last 3 executions (high-fidelity recent results)
+        last_three_text = await self._get_recent_tool_outcomes(
+            limit=3,
+            max_tokens_per_result=3000,
+            max_total_tokens=9000,
+        )
+
+        if call_history_text or last_three_text:
+            tool_block = "=== TOOL CALL HISTORY & RECENT OUTPUTS ===\n"
+            if call_history_text:
+                tool_block += f"Recent tool calls (with parameters only):\n{call_history_text}\n\n"
+            if last_three_text:
+                tool_block += (
+                    f"Full output from the last 3 tool executions:\n{last_three_text}\n"
+                )
+            tool_block += (
+                "Use the call history to avoid repeating the same actions. "
+                "Use the full outputs directly when they are relevant to the current goal."
+            )
+            messages.append({"role": "system", "content": tool_block})
+            tokens_used = self.count_tokens(messages)
+            logger.debug(
+                f"Added tool call history + last 3 outputs → tokens_used now = {tokens_used}"
+            )
+
         # ====================== TOKEN BUDGETING ======================
         query_tokens = (
             self.count_tokens([{"role": "user", "content": query}])
@@ -1200,6 +1322,7 @@ class ContextManager:
 
         logger.debug(f"Allocated → KB={kb_tokens} | History={history_budget}")
 
+        # ====================== LONG-TERM SEMANTIC KB (with file/param boost) ======================
         if query.strip() and kb_tokens > 500:
             kb_text = await self._retrieve_relevant_knowledge(query, kb_tokens)
             if kb_text:
@@ -1383,11 +1506,41 @@ class ContextManager:
         result: Any,
         metadata: dict | None = None,
     ):
-        """Record FULL tool result — no early truncation, maximum fidelity."""
+        """Record FULL tool result + lightweight call history.
+        Skips duplicate calls with identical tool name + arguments to prevent KB bloat."""
         metadata = metadata or {}
         timestamp = time.time()
+        args = metadata.get("args", {}) or {}
 
-        # ── 1. Convert to string with maximum fidelity (no size cap) ──
+        # ── NEW: Lightweight tool call history (name + params only, no output) ──
+        clean_args = {k: v for k, v in args.items() if k not in ("agent", "self")}
+        call_entry = {
+            "tool": tool_name,
+            "args": clean_args,
+            "timestamp": timestamp,
+        }
+        self.tool_call_history.append(call_entry)
+        if len(self.tool_call_history) > 20:  # keep last 20 calls
+            self.tool_call_history.pop(0)
+
+        logger.debug(f"[TOOL CALL LOGGED] {tool_name} with args={clean_args}")
+
+        # ── DEDUPLICATION: Check if this exact tool+args was already recorded recently ──
+        if self._is_duplicate_tool_call(tool_name, clean_args):
+            logger.info(
+                f"[TOOL DEDUP] Skipping KB recording for duplicate call: {tool_name} "
+                f"with args={clean_args}"
+            )
+            # Still log the action for summary/stats
+            self.tools_executed.append(tool_name)
+            self._log_action(
+                "tool_outcome",
+                f"{tool_name} (deduplicated) → skipped duplicate",
+                metadata,
+            )
+            return
+
+        # ── 1. Convert result to string with maximum fidelity (no size cap) ──
         if isinstance(result, (dict, list, tuple)):
             try:
                 result_str = json.dumps(result, ensure_ascii=False, indent=2)
@@ -1437,6 +1590,7 @@ class ContextManager:
                 "tool": tool_name,
                 "timestamp": timestamp,
                 "original_length": original_size,
+                "args": clean_args,  # store args for boosting & dedup
                 **metadata,
             },
         )
