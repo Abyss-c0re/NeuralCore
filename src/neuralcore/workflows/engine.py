@@ -856,7 +856,7 @@ class WorkflowEngine:
             raise ValueError(f"Loop '{loop_name}' not found.")
 
         # === MERGE YAML STEPS INTO THE LOOP ===
-        self.workflow.merge_loop_steps_from_yaml(self)  # ← new call
+        self.workflow.merge_yaml_loop_steps(self)
 
         state: AgentState = (
             initial_state if isinstance(initial_state, AgentState) else AgentState()
