@@ -2,43 +2,75 @@
 
 ## Overview
 
-**NeuralCore** is an experimental adaptive agentic framework. The project is at a very early stage of development and is not ready for production or hype. There is no documentation at this time. For a demonstration of its capabilities, please see [NeuralVoid](https://github.com/Abyss-c0re/NeuralVoid).
+**NeuralCore** is an experimental adaptive agentic framework focused on clean architectural separation and advanced context management. The project is in active early-stage development and is not yet intended for production use. For a practical demonstration and reference implementation, see [NeuralVoid](https://github.com/Abyss-c0re/NeuralVoid).
 
 ### Licensing
 
 This project is **dual-licensed**:
 
-1.  **AGPLv3 (Open Source)**
-    *   Free to use, modify, and distribute.
-    *   Modifications must be shared under the same license.
+1. **AGPLv3 (Open Source)**  
+   Free to use, modify, and distribute. Modifications must be shared under the same license.
 
-2.  **Commercial License**
-    *   Available for proprietary use without AGPL obligations.
-    *   **Contact:** `info@abyss-core.com`
+2. **Commercial License**  
+   Available for proprietary use without AGPL obligations.  
+   **Contact:** `info@abyss-core.com`
 
 ---
 
 ## Why NeuralCore?
 
-Most agent frameworks mix framework code with business logic, becoming rigid, unsafe, and difficult to maintain as complexity grows.
+Most agent frameworks tightly couple core logic with application-specific code, leading to brittle, hard-to-maintain systems as complexity grows.
 
-**NeuralCore** was built differently — with a **strict architectural boundary**:
+**NeuralCore** enforces a strict architectural boundary:
 
-> **NeuralCore** = pure generic, reusable framework  
-> **Your application (NeuralVoid)** = all tools, workflows, and business logic
+> **NeuralCore** = pure generic, reusable framework layer  
+> **Client applications (e.g. NeuralVoid)** = all domain-specific tools, workflows, and business logic
 
-This separation gives you clean architecture, maximum flexibility, and the ability to build extremely powerful agents without fighting the framework.
+This separation delivers clean architecture, improved safety, and the flexibility required for sophisticated agentic systems.
 
 ---
 
 ## What Makes NeuralCore Special
 
-*   **Rich, expressive tool system** — Full-featured `@tool` decorator with tags, custom names, descriptions, and `require_confirmation`.
-*   **Self-aware agents** — Tools can automatically receive the current `agent` instance, giving them direct access to memory, logs, context, and other agents.
-*   **Dynamic & safe tool management** — `DynamicActionManager` with per-step loading/unloading, protected persistent tools (`FindTool`, `DeploySubAgent`, `GetContext`, `GetDeploymentStatus`), and runtime discovery.
-*   **Composable sequences** — Multi-step flows with context propagation, human confirmation, and pausing/resuming.
-*   **World-class ContextManager** — Advanced RAG (FastEmbed + TF-IDF), topic detection, automatic sub-agent noise pruning, investigation mode, `TaskContext`, findings/hypotheses tracking, and smart chunking.
-*   **Powerful workflow engine** — Declarative workflows with `@workflow.set`, `@workflow.loop` (with `max_iterations` + `break_condition`), and `@workflow.condition`.
+- **Rich, expressive tool system** — Full-featured `@tool` decorator supporting tags, custom names, descriptions, and `require_confirmation`.
+- **Self-aware agents** — Tools can automatically receive the current `agent` instance, granting direct access to memory, logs, context, and peer agents.
+- **Dynamic & safe tool management** — `DynamicActionManager` with per-step loading/unloading, protected persistent tools, and runtime discovery.
+- **Composable action sequences** — Multi-step flows with context propagation, human confirmation, and safe pausing/resuming.
+- **Advanced ContextManager & RAG** — Hybrid retrieval (FastEmbed dense + TF-IDF sparse), topic detection, automatic sub-agent noise pruning, investigation mode, `TaskContext`, findings/hypotheses tracking, and configurable smart chunking.
+- **Powerful declarative workflow engine** — Supports `@workflow.set`, `@workflow.loop` (with iteration limits and break conditions), and `@workflow.condition`.
+
+---
+
+## Experiments & Scientific Validation
+
+### Neuroscience-Inspired Self-Audit of NeuralCore Memory System (2026-04-12)
+
+**Experiment Overview**  
+A NeuralCore-based agent performed a large-scale comparative RAG analysis between its own memory subsystem implementation (**~1500 lines of code** in `src/neuralcore/cognition/memory.py`) and **830 pages** of the canonical textbook *Neuroscience, Third Edition* (Purves et al., 2004).
+
+Running on **CachyOS x86_64 (Linux kernel 6.19.11-1-cachyos)**, the agent mapped the module’s core RAG mechanisms — token-based chunking with overlap, hybrid sparse/dense embeddings, topic consolidation with drift detection, temporal history tracking, and off-topic pruning — onto established neuroscientific concepts such as hippocampal binding, systems consolidation, dual-coding theory, and signal-to-noise filtering in memory stabilization.
+
+The resulting report also proposed concrete, neuroscience-inspired enhancements (Hebbian-style plasticity simulation, offline sleep-consolidation phase, retrieval practice mechanisms, and hierarchical topic organization) while preserving the strict abstraction boundaries of NeuralCore.
+
+**Significance**  
+- Demonstrates robust cross-domain RAG capability on large scientific literature combined with production code.
+- Exhibits early meta-cognitive behavior: the framework analyzing and critiquing its own memory architecture through a biological lens.
+- Validates clean separation of concerns — the entire analysis remained inside NeuralCore’s generic abstractions with no client logic leakage.
+- Serves as a canonical reference for reflective, scientifically grounded agent workflows built using NeuralVoid patterns.
+
+**Lab Setup**  
+- **OS**: CachyOS x86_64 (Linux kernel 6.19.11-1-cachyos)  
+- **Hardware**: AMD Ryzen 9 5900X (24 threads) @ 5.62 GHz, AMD Radeon RX 6800 (discrete), 62.71 GiB RAM  
+- **LLM**: Qwen3.5-9B (Q4_K_M, 128k context) via llama.cpp  
+- **Embeddings**: fastembed (`BAAI/bge-small-en-v1.5`, local cache)  
+- **Workflow**: NeuralVoid orchestrator + sub-agent ReAct loops
+
+**Artifacts** (all inside this repository)  
+- Full Scientific Report → [`docs/experiments/neuroscience-memory-audit-2026-04-12.md`](docs/experiments/neuroscience-memory-audit-2026-04-12.md)  
+- Raw Experiment Log → [`logs/experiments/neuroscience-memory-audit-20260412.log`](docs/experiments/neuroscience-memory-audit-20260412.log)  
+- Source under audit → [`src/neuralcore/cognition/memory.py`](src/neuralcore/cognition/memory.py)
+
+*Reproducible using NeuralVoid reference patterns. Similar audit workflows can be designed and visualized in NeuralLabs.*
 
 ---
 
