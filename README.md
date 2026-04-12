@@ -43,34 +43,41 @@ This separation delivers clean architecture, improved safety, and the flexibilit
 
 ## Experiments & Scientific Validation
 
-### Neuroscience-Inspired Self-Audit of NeuralCore Memory System (2026-04-12)
+### Neuroscience-Inspired Self-Audit of NeuralCore Memory System (2026-04-13)
 
 **Experiment Overview**  
 A NeuralCore-based agent performed a large-scale comparative RAG analysis between its own memory subsystem implementation (**~1500 lines of code** in `src/neuralcore/cognition/memory.py`) and **830 pages** of the canonical textbook *Neuroscience, Third Edition* (Purves et al., 2004).
 
-Running on **CachyOS x86_64 (Linux kernel 6.19.11-1-cachyos)**, the agent mapped the module’s core RAG mechanisms — token-based chunking with overlap, hybrid sparse/dense embeddings, topic consolidation with drift detection, temporal history tracking, and off-topic pruning — onto established neuroscientific concepts such as hippocampal binding, systems consolidation, dual-coding theory, and signal-to-noise filtering in memory stabilization.
+The analysis was executed via **Terminal Chat Agent (`agent_002`)** in natural conversation mode through the UI. The agent leveraged a dual-client setup:
 
-The resulting report also proposed concrete, neuroscience-inspired enhancements (Hebbian-style plasticity simulation, offline sleep-consolidation phase, retrieval practice mechanisms, and hierarchical topic organization) while preserving the strict abstraction boundaries of NeuralCore.
+- **Main client** (`agent_002`): Qwen3.5-9B (Q4_K_M) with `enable_thinking: false`, temperature 0.85, presence_penalty 1.5, top_k 20, max_tokens 64,000  
+- **Reasoning client**: Qwen3.5-9B with `enable_thinking: true`, temperature 0.4, presence_penalty 1.2, top_k 30, max_tokens 64,000 (used for planning and structured reasoning steps; not exposed as a tool)  
+- **Embeddings**: fastembed (`BAAI/bge-small-en-v1.5`, local cache only)
+
+The agent produced a detailed technical report that maps the module’s core RAG mechanisms — token-based chunking with overlap, hybrid sparse/dense embeddings (TF-IDF + FastEmbed), topic consolidation with drift detection, temporal history tracking, and off-topic pruning — onto established neuroscientific concepts such as hippocampal binding, systems consolidation, dual-coding theory, and signal-to-noise filtering during memory stabilization.
+
+The report adopts a more rigorous computational-neuroscience lens, evaluating the implementation against synaptic plasticity (LTP/LTD), pattern completion in CA3-like attractor networks, memory consolidation, neuromodulatory gating, and hierarchical representation, while identifying specific gaps and providing prioritized enhancement recommendations.
 
 **Significance**  
-- Demonstrates robust cross-domain RAG capability on large scientific literature combined with production code.
-- Exhibits early meta-cognitive behavior: the framework analyzing and critiquing its own memory architecture through a biological lens.
-- Validates clean separation of concerns — the entire analysis remained inside NeuralCore’s generic abstractions with no client logic leakage.
-- Serves as a canonical reference for reflective, scientifically grounded agent workflows built using NeuralVoid patterns.
+- Demonstrates robust cross-domain RAG capability on large-scale scientific literature combined with production code (~1675 LOC).  
+- Exhibits early meta-cognitive behavior: the framework systematically analyzing and critiquing its own memory architecture through the lens of biological neuroscience.  
+- Validates strict separation of concerns — the entire experiment remained inside NeuralCore’s generic abstractions with no client-specific logic introduced.  
+- Serves as a canonical reference for reflective, scientifically grounded agent workflows built using NeuralVoid reference patterns.
 
 **Lab Setup**  
 - **OS**: CachyOS x86_64 (Linux kernel 6.19.11-1-cachyos)  
-- **Hardware**: AMD Ryzen 9 5900X (24 threads) @ 5.62 GHz, AMD Radeon RX 6800 (discrete), 62.71 GiB RAM  
-- **LLM**: Qwen3.5-9B (Q4_K_M, 128k context) via llama.cpp  
-- **Embeddings**: fastembed (`BAAI/bge-small-en-v1.5`, local cache)  
-- **Workflow**: NeuralVoid orchestrator + sub-agent ReAct loops
+- **Hardware**: AMD Ryzen 9 5900X, AMD Radeon RX 6800, 62.71 GiB RAM  
+- **LLM Backend**: Qwen3.5-9B via llama.cpp server (128k context)  
+- **Agent Used**: `agent_002` (Terminal Chat Agent) with `deploy_chat` workflow  
+- **Workflows**: NeuralVoid `orchestrator` (planning) + `sub_agent_execute` (ReAct loops)  
+- **Tool Sets**: FileEditingTools, TerminalTools, CodingTools, WebTools  
 
 **Artifacts** (all inside this repository)  
-- Agent Generated Report → [`docs/experiments/neuroscience-memory-audit-2026-04-12.md`](docs/experiments/neuroscience-memory-audit-2026-04-12.md)  
-- Raw Experiment Log → [`logs/experiments/neuroscience-memory-audit-20260412.log`](docs/experiments/neuroscience-memory-audit-20260412.log)  
+- Agent Generated Report → [`docs/experiments/neuroscience-memory-audit-2026-04-13.md`](docs/experiments/neuroscience-memory-audit-2026-04-13.md)  
+- Raw Experiment Log → [`logs/experiments/neuroscience-memory-audit-20260413.log`](logs/experiments/neuroscience-memory-audit-20260413.log)  
 - Source under audit → [`src/neuralcore/cognition/memory.py`](src/neuralcore/cognition/memory.py)
 
-*Reproducible using NeuralVoid reference patterns. Similar audit workflows can be designed and visualized in NeuralLabs.*
+*Reproducible using NeuralVoid reference patterns (Terminal Chat Agent `agent_002` + orchestrator/sub-agent workflows). Similar audit workflows can be designed and visualized in NeuralLabs.*
 
 ---
 
