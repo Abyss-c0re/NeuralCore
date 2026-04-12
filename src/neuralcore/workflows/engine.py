@@ -696,6 +696,155 @@ class WorkflowEngine:
 
         return next_step_index, emitted
 
+    async def _run_loop_steps(
+        self,
+        steps: List[Union[str, Dict[str, Any]]],
+        iteration: int,
+        state: AgentState,
+    ) -> AsyncIterator[Tuple[str, Any]]:
+        """
+        Run a list of steps coming from YAML loop override (or merged steps).
+        Supports waits, normal steps, conditions, go_to, retries, etc.
+        """
+        step_index = 0
+        steps = self._resolve_steps(steps)  # resolve includes and nested steps
+
+        while step_index < len(steps):
+            step_config = steps[step_index]
+
+            if isinstance(step_config, dict):
+                step_name = step_config.get("name", "")
+                overrides = step_config.get("overrides", {}).copy()
+                condition = step_config.get("if") or step_config.get("when")
+                retries = step_config.get("retries", 0)
+                timeout_sec = step_config.get("timeout")
+            else:
+                step_name = step_config
+                overrides = {}
+                condition = None
+                retries = 0
+                timeout_sec = None
+
+            handler = self._step_handlers.get(step_name)
+            if not handler:
+                yield ("warning", f"Unknown step in loop: {step_name}")
+                step_index += 1
+                continue
+
+            yield (
+                "step_start_detail",
+                {
+                    "step": step_name,
+                    "iteration": iteration,
+                    "index": step_index,
+                    "in_loop": True,
+                },
+            )
+
+            # Condition check
+            if condition is not None and not self._evaluate_condition(condition, state):
+                yield (
+                    "step_skipped",
+                    {"step": step_name, "reason": "condition_not_met"},
+                )
+                step_index += 1
+                continue
+
+            # Tool configuration
+            if hasattr(self.agent, "manager"):
+                self.agent.manager.configure_for_step(step_name, self)
+
+            # Apply per-step overrides
+            original_client = self.agent.client
+            original_params = {
+                "temperature": self.agent.temperature,
+                "max_tokens": self.agent.max_tokens,
+                "system_prompt": self.agent.system_prompt,
+            }
+
+            for k in ("temperature", "max_tokens", "system_prompt"):
+                if k in overrides:
+                    setattr(self.agent, k, overrides[k])
+
+            # ====================== EXECUTE THE STEP ======================
+            go_to_target: Optional[Union[str, int]] = None
+            go_to_data: Optional[dict] = None
+            attempt = 0
+
+            while attempt <= retries:
+                try:
+                    async for event, payload in self._run_step_handler(
+                        handler,
+                        iteration=iteration,
+                        state=state,
+                        timeout_sec=timeout_sec,
+                    ):
+                        yield event, payload
+
+                        result = self._handle_runtime_event(
+                            event,
+                            payload,
+                            step_name=step_name,
+                            iteration=iteration,
+                            step_index=step_index,
+                            steps=steps,
+                        )
+
+                        for emitted in result["yield_events"]:
+                            yield emitted
+
+                        if result["go_to_target"] is not None:
+                            go_to_target = result["go_to_target"]
+                            go_to_data = result["go_to_data"]
+
+                        if result.get("stop_iteration"):
+                            return
+                        if result.get("break_iteration"):
+                            step_index = result["step_index"]
+                            break
+                        if result.get("finish_iteration"):
+                            step_index = result["step_index"]
+                            break
+                        if result.get("restart_iteration"):
+                            step_index = result["step_index"]
+                            break
+
+                    # If we reach here without exception, step succeeded
+                    break
+
+                except Exception as e:
+                    logger.warning(
+                        f"Step '{step_name}' failed on attempt {attempt + 1}: {e}"
+                    )
+                    if attempt == retries:
+                        raise
+                    attempt += 1
+                    await asyncio.sleep(1.0 * (2**attempt))
+
+            # Restore original client / params
+            self.agent.client = original_client
+            for k, v in original_params.items():
+                setattr(self.agent, k, v)
+
+            yield ("step_completed", {"step": step_name, "iteration": iteration})
+
+            # Resolve next step (supports go_to inside loops)
+            next_step_index, emitted = self._resolve_next_step(
+                go_to_target,
+                go_to_data,
+                step_name=step_name,
+                iteration=iteration,
+                step_index=step_index,
+                steps=steps,
+            )
+            for item in emitted:
+                yield item
+
+            step_index = next_step_index
+
+        # Signal end of loop steps
+        yield ("loop_steps_completed", {"iteration": iteration})
+
     async def execute_loop(
         self, loop_name: str, initial_state: Optional[dict] = None, **kwargs
     ) -> AsyncIterator[Tuple[str, Any]]:
@@ -705,6 +854,9 @@ class WorkflowEngine:
         loop_meta = self.workflow.get_loop_metadata(loop_name)
         if not loop_meta:
             raise ValueError(f"Loop '{loop_name}' not found.")
+
+        # === MERGE YAML STEPS INTO THE LOOP ===
+        self.workflow.merge_loop_steps_from_yaml(self)  # ← new call
 
         state: AgentState = (
             initial_state if isinstance(initial_state, AgentState) else AgentState()
@@ -718,15 +870,12 @@ class WorkflowEngine:
         for iteration in range(1, max_iter + 1):
             logger.debug(f"[{loop_name}] iteration {iteration}/{max_iter}")
 
-            handler = loop_meta["handler"]
-
-            async for event, payload in handler(self.agent, state, **kwargs):
-                yield event, payload
-
-                if event == "llm_response" and isinstance(payload, dict):
-                    state.full_reply = payload.get("full_reply", state.full_reply)
-                    state.tool_calls = payload.get("tool_calls", state.tool_calls)
-                    state.is_complete = payload.get("is_complete", state.is_complete)
+            # If YAML (or merged) steps exist, run them as a mini-workflow
+            if "steps" in loop_meta and loop_meta["steps"]:
+                async for event, payload in self._run_loop_steps(
+                    loop_meta["steps"], iteration, state
+                ):
+                    yield event, payload
 
                 if break_condition and self.evaluate_named_condition(
                     break_condition, state
@@ -739,6 +888,34 @@ class WorkflowEngine:
                         {"condition": break_condition, "loop_name": loop_name},
                     )
                     return
+            else:
+                # Fallback: original decorator handler
+                handler = loop_meta.get("handler")
+                if not handler:
+                    logger.error(f"No handler and no steps for loop '{loop_name}'")
+                    break
+
+                async for event, payload in handler(self.agent, state, **kwargs):
+                    yield event, payload
+
+                    if event == "llm_response" and isinstance(payload, dict):
+                        state.full_reply = payload.get("full_reply", state.full_reply)
+                        state.tool_calls = payload.get("tool_calls", state.tool_calls)
+                        state.is_complete = payload.get(
+                            "is_complete", state.is_complete
+                        )
+
+                    if break_condition and self.evaluate_named_condition(
+                        break_condition, state
+                    ):
+                        logger.info(
+                            f"Loop '{loop_name}' broke on condition '{break_condition}'"
+                        )
+                        yield (
+                            "loop_broken",
+                            {"condition": break_condition, "loop_name": loop_name},
+                        )
+                        return
 
         else:
             logger.warning(f"Loop '{loop_name}' reached max iterations ({max_iter})")

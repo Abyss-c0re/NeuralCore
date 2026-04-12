@@ -3,6 +3,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 from inspect import signature, iscoroutinefunction
 
 from neuralcore.workflows.engine import WorkflowEngine
+from neuralcore.utils.config import get_loader
 from neuralcore.utils.logger import Logger
 
 logger = Logger.get_logger()
@@ -327,6 +328,26 @@ class Workflow:
 
     def get_condition(self, name: str) -> Optional[Callable]:
         return self.conditions.get(name)
+
+    def merge_yaml_loop_steps(self, engine: "WorkflowEngine"):
+        """Merge steps from YAML 'loops:' section into decorator-defined loops."""
+        loader = get_loader()
+        for loop_name, loop_cfg in loader.config.get("loops", {}).items():
+            if loop_name not in self.loops:
+                logger.warning(f"Loop '{loop_name}' defined in YAML but not registered via @workflow.loop")
+                continue
+
+            yaml_steps = loop_cfg.get("steps", [])
+            if not yaml_steps:
+                continue
+
+            if "steps" not in self.loops[loop_name]:
+                self.loops[loop_name]["steps"] = []
+
+            self.loops[loop_name]["steps"].extend(yaml_steps)
+
+            logger.info(f"✅ Merged {len(yaml_steps)} YAML steps into loop '{loop_name}' "
+                       f"(waits and other steps added)")
 
     def debug_print(self):
         print("\n" + "=" * 120)

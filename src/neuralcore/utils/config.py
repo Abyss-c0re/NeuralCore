@@ -116,6 +116,10 @@ class ConfigLoader:
             return client_cfg.get("workflow_sets", {})
         return self.config.get("workflows", {})
 
+    def get_loop_config(self, loop_name: str) -> dict:
+        """Get loop configuration from YAML, supporting live overrides."""
+        return self.config.get("loops", {}).get(loop_name, {})
+
     # ===================================================================
     # LOADERS — now support live override dicts
     # ===================================================================
@@ -374,7 +378,7 @@ class ConfigLoader:
 
 
 # --------------------------
-# Singleton 
+# Singleton
 # --------------------------
 loader: Optional[ConfigLoader] = None
 
