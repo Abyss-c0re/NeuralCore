@@ -66,7 +66,7 @@ The resulting report also proposed concrete, neuroscience-inspired enhancements 
 - **Workflow**: NeuralVoid orchestrator + sub-agent ReAct loops
 
 **Artifacts** (all inside this repository)  
-- Full Scientific Report → [`docs/experiments/neuroscience-memory-audit-2026-04-12.md`](docs/experiments/neuroscience-memory-audit-2026-04-12.md)  
+- Agent Generated Report → [`docs/experiments/neuroscience-memory-audit-2026-04-12.md`](docs/experiments/neuroscience-memory-audit-2026-04-12.md)  
 - Raw Experiment Log → [`logs/experiments/neuroscience-memory-audit-20260412.log`](docs/experiments/neuroscience-memory-audit-20260412.log)  
 - Source under audit → [`src/neuralcore/cognition/memory.py`](src/neuralcore/cognition/memory.py)
 
