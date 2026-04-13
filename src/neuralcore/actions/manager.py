@@ -1,54 +1,19 @@
-import re
 import inspect
 
 from functools import wraps
 from typing import Any, Dict, List, Optional, Set, Union, Callable
 from neuralcore.utils.search import fuzzy_score, keyword_score
+from neuralcore.utils.formatting import _tokenize, map_type_to_json
 from neuralcore.actions.actions import Action, ActionSet
 from neuralcore.workflows.registry import Workflow
 
 from inspect import signature, _empty, iscoroutinefunction
-from typing import get_origin
+
 
 from neuralcore.utils.logger import Logger
 
 
 logger = Logger.get_logger()
-
-PYTHON_TO_JSON_TYPE = {
-    str: "string",
-    int: "integer",
-    float: "number",
-    bool: "boolean",
-    list: "array",
-    dict: "object",
-}
-
-
-TOKENIZER = re.compile(r"\b\w+(?:[-_]\w+)*\b")
-
-
-def _tokenize(text: str) -> list[str]:
-    return TOKENIZER.findall(text.lower())
-
-
-def map_type_to_json(param_annotation):
-    """Convert Python type annotation to JSON Schema type."""
-    if param_annotation is _empty:
-        return "string"  # default type
-
-    # Handle basic types
-    if param_annotation in PYTHON_TO_JSON_TYPE:
-        return PYTHON_TO_JSON_TYPE[param_annotation]
-
-    # Handle typing generics like list[str], dict[str, int], etc.
-    origin = get_origin(param_annotation)
-    if origin in PYTHON_TO_JSON_TYPE:
-        return PYTHON_TO_JSON_TYPE[origin]
-
-    # Fallback
-    print(f"[Warning] Unmapped annotation {param_annotation}, defaulting to 'string'")
-    return "string"
 
 
 # ─────────────────────────────────────────────────────────────

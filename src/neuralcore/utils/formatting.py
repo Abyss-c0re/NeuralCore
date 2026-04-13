@@ -1,15 +1,49 @@
 import re
 import json
-
 import asyncio
 
-from typing import List, Dict, Any, Optional, Union
-from neuralcore.actions.actions import Action
+from inspect import _empty
+from typing import List, Dict, Any, Optional, Union, get_origin
 
+from neuralcore.actions.actions import Action
 from neuralcore.utils.logger import Logger
 
-
 logger = Logger.get_logger()
+
+PYTHON_TO_JSON_TYPE = {
+    str: "string",
+    int: "integer",
+    float: "number",
+    bool: "boolean",
+    list: "array",
+    dict: "object",
+}
+
+
+TOKENIZER = re.compile(r"\b\w+(?:[-_]\w+)*\b")
+
+
+def _tokenize(text: str) -> list[str]:
+    return TOKENIZER.findall(text.lower())
+
+
+def map_type_to_json(param_annotation):
+    """Convert Python type annotation to JSON Schema type."""
+    if param_annotation is _empty:
+        return "string"  # default type
+
+    # Handle basic types
+    if param_annotation in PYTHON_TO_JSON_TYPE:
+        return PYTHON_TO_JSON_TYPE[param_annotation]
+
+    # Handle typing generics like list[str], dict[str, int], etc.
+    origin = get_origin(param_annotation)
+    if origin in PYTHON_TO_JSON_TYPE:
+        return PYTHON_TO_JSON_TYPE[origin]
+
+    # Fallback
+    print(f"[Warning] Unmapped annotation {param_annotation}, defaulting to 'string'")
+    return "string"
 
 
 def safe_parse_json(raw_text: str):
@@ -31,18 +65,20 @@ def safe_parse_json(raw_text: str):
         logger.debug(f"JSON parsing still failed: {e}")
         return None
 
+
 def safe_json_dumps(obj: Any, **kwargs) -> str:
     """Never crash on Action, custom objects, Pydantic models, etc."""
+
     def default(o: Any):
-        if isinstance(o, Action):                          # ← explicit protection
+        if isinstance(o, Action):  # ← explicit protection
             return {
                 "name": getattr(o, "name", "unknown"),
                 "type": getattr(o, "type", "tool"),
                 # never serialize .executor or internal state
             }
-        if hasattr(o, "model_dump"):      # Pydantic v2
+        if hasattr(o, "model_dump"):  # Pydantic v2
             return o.model_dump()
-        if hasattr(o, "dict"):            # Pydantic v1
+        if hasattr(o, "dict"):  # Pydantic v1
             return o.dict()
         if hasattr(o, "__dict__"):
             return {k: v for k, v in o.__dict__.items() if not k.startswith("_")}
@@ -51,7 +87,7 @@ def safe_json_dumps(obj: Any, **kwargs) -> str:
     try:
         return json.dumps(obj, default=default, ensure_ascii=False, **kwargs)
     except Exception:
-        return str(obj)   # ultimate fallback — never crash the UI
+        return str(obj)  # ultimate fallback — never crash the UI
 
 
 async def drain_queue_to_string(queue: asyncio.Queue) -> str:
