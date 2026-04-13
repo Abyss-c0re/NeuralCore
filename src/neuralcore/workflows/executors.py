@@ -7,6 +7,7 @@ from neuralcore.agents.state import AgentState
 from neuralcore.actions.actions import ActionSet
 from neuralcore.utils.logger import Logger
 from neuralcore.actions.manager import registry
+from neuralcore.utils.prompt_builder import PromptBuilder
 
 logger = Logger.get_logger()
 
@@ -21,15 +22,7 @@ class AgentExecutors:
 
     # ====================== FAST CASUAL DETECTOR ======================
     async def _classify_intent(self, query: str) -> str:
-        prompt = f"""Classify this user message as either CASUAL or TASK.
-
-    CASUAL = greeting, small talk, "how are you", joke, opinion, thank you, chit-chat, storytelling, emotional support, philosophy, roleplay, simple general-knowledge questions.
-    TASK   = anything that might need tools, search, calculation, research, file/code work, actions, multi-step goal, current events, data lookup, etc.
-
-    User message: {query}
-
-    Answer with **exactly one word**: CASUAL or TASK"""
-
+        prompt = PromptBuilder.classify_intent(query)
         try:
             result = await self.agent.client.chat(
                 prompt, temperature=0.0, max_tokens=20
@@ -39,27 +32,11 @@ class AgentExecutors:
             return "CASUAL" if len(query.split()) < 25 else "TASK"
 
     def _build_casual_system_prompt(self) -> str:
-        return """You are a warm, friendly, engaging AI companion.
-        Be natural, use contractions, show personality, be concise unless asked otherwise.
-        Never mention tools, internal steps, thinking process, or knowledge base unless the user explicitly asks about them."""
+        return PromptBuilder.casual_system_prompt()
 
     async def _is_multi_step_task(self, query: str) -> bool:
         """Improved generic detection – now explicitly recognizes chained file operations."""
-        prompt = f"""You are an expert at analyzing user requests for multi-step execution.
-
-            Determine if this request is:
-            - SIMPLE → one direct action (single tool call)
-            - COMPLEX → requires **multiple distinct steps**, planning, sequencing, or dependencies
-
-            Be strict. Examples:
-            - "list files in this dir"          → SIMPLE
-            - "read config.json"                → SIMPLE
-            - "read this PDF and analyze this code from that point of view" → COMPLEX
-            - "open file A and reference it to analyze file B" → COMPLEX
-
-            Request: {query}
-
-        Answer with **exactly one word**: SIMPLE or COMPLEX"""
+        prompt = PromptBuilder.is_multi_step_task(query)
 
         try:
             result = await self.agent.client.chat(
@@ -82,36 +59,7 @@ class AgentExecutors:
         No hardcoding – pure LLM reasoning."""
         yield ("phase_changed", {"phase": "planning"})
 
-        planning_prompt = f"""You are a task decomposition expert. Break the following user request into the minimal number of clear, sequential sub-tasks.
-
-        USER REQUEST: {original_query}
-
-        Rules (strict):
-        - Each sub-task must be atomic and actionable.
-        - Include explicit dependencies (previous step indices, 0-based).
-        - If a step needs a tool that may not be loaded, note "may_require_FindTool".
-        - Output ONLY valid JSON, nothing else:
-
-        {{
-        "steps": [
-            {{
-            "description": "exact sub-task description",
-            "dependencies": [list of previous step indices or empty list],
-            "suggested_tool_category": "optional short hint or empty string"
-            }},
-            ...
-        ]
-        }}
-
-        Example for "open file A and reference it to analyze file B":
-        {{
-        "steps": [
-            {{ "description": "Load and read the full content of file A", "dependencies": [], "suggested_tool_category": "file_read" }},
-            {{ "description": "Analyze file B while referencing the loaded content from file A", "dependencies": [0], "suggested_tool_category": "file_analyze" }}
-        ]
-        }}
-
-        Return the plan:"""
+        planning_prompt = PromptBuilder.task_decomposition(original_query)
 
         try:
             plan_text = await self.agent.client.chat(
@@ -170,7 +118,9 @@ class AgentExecutors:
             if is_multi_step:
                 logger.info("[MULTI-STEP] Detected → structured planning")
                 yield ("phase_changed", {"phase": "planning"})
-                async for ev, pl in self.agent.flow._ensure_subtasks_planned(state, original_query):
+                async for ev, pl in self.agent.flow._ensure_subtasks_planned(
+                    state, original_query
+                ):
                     yield ev, pl
             else:
                 state.planned_tasks = [original_query]
@@ -190,9 +140,10 @@ class AgentExecutors:
             tool_browser_detected = False
             browse_query = original_query
 
-
             # ====================== STATE-AWARE PROMPT READJUSTMENT (STRICTED) ======================
-            if is_multi_step and 0 <= state.current_task_index < len(state.planned_tasks):
+            if is_multi_step and 0 <= state.current_task_index < len(
+                state.planned_tasks
+            ):
                 task_desc = state.planned_tasks[state.current_task_index]
 
                 # === NEW: Explicit list of every tool already used (prevents drift) ===
@@ -205,44 +156,38 @@ class AgentExecutors:
                     if i < len(state.tool_results):
                         tool_name = state.tool_results[i].get("name", "unknown")
                         preview = str(state.tool_results[i].get("result", ""))[:400]
-                        completed.append(f"Step {i} ({tool_name}) already done: {preview}...")
+                        completed.append(
+                            f"Step {i} ({tool_name}) already done: {preview}..."
+                        )
 
-                completed_context = "\n".join(completed) if completed else "No steps completed yet."
+                completed_context = (
+                    "\n".join(completed) if completed else "No steps completed yet."
+                )
 
                 # Remaining steps
                 remaining = []
                 for i in range(state.current_task_index + 1, len(state.planned_tasks)):
                     remaining.append(f"Step {i}: {state.planned_tasks[i]}")
 
-                remaining_context = "\n".join(remaining) if remaining else "No more steps."
+                remaining_context = (
+                    "\n".join(remaining) if remaining else "No more steps."
+                )
 
-                current_query = f"""You are executing **ONE SPECIFIC SUB-TASK ONLY**. Ignore everything else.
-
-                ORIGINAL USER REQUEST (background only): {original_query}
-
-                ALREADY COMPLETED STEPS (do NOT repeat any of these actions or tools):
-                {completed_context}
-
-                TOOLS ALREADY USED IN THIS SESSION (NEVER call these again on any future turn):
-                {used_tools_str}
-
-                REMAINING STEPS (after you finish the current one):
-                {remaining_context}
-
-                CURRENT SUB-TASK ({state.current_task_index + 1}/{len(state.planned_tasks)}): {task_desc}
-
-                STRICT EXECUTION PROTOCOL FOR THIS TURN ONLY:
-                1. Focus EXCLUSIVELY on the CURRENT SUB-TASK above.
-                2. If you need information from a previously read file, use the tool_results / KB context that is already provided — do NOT re-call any tool listed in "TOOLS ALREADY USED".
-                3. If the required tool is missing, call FindTool first. After FindTool succeeds, call the newly loaded tool.
-                4. After the tool for this sub-task succeeds and you have the result, you MUST immediately output EXACTLY this marker and nothing else:
-                {marker}
-                Do not add any commentary, do not say you are ready for the next step, do not continue thinking, do not summarize.
-
-                You are now on turn {state.loop_count}. Stay on protocol. No deviations."""
+                current_query = PromptBuilder.sub_task_execution(
+                    original_query=original_query,
+                    task_desc=task_desc,
+                    current_index=state.current_task_index,
+                    total_tasks=len(state.planned_tasks),
+                    completed_context=completed_context,
+                    used_tools_str=used_tools_str,
+                    remaining_context=remaining_context,
+                    marker=marker,
+                    loop_count=state.loop_count,
+                )
             else:
                 current_query = (
-                    original_query if state.loop_count == 1
+                    original_query
+                    if state.loop_count == 1
                     else f"USER ORIGINAL REQUEST: {original_query}\n\nPrevious results are in state.tool_results. Continue."
                 )
 
@@ -280,10 +225,16 @@ class AgentExecutors:
                     elif kind in ("tool_delta", "tool_complete", "needs_confirmation"):
                         tools_called_this_turn = True
                         if isinstance(payload, dict):
-                            tool_name = payload.get("tool_name") or payload.get("name") or "unknown"
+                            tool_name = (
+                                payload.get("tool_name")
+                                or payload.get("name")
+                                or "unknown"
+                            )
                             if "FindTool" in tool_name:
                                 tool_browser_detected = True
-                                browse_query = payload.get("args", {}).get("query", original_query)
+                                browse_query = payload.get("args", {}).get(
+                                    "query", original_query
+                                )
                                 yield ("phase_changed", {"phase": "handling_findtool"})
                                 break
 
@@ -300,7 +251,9 @@ class AgentExecutors:
 
             # ====================== FINDTOOL RESTART ======================
             if tool_browser_detected:
-                logger.info("[FindTool] Detected → handling interception + FULL state reset")
+                logger.info(
+                    "[FindTool] Detected → handling interception + FULL state reset"
+                )
                 state.loop_count = 0
                 state.empty_loops = 0
                 state.action_restarts = 0
@@ -315,26 +268,37 @@ class AgentExecutors:
             # ====================== TOOL RESULT + ANTI-REPEAT ======================
             if len(state.tool_results) > prev_tool_result_count:
                 if not is_multi_step:
-                    logger.info("Single-step task completed via tool result → marking goal achieved")
+                    logger.info(
+                        "Single-step task completed via tool result → marking goal achieved"
+                    )
                     state.mark_goal_achieved("Tool results populated in state")
                     break
                 else:
-                    logger.info(f"Tool result received during multi-step (step {state.current_task_index}) – waiting for marker to advance")
+                    logger.info(
+                        f"Tool result received during multi-step (step {state.current_task_index}) – waiting for marker to advance"
+                    )
 
             # ====================== MARKER / ADVANCEMENT ======================
             if has_marker:
-                if not is_multi_step or state.current_task_index >= len(state.planned_tasks) - 1:
+                if (
+                    not is_multi_step
+                    or state.current_task_index >= len(state.planned_tasks) - 1
+                ):
                     state.mark_goal_achieved("Marker detected + all sub-tasks done")
                     break
                 else:
-                    logger.info(f"[MULTI-STEP] Sub-task {state.current_task_index} complete → advancing")
+                    logger.info(
+                        f"[MULTI-STEP] Sub-task {state.current_task_index} complete → advancing"
+                    )
                     state.current_task_index += 1
                     state.empty_loops = 0
                     continue
 
             # ====================== AGGRESSIVE ANTI-REPEAT ======================
             if tools_called_this_turn and is_multi_step and not has_marker:
-                logger.warning(f"[ANTI-REPEAT FORCE] Tool was called on step {state.current_task_index} but no marker – forcing advance to prevent infinite loop")
+                logger.warning(
+                    f"[ANTI-REPEAT FORCE] Tool was called on step {state.current_task_index} but no marker – forcing advance to prevent infinite loop"
+                )
                 state.current_task_index += 1
                 state.empty_loops = 0
                 continue
@@ -368,7 +332,9 @@ class AgentExecutors:
                     state.mark_goal_achieved("Max action restarts reached")
                     break
                 else:
-                    logger.info(f"[Action Restart #{state.action_restarts}] Detected '{detected_keyword}'")
+                    logger.info(
+                        f"[Action Restart #{state.action_restarts}] Detected '{detected_keyword}'"
+                    )
                     continue
 
             if (
@@ -391,14 +357,8 @@ class AgentExecutors:
         # ====================== FINAL SYNTHESIS ======================
         yield ("phase_changed", {"phase": "generating_final_answer"})
 
-        final_query = (
-            f"USER ORIGINAL REQUEST: {original_query}\n\n"
-            f"Task is now complete (or max loops reached). "
-            "Summarize using ONLY the verified results from state.tool_results. Be concise."
-        )
-
         final_messages = await self.agent.context_manager.provide_context(
-            query=final_query,
+            query=PromptBuilder.final_synthesis(original_query),
             max_input_tokens=self.agent.max_tokens,
             reserved_for_output=8000,
             system_prompt=self._build_objective_reminder() + "\n\nFINAL ANSWER MODE",
@@ -424,8 +384,11 @@ class AgentExecutors:
         )
 
         if not state.goal_reached:
-            logger.warning(f"Loop ended without explicit goal (loop_count={state.loop_count})")
+            logger.warning(
+                f"Loop ended without explicit goal (loop_count={state.loop_count})"
+            )
             state.mark_goal_achieved("Loop termination")
+
     # ====================== REFACTORED AGENTIC LOOP (for sub-agents) ======================
     async def agentic_loop(
         self,
@@ -510,21 +473,10 @@ class AgentExecutors:
         # (your exact code from the paste — unchanged)
         logger.info(f"[FindTool INTERCEPT] original='{original_user_query[:150]}...'")
 
-        refinement_prompt = f"""You are an expert tool-router.
-        Convert this user request into a SHORT, keyword-rich query (max 12 words) that will perfectly match the best tool in our registry.
-
-        USER REQUEST: {original_user_query}
-
-        Rules:
-        - Focus ONLY on the core capability needed (e.g. "web search weather", "read pdf file", "search codebase function").
-        - Use terms that appear in tool names/descriptions/tags.
-        - Do NOT include specific data values (e.g. do NOT put "Poland").
-        - Return ONLY the refined query as plain text, nothing else.
-
-        Refined query:"""
-
         refined_query = await self.agent.client.chat(
-            refinement_prompt, temperature=0.0, max_tokens=80
+            PromptBuilder.findtool_refinement(original_user_query),
+            temperature=0.0,
+            max_tokens=80,
         )
         refined_query = refined_query.strip().strip("\"'").strip()
         logger.info(f"[FindTool] REFINED search query → '{refined_query}'")
@@ -535,23 +487,11 @@ class AgentExecutors:
             for t in all_tools
         )
 
-        selection_prompt = f"""REFINED INTENT (use this for matching): {refined_query}
-
-        USER ORIGINAL REQUEST: {original_user_query}
-
-        AVAILABLE TOOLS:
-        {tool_list_str}
-
-        You MUST pick the SINGLE best tool that can fulfill the refined intent.
-        Return ONLY valid JSON (no extra text, no markdown):
-
-        {{
-        "tool_name": "exact_tool_name",
-        "parameters": {{ "key": "value", ... }},
-        "reason": "one short sentence"
-        }}
-
-        If no tool is clearly better than others, still pick the closest one."""
+        selection_prompt = PromptBuilder.findtool_selection(
+            refined_query=refined_query,
+            original_user_query=original_user_query,
+            tool_list_str=tool_list_str,
+        )
 
         selection_text = await self.agent.client.chat(
             selection_prompt, temperature=0.0, max_tokens=700
