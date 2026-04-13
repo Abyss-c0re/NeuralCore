@@ -59,7 +59,7 @@ class AgentExecutors:
 
             Request: {query}
 
-    Answer with **exactly one word**: SIMPLE or COMPLEX"""
+        Answer with **exactly one word**: SIMPLE or COMPLEX"""
 
         try:
             result = await self.agent.client.chat(
