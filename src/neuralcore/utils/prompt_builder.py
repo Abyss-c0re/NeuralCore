@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import List, Dict
 
 from neuralcore.utils.os_info import get_os_info
 from neuralcore.utils.logger import Logger
@@ -235,3 +236,204 @@ class PromptBuilder:
         }}
 
         If no tool is clearly better than others, still pick the closest one."""
+
+    @staticmethod
+    def agentic_action_system_prefix() -> str:
+        """Strong, always-present instruction that forces tool usage over explanation in agentic mode."""
+        return """You are an ACTION-ORIENTED AGENT with direct tool access.
+
+        CORE RULES (never violate):
+        - If the user request involves any concrete action (add, create, write, modify, execute, implement, read, analyze with tools, etc.) → CALL THE APPROPRIATE TOOL immediately.
+        - NEVER respond with a summary, report, or explanation when a tool can fulfill the request.
+        - You have access to write_file, read_file, execute commands, FindTool, and many others. Use them directly.
+        - If the exact tool you need is not currently loaded, call FindTool first.
+        - After a tool succeeds and the current request is complete, output exactly: [FINAL_ANSWER_COMPLETE]
+        - Do not add commentary like "Based on previous analysis..." unless explicitly asked.
+
+        Stay in tool-execution mode until the goal is achieved."""
+
+    @staticmethod
+    def loaded_tools_summary(loaded_tool_names: List[str]) -> str:
+        """Helper to show currently loaded tools."""
+        if not loaded_tool_names:
+            return "No tools are currently loaded. Call FindTool if you need any capability."
+        return "Currently loaded tools:\n" + "\n".join(
+            f"• {name}" for name in loaded_tool_names
+        )
+
+    @staticmethod
+    def context_summary_instruction() -> str:
+        """Instruction for how to use the context summary block."""
+        return "→ Use this context to stay aware. Never repeat the summary."
+
+    @staticmethod
+    def recent_logs_section(log_lines: list) -> str:
+        """Formats recent logs as a clean section."""
+        if not log_lines:
+            return ""
+        return "=== RECENT LOGS ===\n" + "\n".join(log_lines) + "\n=== END LOGS ==="
+
+    @staticmethod
+    def objective_and_state_section(
+        objective_text: str, loaded_tools_summary: str = ""
+    ) -> str:
+        """Combines objective reminder with optional loaded tools info."""
+        parts = [f"=== OBJECTIVE & CURRENT STATE ===\n{objective_text}"]
+        if loaded_tools_summary:
+            parts.append(loaded_tools_summary)
+        parts.append("=== END STATE ===")
+        return "\n\n".join(parts)
+
+    @staticmethod
+    def tool_call_history_section(call_history_text: str, last_three_text: str) -> str:
+        """Formats tool history and recent outputs."""
+        if not call_history_text and not last_three_text:
+            return ""
+
+        block = "=== TOOL CALL HISTORY & RECENT OUTPUTS ===\n"
+        if call_history_text:
+            block += (
+                f"Recent tool calls (with parameters only):\n{call_history_text}\n\n"
+            )
+        if last_three_text:
+            block += (
+                f"Full output from the last 3 tool executions:\n{last_three_text}\n"
+            )
+        block += (
+            "Use the call history to avoid repeating the same actions. "
+            "Use the full outputs directly when they are relevant to the current goal."
+        )
+        return block
+
+    @staticmethod
+    def relevant_external_context_section(kb_text: str) -> str:
+        """Formats KB / external context block."""
+        if not kb_text:
+            return ""
+        return f"=== RELEVANT EXTERNAL CONTEXT ===\n{kb_text}\n=== END EXTERNAL CONTEXT ==="
+
+    @staticmethod
+    def knowledge_retrieval_embedding_query(user_query: str) -> str:
+        """Query prefix used for embedding-based retrieval."""
+        return f"Search query for relevant tool results and context: {user_query}"
+
+    @staticmethod
+    def knowledge_block_header(source_type: str, key: str, meta_str: str) -> str:
+        """Formats the header for each knowledge block."""
+        return f"[{source_type.upper()}] {key}\nMetadata: {meta_str}\n"
+
+    @staticmethod
+    def knowledge_block_separator() -> str:
+        """Separator between knowledge blocks."""
+        return "─" * 50 + "\n"
+
+    @staticmethod
+    def retrieve_relevant_knowledge_summary(
+        returned_chars: int,
+        tool_outcome_count: int,
+        blocked_count: int,
+        total_scored: int,
+    ) -> str:
+        """Optional debug-style summary (can be used in logs if needed)."""
+        return (
+            f"retrieve_relevant_knowledge FINISHED | "
+            f"returned_chars={returned_chars} | "
+            f"tool_outcomes_included={tool_outcome_count} | "
+            f"blocked_contaminated={blocked_count} | "
+            f"total_scored={total_scored}"
+        )
+
+    @staticmethod
+    def context_summary_header() -> str:
+        return "📋 LIVE CONTEXT SUMMARY"
+
+    @staticmethod
+    def context_summary_chat_header() -> str:
+        return "📋 CHAT CONTEXT (light)"
+
+    @staticmethod
+    def context_summary_files_section(files: List[str]) -> str:
+        return f"• Files checked: {', '.join(files) if files else '—'}"
+
+    @staticmethod
+    def context_summary_tools_section(tools: List[str]) -> str:
+        return f"• Tools used: {', '.join(tools) if tools else '—'}"
+
+    @staticmethod
+    def context_summary_kb_section(kb_count: int) -> str:
+        return f"• KB items: {kb_count}"
+
+    @staticmethod
+    def context_summary_token_section(current: int, max_tokens: int) -> str:
+        warning = (
+            "⚠️ Approaching context window limit..."
+            if current > max_tokens * 0.8
+            else ""
+        )
+        return f"• Estimated tokens: {current} / {max_tokens} {warning}"
+
+    @staticmethod
+    def context_summary_topic_section(topic_name: str) -> str:
+        return f"• Active topic: {topic_name}"
+
+    @staticmethod
+    def context_summary_last_messages_header() -> str:
+        return "📝 LAST MESSAGES"
+
+    @staticmethod
+    def context_summary_investigation_header() -> str:
+        return "🧠 INVESTIGATION STATE"
+
+    @staticmethod
+    def context_summary_investigation_block(
+        goal: str, pending: List[str], completed: List[str]
+    ) -> str:
+        return (
+            f"• Goal: {goal or '—'}\n"
+            f"• Pending: {', '.join(pending[:5]) if pending else '—'}\n"
+            f"• Completed: {', '.join(completed[-5:]) if completed else '—'}"
+        )
+
+    @staticmethod
+    def task_context_header(task_name: str) -> str:
+        return f"🔹 TASK CONTEXT: {task_name.upper()}"
+
+    @staticmethod
+    def task_context_important_files_section(files: List[str]) -> str:
+        return f"Important files: {', '.join(sorted(files))[:12]}"
+
+    @staticmethod
+    def task_context_key_results_section(results: List[Dict]) -> str:
+        return "\n".join(f"• {r['title']}: {r['summary']}" for r in results[-10:])
+
+    @staticmethod
+    def task_context_findings_section(findings: List[str]) -> str:
+        return "Key Findings:\n" + "\n".join(f"   - {f}" for f in findings[-8:])
+
+    @staticmethod
+    def task_context_hypotheses_section(hypotheses: List[str]) -> str:
+        return "Hypotheses:\n" + "\n".join(f"   - {h}" for h in hypotheses[-5:])
+
+    @staticmethod
+    def latest_tool_block(
+        tool_name: str, timestamp_str: str, size: int, content: str
+    ) -> str:
+        return (
+            f"🔥 LATEST TOOL: {tool_name}\n"
+            f"{timestamp_str}"
+            f"Result size: {size:,} characters\n\n"
+            f"{content}\n"
+            f"{'─' * 90}\n"
+        )
+
+    @staticmethod
+    def contamination_forbidden_phrases() -> List[str]:
+        """Centralized list used by add_external_content and _retrieve_relevant_knowledge."""
+        return [
+            "You are a helpful Terminal AI agent",
+            "CONTEXT WINDOW STATUS",
+            "RELEVANT EXTERNAL CONTEXT",
+            "CHAT CONTEXT (light)",
+            "[FINAL_ANSWER_COMPLETE]",
+            "AUTONOMOUS CONTINUATION",
+        ]

@@ -7,7 +7,7 @@ import hashlib
 import json
 from typing import Tuple, List, Dict, Any, Optional
 from neuralcore.utils.logger import Logger
-from neuralcore.utils.prompt_builder import PromptBuilder as PromptHelper
+from neuralcore.utils.prompt_builder import PromptBuilder
 from neuralcore.utils.config import get_loader
 from neuralcore.clients.factory import get_clients
 from neuralcore.utils.text_tokenizer import TextTokenizer
@@ -357,22 +357,28 @@ class ContextManager:
             self.hypotheses.append(hypothesis[:300])
 
         def get_context(self, max_tokens: int = 3500) -> str:
-            lines = [f"🔹 TASK CONTEXT: {self.name.upper()}"]
+            lines = [PromptBuilder.task_context_header(self.name)]
+
             if self.important_files:
-                files_str = ", ".join(sorted(list(self.important_files))[:12])
-                lines.append(f"Important files: {files_str}")
-            for r in self.key_results[-10:]:
-                lines.append(f"• {r['title']}: {r['summary']}")
-            if self.findings:
                 lines.append(
-                    "Key Findings:\n"
-                    + "\n".join(f"   - {f}" for f in self.findings[-8:])
+                    PromptBuilder.task_context_important_files_section(
+                        list(self.important_files)
+                    )
                 )
+
+            if self.key_results:
+                lines.append(
+                    PromptBuilder.task_context_key_results_section(self.key_results)
+                )
+
+            if self.findings:
+                lines.append(PromptBuilder.task_context_findings_section(self.findings))
+
             if self.hypotheses:
                 lines.append(
-                    "Hypotheses:\n"
-                    + "\n".join(f"   - {h}" for h in self.hypotheses[-5:])
+                    PromptBuilder.task_context_hypotheses_section(self.hypotheses)
                 )
+
             text = "\n".join(lines)
             return text[: max_tokens * 4]
 
@@ -470,18 +476,19 @@ class ContextManager:
         return list(dict.fromkeys(mentions))  # dedup preserve order
 
     # ─────────────────────────────────────────────────────────────
-    # CONTEXT SUMMARY, PRUNING, INVESTIGATION STATE (unchanged)
+    # CONTEXT SUMMARY, PRUNING, INVESTIGATION STATE
     # ─────────────────────────────────────────────────────────────
     def get_context_summary(self, max_messages: int = 10, max_chars: int = 1000) -> str:
         if self.mode == "chat":
             if not self.pure_chat_history:
                 return ""
             recent = self.pure_chat_history[-4:]
-            lines = ["📋 CHAT CONTEXT (light)"]
+            lines = [PromptBuilder.context_summary_chat_header()]
             lines.extend(
                 f"[{msg['role'].upper()}] {msg['content'][:120]}..." for msg in recent
             )
             return "\n".join(lines)
+
         files = sorted(list(self.files_checked))
         tools = self.tools_executed
         recent_messages = self.current_topic.history[-max_messages:]
@@ -489,36 +496,33 @@ class ContextManager:
             f"[{msg['role'].upper()}] {msg['content'][:200]}{'...' if len(msg['content']) > 200 else ''}"
             for msg in recent_messages
         ]
+
         total_tokens = (
             sum(self.current_topic.history_tokens)
             if self.current_topic.history_tokens
             else 0
         )
-        token_warning = (
-            "⚠️ Approaching context window limit..."
-            if total_tokens > self.max_tokens * 0.8
-            else ""
-        )
+
         lines = [
-            "📋 LIVE CONTEXT SUMMARY",
-            f"• Files checked: {', '.join(files) if files else '—'}",
-            f"• Tools used: {', '.join(tools) if tools else '—'}",
-            f"• KB items: {len(self.knowledge_base)}",
-            f"• Estimated tokens: {total_tokens} / {self.max_tokens} {token_warning}",
-            f"• Active topic: {self.current_topic.name}",
+            PromptBuilder.context_summary_header(),
+            PromptBuilder.context_summary_files_section(files),
+            PromptBuilder.context_summary_tools_section(tools),
+            PromptBuilder.context_summary_kb_section(len(self.knowledge_base)),
+            PromptBuilder.context_summary_token_section(total_tokens, self.max_tokens),
+            PromptBuilder.context_summary_topic_section(self.current_topic.name),
             "",
-            "📝 LAST MESSAGES",
+            PromptBuilder.context_summary_last_messages_header(),
             *message_summaries,
         ]
+
         inv = self.investigation_state
-        inv_block = [
-            "",
-            "🧠 INVESTIGATION STATE",
-            f"• Goal: {inv['goal'] or '—'}",
-            f"• Pending: {', '.join(inv['pending'][:5]) if inv['pending'] else '—'}",
-            f"• Completed: {', '.join(inv['completed'][-5:]) if inv['completed'] else '—'}",
-        ]
-        lines.extend(inv_block)
+        inv_block = PromptBuilder.context_summary_investigation_block(
+            goal=inv["goal"], pending=inv["pending"], completed=inv["completed"]
+        )
+        lines.extend(
+            ["", PromptBuilder.context_summary_investigation_header(), inv_block]
+        )
+
         full_summary = "\n".join(lines)
         if len(full_summary) > max_chars:
             cutoff = max_chars - 50
@@ -642,14 +646,7 @@ class ContextManager:
         content_lower = content.lower()
 
         # ── Smart, less aggressive guard ──
-        forbidden = [
-            "You are a helpful Terminal AI agent",
-            "CONTEXT WINDOW STATUS",
-            "RELEVANT EXTERNAL CONTEXT",
-            "CHAT CONTEXT (light)",
-            "[FINAL_ANSWER_COMPLETE]",
-            "AUTONOMOUS CONTINUATION",
-        ]
+        forbidden = PromptBuilder.contamination_forbidden_phrases()
 
         is_contaminated = any(phrase.lower() in content_lower for phrase in forbidden)
 
@@ -811,7 +808,8 @@ class ContextManager:
     # KNOWLEDGE RETRIEVAL (now fully async)
     # ─────────────────────────────────────────────────────────────
     async def _retrieve_relevant_knowledge(self, query: str, max_kb_tokens: int) -> str:
-        """Hybrid RAG with parameter/file-aware boosting for exact tool matches."""
+        """Hybrid RAG with parameter/file-aware boosting for exact tool matches.
+        All prompt text moved to PromptBuilder."""
         if not self.knowledge_base or not query.strip():
             logger.debug(
                 "retrieve_relevant_knowledge: KB empty or query empty → returning ''"
@@ -823,7 +821,8 @@ class ContextManager:
             f"KB_size={len(self.knowledge_base)} | max_kb_tokens={max_kb_tokens}"
         )
 
-        embedding_query = f"Search query for relevant tool results and context: {query}"
+        # Use centralized prompt for embedding query
+        embedding_query = PromptBuilder.knowledge_retrieval_embedding_query(query)
         query_emb = await self.fetch_embedding(embedding_query, prefix="query")
 
         sparse_scores = await self._sparse_retrieve(query)
@@ -902,19 +901,11 @@ class ContextManager:
         tool_outcome_count = 0
         blocked_count = 0
 
+        forbidden_phrases = PromptBuilder.contamination_forbidden_phrases()
+
         for score, key, item in scored[:40]:
             # Contamination guard
-            if any(
-                forbidden in item.content
-                for forbidden in [
-                    "You are a helpful Terminal AI agent",
-                    "CONTEXT WINDOW STATUS",
-                    "RELEVANT EXTERNAL CONTEXT",
-                    "CHAT CONTEXT (light)",
-                    "AUTONOMOUS CONTINUATION",
-                    "[FINAL_ANSWER_COMPLETE]",
-                ]
-            ):
+            if any(forbidden in item.content for forbidden in forbidden_phrases):
                 blocked_count += 1
                 continue
 
@@ -922,8 +913,14 @@ class ContextManager:
                 tool_outcome_count += 1
 
             meta_str = ", ".join(f"{k}={v}" for k, v in item.metadata.items() if v)
-            header = f"[{item.source_type.upper()}] {item.key}\nMetadata: {meta_str}\n"
-            block = f"{header}{item.content}\n{'─' * 50}\n"
+            header = PromptBuilder.knowledge_block_header(
+                source_type=item.source_type,
+                key=item.key,
+                meta_str=meta_str,
+            )
+            block = (
+                f"{header}{item.content}\n{PromptBuilder.knowledge_block_separator()}"
+            )
 
             block_tokens = (
                 self.tokenizer.count_tokens(block)
@@ -943,11 +940,12 @@ class ContextManager:
         result = "".join(parts)
 
         logger.debug(
-            f"retrieve_relevant_knowledge FINISHED | "
-            f"returned_chars={len(result)} | "
-            f"tool_outcomes_included={tool_outcome_count} | "
-            f"blocked_contaminated={blocked_count} | "
-            f"total_scored={len(scored)}"
+            PromptBuilder.retrieve_relevant_knowledge_summary(
+                returned_chars=len(result),
+                tool_outcome_count=tool_outcome_count,
+                blocked_count=blocked_count,
+                total_scored=len(scored),
+            )
         )
 
         return result
@@ -1125,7 +1123,7 @@ class ContextManager:
         while attempt < max_retries:
             await asyncio.sleep(0.3)
             try:
-                response = await self.client.ask(PromptHelper.topics_helper(history))
+                response = await self.client.ask(PromptBuilder.topics_helper(history))
                 if not isinstance(response, str):
                     attempt += 1
                     continue
@@ -1197,7 +1195,9 @@ class ContextManager:
                     messages.append(
                         {
                             "role": "system",
-                            "content": f"=== RELEVANT TOOL RESULTS & FILES ===\n{kb_text}\n=== END CONTEXT ===",
+                            "content": PromptBuilder.relevant_external_context_section(
+                                kb_text
+                            ),
                         }
                     )
 
@@ -1224,21 +1224,25 @@ class ContextManager:
 
         # ── AGENTIC MODE ──
         logger.debug("→ Entering AGENTIC mode")
-        base_system = system_prompt.strip()
+
+        # 1. Strong action prefix + base system
+        full_system = (
+            PromptBuilder.agentic_action_system_prefix()
+            + "\n\n"
+            + system_prompt.strip()
+        )
+
         summary = self.get_context_summary()
-        full_system = base_system
         if summary:
-            full_system += f"\n\n{summary}\n\n→ Use this context to stay aware. Never repeat the summary."
+            full_system += (
+                f"\n\n{summary}\n\n{PromptBuilder.context_summary_instruction()}"
+            )
 
         if include_logs:
             try:
                 log_lines = Logger.get_log_data(level="info", max_entries=100)
                 if log_lines:
-                    full_system += (
-                        f"\n\n=== RECENT LOGS ===\n"
-                        + "\n".join(log_lines)
-                        + "\n=== END LOGS ==="
-                    )
+                    full_system += f"\n\n{PromptBuilder.recent_logs_section(log_lines)}"
             except Exception:
                 pass
 
@@ -1253,10 +1257,12 @@ class ContextManager:
             )
             objective_text = state.get_objective_reminder()
 
+            objective_block = PromptBuilder.objective_and_state_section(objective_text)
+
             messages.append(
                 {
                     "role": "system",
-                    "content": f"=== OBJECTIVE & CURRENT STATE ===\n{objective_text}\n=== END STATE ===",
+                    "content": objective_block,
                 }
             )
             tokens_used = self.count_tokens(messages)
@@ -1286,18 +1292,10 @@ class ContextManager:
             max_total_tokens=9000,
         )
 
-        if call_history_text or last_three_text:
-            tool_block = "=== TOOL CALL HISTORY & RECENT OUTPUTS ===\n"
-            if call_history_text:
-                tool_block += f"Recent tool calls (with parameters only):\n{call_history_text}\n\n"
-            if last_three_text:
-                tool_block += (
-                    f"Full output from the last 3 tool executions:\n{last_three_text}\n"
-                )
-            tool_block += (
-                "Use the call history to avoid repeating the same actions. "
-                "Use the full outputs directly when they are relevant to the current goal."
-            )
+        tool_block = PromptBuilder.tool_call_history_section(
+            call_history_text, last_three_text
+        )
+        if tool_block:
             messages.append({"role": "system", "content": tool_block})
             tokens_used = self.count_tokens(messages)
             logger.debug(
@@ -1329,7 +1327,9 @@ class ContextManager:
                 messages.append(
                     {
                         "role": "system",
-                        "content": f"=== RELEVANT EXTERNAL CONTEXT ===\n{kb_text}\n=== END EXTERNAL CONTEXT ===",
+                        "content": PromptBuilder.relevant_external_context_section(
+                            kb_text
+                        ),
                     }
                 )
                 tokens_used = self.count_tokens(messages)
@@ -1615,20 +1615,18 @@ class ContextManager:
             logger.debug("No entries in knowledge_base")
             return ""
 
-        tool_items = []
-        for key, item in self.knowledge_base.items():
-            if item.source_type == "tool_outcome":
-                ts = item.metadata.get("timestamp", 0)
-                tool_name = item.metadata.get("tool", "unknown")
-                size = len(item.content)
-                tool_items.append((ts, key, item, tool_name, size))
-
-        # Sort by timestamp (newest first)
+        tool_items = [
+            (
+                item.metadata.get("timestamp", 0),
+                key,
+                item,
+                item.metadata.get("tool", "unknown"),
+                len(item.content),
+            )
+            for key, item in self.knowledge_base.items()
+            if item.source_type == "tool_outcome"
+        ]
         tool_items.sort(reverse=True)
-
-        logger.info(f"_get_recent_tool_outcomes: Found {len(tool_items)} tool outcomes")
-        for i, (ts, _, _, name, size) in enumerate(tool_items[:3]):
-            logger.info(f"  #{i + 1} → {name} | {size:,} chars | ts={ts:.3f}")
 
         parts: List[str] = []
         used_tokens = 0
@@ -1640,12 +1638,11 @@ class ContextManager:
                 else ""
             )
 
-            block = (
-                f"🔥 LATEST TOOL: {tool_name}\n"
-                f"{timestamp_str}"
-                f"Result size: {size:,} characters\n\n"
-                f"{item.content}\n"
-                f"{'─' * 90}\n"
+            block = PromptBuilder.latest_tool_block(
+                tool_name=tool_name,
+                timestamp_str=timestamp_str,
+                size=size,
+                content=item.content,
             )
 
             block_tokens = (
@@ -1655,21 +1652,9 @@ class ContextManager:
             )
 
             if used_tokens + block_tokens > max_total_tokens:
-                logger.debug(f"Token budget reached after {len(parts)} results")
                 break
 
             parts.append(block)
             used_tokens += block_tokens
 
-            logger.info(
-                f"→ Included {tool_name} ({size:,} chars, ~{block_tokens} tokens)"
-            )
-
-        if not parts:
-            logger.warning("No recent tool results returned")
-            return ""
-
-        logger.info(
-            f"_get_recent_tool_outcomes → RETURNED {len(parts)} results ({used_tokens} tokens)"
-        )
-        return "\n".join(parts)
+        return "\n".join(parts) if parts else ""
