@@ -167,28 +167,28 @@ class PromptBuilder:
         """State-aware prompt for executing one specific sub-task in multi-step flow."""
         return f"""You are executing **ONE SPECIFIC SUB-TASK ONLY**. Ignore everything else.
 
-    ORIGINAL USER REQUEST (background only): {original_query}
+        ORIGINAL USER REQUEST (background only): {original_query}
 
-    ALREADY COMPLETED STEPS (do NOT repeat any of these actions or tools):
-    {completed_context}
+        ALREADY COMPLETED STEPS (do NOT repeat any of these actions or tools):
+        {completed_context}
 
-    TOOLS ALREADY USED IN THIS SESSION (NEVER call these again on any future turn):
-    {used_tools_str}
+        TOOLS ALREADY USED IN THIS SESSION (NEVER call these again on any future turn):
+        {used_tools_str}
 
-    REMAINING STEPS (after you finish the current one):
-    {remaining_context}
+        REMAINING STEPS (after you finish the current one):
+        {remaining_context}
 
-    CURRENT SUB-TASK ({current_index + 1}/{total_tasks}): {task_desc}
+        CURRENT SUB-TASK ({current_index + 1}/{total_tasks}): {task_desc}
 
-    STRICT EXECUTION PROTOCOL FOR THIS TURN ONLY:
-    1. Focus EXCLUSIVELY on the CURRENT SUB-TASK above.
-    2. If you need information from a previously read file, use the tool_results / KB context that is already provided — do NOT re-call any tool listed in "TOOLS ALREADY USED".
-    3. If the required tool is missing, call FindTool first. After FindTool succeeds, call the newly loaded tool.
-    4. After the tool for this sub-task succeeds and you have the result, you MUST immediately output EXACTLY this marker and nothing else:
-    {marker}
-    Do not add any commentary, do not say you are ready for the next step, do not continue thinking, do not summarize.
+        STRICT EXECUTION PROTOCOL FOR THIS TURN ONLY:
+        1. Focus EXCLUSIVELY on the CURRENT SUB-TASK above.
+        2. If you need information from a previously read file, use the tool_results / KB context that is already provided — do NOT re-call any tool listed in "TOOLS ALREADY USED".
+        3. If the required tool is missing, call FindTool first. After FindTool succeeds, call the newly loaded tool.
+        4. After the tool for this sub-task succeeds and you have the result, you MUST immediately output EXACTLY this marker and nothing else:
+        {marker}
+        Do not add any commentary, do not say you are ready for the next step, do not continue thinking, do not summarize.
 
-    You are now on turn {loop_count}. Stay on protocol. No deviations."""
+        You are now on turn {loop_count}. Stay on protocol. No deviations."""
 
     @staticmethod
     def final_synthesis(original_query: str) -> str:
