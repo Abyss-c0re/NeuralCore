@@ -388,7 +388,6 @@ class AgentExecutors:
             logger.warning(
                 f"Loop ended without explicit goal (loop_count={state.loop_count})"
             )
-            state.mark_goal_achieved("Loop termination")
 
     # ====================== REFACTORED AGENTIC LOOP (for sub-agents) ======================
     async def agentic_loop(
