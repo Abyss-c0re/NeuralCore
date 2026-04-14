@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Any, List, Dict, Optional
 import time
-
+from neuralcore.utils.prompt_builder import PromptBuilder
 from neuralcore.utils.logger import Logger
 
 logger = Logger.get_logger()
@@ -262,6 +262,7 @@ class AgentState:
             )
 
     def get_objective_reminder(self) -> str:
+        """Builds dynamic state reminder and delegates formatting to PromptBuilder."""
         parts: List[str] = []
 
         goal_text = self.goal or self.task or "No goal set"
@@ -299,7 +300,6 @@ class AgentState:
             for idx, dep_list in self.task_dependencies.items():
                 if isinstance(idx, int) and 0 <= idx < len(self.planned_tasks):
                     dep_names: List[str] = []
-                    # Critical guard: dep_list is guaranteed list but we protect against old state
                     if isinstance(dep_list, list):
                         for d in dep_list:
                             if isinstance(d, int) and 0 <= d < len(self.planned_tasks):
@@ -311,17 +311,10 @@ class AgentState:
             if dep_parts:
                 parts.append("Dependencies:\n" + "\n".join(dep_parts[:4]))
 
-        reminder = "\n".join(parts)
+        reminder_body = "\n".join(parts)
 
-        return f"""OBJECTIVE REMINDER:
-        {reminder}
-
-        CRITICAL INSTRUCTIONS:
-        - Stay focused on the current goal and sub-task.
-        - If the required tool for the current action is missing, FIRST use the FindTool tool to discover and load it.
-        - Only after the needed tool has been successfully loaded via FindTool should you call the actual tool.
-        - When a sub-task is complete, output exactly: [FINAL_ANSWER_COMPLETE]
-        - Use only verified information from tool_results when summarizing."""
+        # Delegate full formatting to PromptBuilder
+        return PromptBuilder.objective_reminder(reminder_body)
 
     def to_dict(self) -> Dict[str, Any]:
         """Generic, serializable snapshot — safe for NeuralHub, WebSocket, VR, etc."""

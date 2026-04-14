@@ -191,6 +191,20 @@ class PromptBuilder:
         You are now on turn {loop_count}. Stay on protocol. No deviations."""
 
     @staticmethod
+    def objective_reminder(reminder_body: str) -> str:
+        """Centralized objective reminder template.
+        Takes the dynamic state-built body and wraps it with the fixed header + critical instructions."""
+        return f"""OBJECTIVE REMINDER:
+        {reminder_body}
+
+        CRITICAL INSTRUCTIONS:
+        - Stay focused on the current goal and sub-task.
+        - If the required tool for the current action is missing, FIRST use the FindTool tool to discover and load it.
+        - Only after the needed tool has been successfully loaded via FindTool should you call the actual tool.
+        - When a sub-task is complete, output exactly: [FINAL_ANSWER_COMPLETE]
+        - Use only verified information from tool_results when summarizing."""
+
+    @staticmethod
     def final_synthesis(original_query: str) -> str:
         """Final answer synthesis prompt."""
         return f"""USER ORIGINAL REQUEST: {original_query}
