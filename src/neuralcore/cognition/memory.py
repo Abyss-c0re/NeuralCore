@@ -1227,7 +1227,7 @@ class ContextManager:
         logger.debug("→ Entering AGENTIC mode")
 
         if lightweight_agentic and state is not None:
-            # ── NEW: LIGHTWEIGHT PATH FOR LONG-RUNNING LOOPS ──
+            # ── LIGHTWEIGHT PATH FOR LONG-RUNNING LOOPS ──
             logger.debug("→ Using LIGHTWEIGHT agentic context (long-running mode)")
 
             objective_text = state.get_objective_reminder()
@@ -1238,7 +1238,7 @@ class ContextManager:
                 else query.strip() or "Continue with next action"
             )
 
-            # Compact history: only tool names + very short result preview
+            # Compact history: only tool names + very short result preview (kept for context)
             compact_history = ""
             if self.tool_call_history:
                 parts = []
@@ -1274,7 +1274,7 @@ class ContextManager:
                     tokens_used = self.count_tokens(messages)
 
         else:
-            # ── ORIGINAL RICH AGENTIC MODE (kept for backward compatibility) ──
+            # ── ORIGINAL RICH AGENTIC MODE (unchanged) ──
             full_system = (
                 PromptBuilder.agentic_action_system_prefix()
                 + "\n\n"
@@ -1300,7 +1300,7 @@ class ContextManager:
             messages.append({"role": "system", "content": full_system})
             tokens_used = self.count_tokens(messages)
 
-            # Goal & state (kept but lighter)
+            # Goal & state
             if state is not None:
                 objective_text = state.get_objective_reminder()
                 objective_block = PromptBuilder.objective_and_state_section(
@@ -1309,10 +1309,7 @@ class ContextManager:
                 messages.append({"role": "system", "content": objective_block})
                 tokens_used = self.count_tokens(messages)
 
-            # Tool history → now optional and compact unless forced
-            # (full last-3 outputs removed from default path)
-
-        # Common final steps (same as before)
+        # ── COMMON FINAL STEPS ──
         query_tokens = (
             self.count_tokens([{"role": "user", "content": query}])
             if query.strip()
@@ -1321,7 +1318,7 @@ class ContextManager:
         target = max_input_tokens - reserved_for_output
         remaining = max(0, target - tokens_used - query_tokens)
 
-        # Very conservative KB for agentic
+        # KB handling
         kb_tokens = (
             min(max_kb_tokens, remaining // 3) if not lightweight_agentic else 1500
         )
@@ -1340,19 +1337,26 @@ class ContextManager:
                 )
                 tokens_used = self.count_tokens(messages)
 
-        # Add pruned history
-        recent_msgs: List[Dict[str, str]] = []
-        for msg, t in zip(
-            reversed(self.current_topic.history),
-            reversed(self.current_topic.history_tokens),
-        ):
-            if t > history_budget:
-                break
-            recent_msgs.insert(0, msg)
-            history_budget -= t
-            tokens_used += t
-        messages.extend(recent_msgs)
+        # ── HISTORY HANDLING WITH LIGHTWEIGHT OVERRIDE ──
+        if lightweight_agentic:
+            logger.debug(
+                "→ LIGHTWEIGHT MODE: skipping full history (only user query will be added)"
+            )
+        else:
+            # Rich history for normal agentic mode
+            recent_msgs: List[Dict[str, str]] = []
+            for msg, t in zip(
+                reversed(self.current_topic.history),
+                reversed(self.current_topic.history_tokens),
+            ):
+                if t > history_budget:
+                    break
+                recent_msgs.insert(0, msg)
+                history_budget -= t
+                tokens_used += t
+            messages.extend(recent_msgs)
 
+        # Always end with the current user query
         messages.append(
             {"role": "user", "content": query.strip() or "[AUTONOMOUS CONTINUATION]"}
         )
@@ -1364,18 +1368,20 @@ class ContextManager:
             removed, pruned_turns = self.prune_to_fit_context(
                 messages,
                 max_tokens=target,
-                min_keep_messages=5,
+                min_keep_messages=5
+                if not lightweight_agentic
+                else 3,  # lighter min for lightweight
                 system_role="system",
                 user_role="user",
                 assistant_role="assistant",
                 tool_role="tool",
             )
-            if pruned_turns:
+            if pruned_turns and not lightweight_agentic:  # only archive in rich mode
                 self.current_topic.archived_history.extend(pruned_turns)
             logger.debug(f"Pruned {removed} turns to fit token limit")
 
         logger.debug(
-            f"provide_context finished | final messages count = {len(messages)}"
+            f"provide_context finished | final messages count = {len(messages)} | lightweight={lightweight_agentic}"
         )
         return messages
 
