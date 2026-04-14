@@ -33,7 +33,6 @@ class AgentState:
     planned_tasks: List[str] = field(default_factory=list)
     current_task_index: int = 0
     task_tool_assignments: Dict[int, List[str]] = field(default_factory=dict)
-    # FIXED & STABLE: List[int] only – eliminates str pollution and NoneType crashes
     task_dependencies: Dict[int, List[int]] = field(default_factory=dict)
 
     # ==================== Sub-agent & Hub Coordination ====================
@@ -212,6 +211,21 @@ class AgentState:
         logger.warning(
             f"Action restart triggered. Total restarts: {self.action_restarts}"
         )
+
+    def ensure_dependencies_structure(self) -> None:
+        """Ensure task_dependencies is always Dict[int, List[int]]. Call after planning or reset."""
+        if not isinstance(self.task_dependencies, dict):
+            self.task_dependencies = {}
+        for k in list(self.task_dependencies.keys()):
+            v = self.task_dependencies[k]
+            if not isinstance(v, list):
+                self.task_dependencies[k] = (
+                    []
+                    if v in (None, "null", "")
+                    else [int(v)]
+                    if str(v).isdigit()
+                    else []
+                )
 
     def mark_goal_achieved(self, reason: str = "") -> None:
         self.goal_achieved = True
