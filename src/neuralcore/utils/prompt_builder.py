@@ -299,6 +299,22 @@ class PromptBuilder:
         return "\n\n".join(parts)
 
     @staticmethod
+    def lightweight_agentic_context(
+        objective_text: str, compact_history: str = "", current_subtask: str = ""
+    ) -> str:
+        """Ultra-compact context for long-running agentic loops.
+        Used by the new provide_context_agentic_light() path."""
+        parts = [f"=== OBJECTIVE ===\n{objective_text}"]
+        if current_subtask:
+            parts.append(f"=== CURRENT SUB-TASK ===\n{current_subtask}")
+        if compact_history:
+            parts.append(f"=== COMPACT HISTORY ===\n{compact_history}")
+        parts.append(
+            "=== END CONTEXT ===\nStay focused. Use tools. Output [FINAL_ANSWER_COMPLETE] when done."
+        )
+        return "\n\n".join(parts)
+
+    @staticmethod
     def tool_call_history_section(call_history_text: str, last_three_text: str) -> str:
         """Formats tool history and recent outputs."""
         if not call_history_text and not last_three_text:

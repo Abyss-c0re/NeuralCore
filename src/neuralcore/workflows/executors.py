@@ -203,6 +203,7 @@ class AgentExecutors:
                 + f"\n\nWhen you finish the current sub-task, you MUST output exactly: {marker}",
                 include_logs=True,
                 chat=False,
+                lightweight_agentic=True,
                 state=state,
             )
 

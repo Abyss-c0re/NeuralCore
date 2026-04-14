@@ -1169,16 +1169,17 @@ class ContextManager:
         max_kb_tokens: int = 5000,
         chat: bool = False,
         state: Optional["AgentState"] = None,
+        lightweight_agentic: bool = False,  # ← NEW FLAG for long-running tasks
     ) -> List[Dict[str, Any]]:
         messages: List[Dict[str, Any]] = []
 
         logger.debug(
-            f"provide_context called | query='{query[:100]}...' | chat={chat} | has_state={state is not None}"
+            f"provide_context called | query='{query[:100]}...' | chat={chat} | lightweight_agentic={lightweight_agentic} | has_state={state is not None}"
         )
 
         if chat:
-            logger.debug("→ Entering CHAT mode")
             # ── RICH CHAT MODE (unchanged) ──
+            logger.debug("→ Entering CHAT mode")
             clean_system = system_prompt.strip()
             messages.append({"role": "system", "content": clean_system})
 
@@ -1225,84 +1226,93 @@ class ContextManager:
         # ── AGENTIC MODE ──
         logger.debug("→ Entering AGENTIC mode")
 
-        # 1. Strong action prefix + base system
-        full_system = (
-            PromptBuilder.agentic_action_system_prefix()
-            + "\n\n"
-            + system_prompt.strip()
-        )
+        if lightweight_agentic and state is not None:
+            # ── NEW: LIGHTWEIGHT PATH FOR LONG-RUNNING LOOPS ──
+            logger.debug("→ Using LIGHTWEIGHT agentic context (long-running mode)")
 
-        summary = self.get_context_summary()
-        if summary:
-            full_system += (
-                f"\n\n{summary}\n\n{PromptBuilder.context_summary_instruction()}"
-            )
-
-        if include_logs:
-            try:
-                log_lines = Logger.get_log_data(level="info", max_entries=100)
-                if log_lines:
-                    full_system += f"\n\n{PromptBuilder.recent_logs_section(log_lines)}"
-            except Exception:
-                pass
-
-        messages.append({"role": "system", "content": full_system})
-        tokens_used = self.count_tokens(messages)
-        logger.debug(f"Base system + summary → tokens_used = {tokens_used}")
-
-        # ====================== GOAL & STATE AWARENESS (placed early for better reasoning) ======================
-        if state is not None:
-            logger.debug(
-                "Adding centralized objective reminder from AgentState.get_objective_reminder()"
-            )
             objective_text = state.get_objective_reminder()
-
-            objective_block = PromptBuilder.objective_and_state_section(objective_text)
-
-            messages.append(
-                {
-                    "role": "system",
-                    "content": objective_block,
-                }
+            current_subtask = (
+                state.planned_tasks[state.current_task_index]
+                if state.planned_tasks
+                and 0 <= state.current_task_index < len(state.planned_tasks)
+                else query.strip() or "Continue with next action"
             )
+
+            # Compact history: only tool names + very short result preview
+            compact_history = ""
+            if self.tool_call_history:
+                parts = []
+                for entry in reversed(self.tool_call_history[-8:]):  # last 8 only
+                    tool_name = entry.get("tool", "unknown")
+                    result_preview = str(entry.get("result", ""))[:120].replace(
+                        "\n", " "
+                    )
+                    parts.append(f"[{tool_name}] → {result_preview}...")
+                compact_history = "\n".join(parts)
+
+            full_context = PromptBuilder.lightweight_agentic_context(
+                objective_text=objective_text,
+                compact_history=compact_history,
+                current_subtask=current_subtask,
+            )
+
+            messages.append({"role": "system", "content": full_context})
             tokens_used = self.count_tokens(messages)
-            logger.debug(
-                f"Added AgentState objective block → tokens_used = {tokens_used}"
+
+            # Minimal KB only when explicitly useful
+            if query.strip() and max_kb_tokens > 1000:
+                kb_text = await self._retrieve_relevant_knowledge(query, 1500)
+                if kb_text:
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": PromptBuilder.relevant_external_context_section(
+                                kb_text
+                            ),
+                        }
+                    )
+                    tokens_used = self.count_tokens(messages)
+
+        else:
+            # ── ORIGINAL RICH AGENTIC MODE (kept for backward compatibility) ──
+            full_system = (
+                PromptBuilder.agentic_action_system_prefix()
+                + "\n\n"
+                + system_prompt.strip()
             )
 
-        # ====================== TOOL CALL HISTORY + LAST 3 FULL OUTPUTS ======================
-        # Lightweight call history (tools + params only) — always available for operational awareness
-        call_history_text = ""
-        if self.tool_call_history:
-            parts: List[str] = []
-            for entry in reversed(self.tool_call_history[-12:]):  # last 12 calls
-                ts_str = time.strftime("%H:%M:%S", time.localtime(entry["timestamp"]))
-                args_str = (
-                    json.dumps(entry["args"], ensure_ascii=False)
-                    if entry.get("args")
-                    else "{}"
+            summary = self.get_context_summary()
+            if summary:
+                full_system += (
+                    f"\n\n{summary}\n\n{PromptBuilder.context_summary_instruction()}"
                 )
-                parts.append(f"[{ts_str}] Tool: {entry['tool']} | Args: {args_str}")
-            call_history_text = "\n".join(parts)
 
-        # Full output from the last 3 executions (high-fidelity recent results)
-        last_three_text = await self._get_recent_tool_outcomes(
-            limit=3,
-            max_tokens_per_result=3000,
-            max_total_tokens=9000,
-        )
+            if include_logs:
+                try:
+                    log_lines = Logger.get_log_data(level="info", max_entries=100)
+                    if log_lines:
+                        full_system += (
+                            f"\n\n{PromptBuilder.recent_logs_section(log_lines)}"
+                        )
+                except Exception:
+                    pass
 
-        tool_block = PromptBuilder.tool_call_history_section(
-            call_history_text, last_three_text
-        )
-        if tool_block:
-            messages.append({"role": "system", "content": tool_block})
+            messages.append({"role": "system", "content": full_system})
             tokens_used = self.count_tokens(messages)
-            logger.debug(
-                f"Added tool call history + last 3 outputs → tokens_used now = {tokens_used}"
-            )
 
-        # ====================== TOKEN BUDGETING ======================
+            # Goal & state (kept but lighter)
+            if state is not None:
+                objective_text = state.get_objective_reminder()
+                objective_block = PromptBuilder.objective_and_state_section(
+                    objective_text
+                )
+                messages.append({"role": "system", "content": objective_block})
+                tokens_used = self.count_tokens(messages)
+
+            # Tool history → now optional and compact unless forced
+            # (full last-3 outputs removed from default path)
+
+        # Common final steps (same as before)
         query_tokens = (
             self.count_tokens([{"role": "user", "content": query}])
             if query.strip()
@@ -1311,16 +1321,12 @@ class ContextManager:
         target = max_input_tokens - reserved_for_output
         remaining = max(0, target - tokens_used - query_tokens)
 
-        logger.debug(
-            f"Token budget → target={target} | used={tokens_used} | remaining={remaining} | query_tokens={query_tokens}"
+        # Very conservative KB for agentic
+        kb_tokens = (
+            min(max_kb_tokens, remaining // 3) if not lightweight_agentic else 1500
         )
-
-        kb_tokens = min(max_kb_tokens, remaining // 2)
         history_budget = max(remaining - kb_tokens, min_history_tokens)
 
-        logger.debug(f"Allocated → KB={kb_tokens} | History={history_budget}")
-
-        # ====================== LONG-TERM SEMANTIC KB (with file/param boost) ======================
         if query.strip() and kb_tokens > 500:
             kb_text = await self._retrieve_relevant_knowledge(query, kb_tokens)
             if kb_text:
@@ -1333,11 +1339,8 @@ class ContextManager:
                     }
                 )
                 tokens_used = self.count_tokens(messages)
-                remaining = max(0, target - tokens_used - query_tokens)
-                history_budget = max(remaining, min_history_tokens)
-                logger.debug(f"Added KB context → tokens_used now = {tokens_used}")
 
-        # History
+        # Add pruned history
         recent_msgs: List[Dict[str, str]] = []
         for msg, t in zip(
             reversed(self.current_topic.history),
@@ -1349,13 +1352,9 @@ class ContextManager:
             history_budget -= t
             tokens_used += t
         messages.extend(recent_msgs)
-        logger.debug(f"Added history messages → tokens_used = {tokens_used}")
 
         messages.append(
-            {
-                "role": "user",
-                "content": query.strip() or "[AUTONOMOUS CONTINUATION]",
-            }
+            {"role": "user", "content": query.strip() or "[AUTONOMOUS CONTINUATION]"}
         )
 
         final_tokens = self.count_tokens(messages)
