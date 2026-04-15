@@ -1,13 +1,11 @@
-import asyncio
-import json
-import time
-
-from typing import Any, Callable, Dict, List, Optional, Awaitable
-from inspect import signature
-
 from neuralcore.utils.exceptions_handler import ConfirmationRequired
 from neuralcore.utils.logger import Logger
 
+import asyncio
+import json
+import time
+from typing import Any, Callable, Dict, List, Optional, Awaitable
+from inspect import signature
 
 logger = Logger.get_logger()
 
@@ -123,7 +121,15 @@ class Action:
 
     # ====================== EXECUTION ======================
     async def __call__(self, **kwargs) -> Any:
-        """Execute the action and automatically record the FULL tool outcome + generic success indicator."""
+        """Execute the action and automatically record the FULL tool outcome + generic success indicator.
+
+        Confirmation handling (NeuralCore generic pattern):
+        - If require_confirmation=True and _confirmation_passed=False (default),
+          raise ConfirmationRequired immediately.
+        - Higher-level client code (NeuralVoid-style or real client apps) catches it,
+          asks the human, then re-calls the SAME action with _confirmation_passed=True.
+        - This keeps NeuralCore 100% abstract and free of any UI/confirmation logic.
+        """
         logger.info(f"[ACTION START] {self.name}")
         logger.debug(f"[ACTION INPUT] {self.name} kwargs={kwargs}")
 
@@ -136,10 +142,14 @@ class Action:
         else:
             logger.debug(f"[ACTION BOUND] {self.name} → NO AGENT BOUND")
 
-        if self.require_confirmation:
+        # ==================== CONFIRMATION CHECK (GENERIC) ====================
+        # Client code re-calls with _confirmation_passed=True after human approval
+        confirmation_bypassed = kwargs.pop("_confirmation_passed", False)
+        if self.require_confirmation and not confirmation_bypassed:
             preview = self.confirmation_preview(kwargs)
             logger.info(f"[ACTION CONFIRMATION REQUIRED] {self.name} preview={preview}")
             raise ConfirmationRequired(self.name, kwargs, preview)
+        # ======================================================================
 
         try:
             call_args = []
@@ -223,7 +233,7 @@ class Action:
             return final_result
 
         except ConfirmationRequired:
-            raise
+            raise  # let the client-level catcher handle it
         except Exception as exc:
             logger.error(f"[ACTION ERROR] {self.name} error={exc}", exc_info=True)
 
@@ -335,9 +345,6 @@ class ActionSet:
             "description": self.description,
             "action_count": len(self.actions),
             "action_names": [a.name for a in self.actions],
-            # You can add more discoverable fields later, e.g.:
-            # "categories": [...],
-            # "domain": "web" | "math" | "files" | ...
         }
 
     def remove(self, action: Action) -> None:

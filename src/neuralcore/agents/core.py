@@ -583,6 +583,106 @@ class Agent:
                 "timestamp": time.time(),
             }
 
+    # ====================== CONFIRMATION HANDLERS ======================
+
+    async def _handle_confirmation_event(
+        self, payload: Dict[str, Any]
+    ) -> AsyncIterator[Tuple[str, Dict[str, Any]]]:
+        """Agent-level confirmation handler – sets state and yields event."""
+        self.state.needs_approval = True
+        self.state.pending_approval_prompt = payload.get(
+            "preview", payload.get("details", {}).get("preview", "")
+        )
+
+        # Store full details for later re-execution
+        self.state.last_confirmation_request = {
+            "tool_name": payload.get("tool_name"),
+            "args": payload.get("details", {}).get("args", payload.get("args", {})),
+            "action_name": payload.get("tool_name"),
+            "timestamp": time.time(),
+        }
+
+        logger.info(
+            f"[CONFIRMATION] Agent '{self.name}' requires approval for "
+            f"{payload.get('tool_name')} | preview={self.state.pending_approval_prompt[:120]}..."
+        )
+
+        yield (
+            "needs_confirmation",
+            {
+                "tool_name": payload.get("tool_name"),
+                "preview": self.state.pending_approval_prompt,
+                "args": self.state.last_confirmation_request["args"],
+                "agent_id": self.agent_id,
+            },
+        )
+
+    async def _process_confirmation_response(self, control_msg: Dict[str, Any]) -> None:
+        """Re-execute the tool after human approval (called from control message)."""
+        if (
+            not self.state.needs_approval
+            or self.state.last_confirmation_request is None
+        ):
+            logger.warning(
+                "[CONFIRMATION] Response received but no active confirmation request"
+            )
+            return
+
+        # Safe access
+        req = self.state.last_confirmation_request
+        tool_name = req.get("tool_name")
+        args = req.get("args", {})
+
+        if not tool_name:
+            logger.error("[CONFIRMATION] Missing tool_name in confirmation request")
+            self.state.needs_approval = False
+            self.state.last_confirmation_request = None
+            return
+
+        approved = control_msg.get("approved", False)
+
+        if not approved:
+            logger.info(f"[CONFIRMATION] User denied {tool_name}")
+            self.state.add_tool_result(
+                tool_name, "User denied confirmation", success=False
+            )
+            self.state.needs_approval = False
+            self.state.pending_approval_prompt = ""
+            self.state.last_confirmation_request = None
+            await self.post_control({"event": "confirmation_denied", "tool": tool_name})
+            return
+
+        logger.info(f"[CONFIRMATION] User approved {tool_name} – re-executing")
+
+        action = self.manager.get_executor(tool_name)
+        if action is None:
+            logger.error(f"[CONFIRMATION] Executor for {tool_name} not found")
+            self.state.needs_approval = False
+            self.state.last_confirmation_request = None
+            return
+
+        try:
+            # Magic flag that Action.__call__ respects
+            result = await action(_confirmation_passed=True, **args)
+
+            self.state.add_tool_result(tool_name, result, success=True)
+            await self.post_control(
+                {
+                    "event": "confirmation_approved",
+                    "tool": tool_name,
+                    "result": str(result)[:500],
+                }
+            )
+        except Exception as exc:
+            logger.error(f"[CONFIRMATION] Re-execution failed: {exc}")
+            self.state.add_tool_result(
+                tool_name, f"Error after approval: {exc}", success=False
+            )
+        finally:
+            self.state.needs_approval = False
+            self.state.pending_approval_prompt = ""
+            self.state.last_confirmation_request = None
+
     async def run_background(
         self,
         user_prompt: Optional[str] = None,
@@ -768,6 +868,7 @@ class Agent:
         chat_mode: bool = False,
         workflow: Optional[str] = None,
     ) -> AsyncIterator[Tuple[str, Any]]:
+        """Main agent execution loop with full built-in confirmation support."""
         stop_event = stop_event or asyncio.Event()
 
         system_prompt = system_prompt or self.system_prompt
@@ -806,6 +907,13 @@ class Agent:
                     stop_event=stop_event,
                     workflow=workflow_name,
                 ):
+                    if event == "needs_confirmation":
+                        async for (
+                            conf_event,
+                            conf_payload,
+                        ) in self._handle_confirmation_event(payload):
+                            yield conf_event, conf_payload
+                        continue
                     yield event, payload
 
             else:
@@ -818,7 +926,35 @@ class Agent:
                 async for event, payload in self._run_headless_loop(
                     system_prompt, temperature, max_tokens, workflow_name, stop_event
                 ):
+                    if event == "needs_confirmation":
+                        async for (
+                            conf_event,
+                            conf_payload,
+                        ) in self._handle_confirmation_event(payload):
+                            yield conf_event, conf_payload
+                        continue
                     yield event, payload
+
+            # ====================== CONTROL MESSAGE LOOP ======================
+            # (handles confirmation responses + your existing controls)
+            while not stop_event.is_set():
+                try:
+                    msg = await asyncio.wait_for(self.message_queue.get(), timeout=0.2)
+                except asyncio.TimeoutError:
+                    continue
+
+                if isinstance(msg, dict):
+                    # NEW: Confirmation response handling
+                    if msg.get("event") == "confirmation_response":
+                        await self._process_confirmation_response(msg)
+                        self.message_queue.task_done()
+                        continue
+
+                    # Original control handling
+                    if await self._handle_control_message(msg):
+                        break
+
+                self.message_queue.task_done()
 
         finally:
             self.state.status = "idle"

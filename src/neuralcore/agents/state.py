@@ -39,7 +39,7 @@ class AgentState:
 
     # ==================== Planning & Orchestration ====================
     planned_tasks: List[str] = field(default_factory=list)
-    task_expected_outcomes: List[str] = field(default_factory=list)  # ← already present
+    task_expected_outcomes: List[str] = field(default_factory=list)
     current_task_index: int = 0
     task_tool_assignments: Dict[int, List[str]] = field(default_factory=dict)
     task_dependencies: Dict[int, List[int]] = field(default_factory=dict)
@@ -65,9 +65,12 @@ class AgentState:
     wait_completed: bool = False
     last_wait_event: Optional[Dict[str, Any]] = None
 
-    # ==================== Human-in-the-Loop ====================
+    # ==================== Human-in-the-Loop (Confirmation) ====================
     needs_approval: bool = False
     pending_approval_prompt: str = ""
+    last_confirmation_request: Optional[Dict[str, Any]] = (
+        None  # ← NEW: required for re-execution
+    )
 
     # ==================== History & Debugging ====================
     iteration_history: List[Dict[str, Any]] = field(default_factory=list)
@@ -135,8 +138,7 @@ class AgentState:
 
     # ==================== NEW: State Validation ====================
     def validate_state_integrity(self) -> List[str]:
-        """Validate that state has all required structures for multi-step execution.
-        Returns list of warnings (empty = healthy)."""
+        """Validate that state has all required structures for multi-step execution."""
         warnings = []
 
         if len(self.planned_tasks) != len(self.task_expected_outcomes):
@@ -206,8 +208,11 @@ class AgentState:
         self.wait_completed = False
         self.last_wait_event = None
 
+        # ==================== Reset Human-in-the-Loop ====================
         self.needs_approval = False
         self.pending_approval_prompt = ""
+        self.last_confirmation_request = None
+
         self.last_error = None
         self.error_count = 0
         self.loop_count = 0
@@ -228,6 +233,8 @@ class AgentState:
         self.current_workflow = "default"
 
         logger.debug(f"AgentState reset complete. Goal: '{self.goal[:80]}...'")
+
+    # ... (all other methods unchanged: add_tool_result, add_executed_function, increment_loop, etc.)
 
     def add_tool_result(
         self, tool_name: str, result: Any, success: bool = True
@@ -256,7 +263,6 @@ class AgentState:
             "timestamp": time.time(),
         }
         self.executed_functions.append(entry)
-
         logger.debug(f"Function recorded: {function_name}")
 
     def increment_loop(self) -> None:
@@ -284,7 +290,6 @@ class AgentState:
         )
 
     def ensure_dependencies_structure(self) -> None:
-        """Ensure task_dependencies is always Dict[int, List[int]]. Call after planning or reset."""
         if not isinstance(self.task_dependencies, dict):
             self.task_dependencies = {}
         for k in list(self.task_dependencies.keys()):
@@ -361,7 +366,6 @@ class AgentState:
                 if self.current_task_name:
                     parts.append(f"Current sub-task: {self.current_task_name[:120]}...")
 
-            # NEW: Include expected outcomes for current step
             if self.task_expected_outcomes and 0 <= self.current_task_index < len(
                 self.task_expected_outcomes
             ):
@@ -390,7 +394,6 @@ class AgentState:
         if self.duration > 60:
             parts.append(f"Running for {self.duration:.0f}s")
 
-        # Dependency-aware reminder
         if self.task_dependencies:
             dep_parts: List[str] = []
             for idx, dep_list in self.task_dependencies.items():
@@ -409,7 +412,6 @@ class AgentState:
 
         reminder_body = "\n".join(parts)
 
-        # Run validation and log warnings (non-blocking)
         warnings = self.validate_state_integrity()
         if warnings:
             logger.warning(f"AgentState integrity warnings: {warnings}")
@@ -446,6 +448,7 @@ class AgentState:
         data["has_sub_tasks"] = self.has_sub_tasks
         data["goal_reached"] = self.goal_reached
 
+        # Waiting state
         data["waiting"] = getattr(self, "waiting", False)
         data["wait_type"] = getattr(self, "wait_type", None)
         data["wait_prompt"] = getattr(self, "wait_prompt", "")
@@ -455,13 +458,12 @@ class AgentState:
         data["wait_start_time"] = getattr(self, "wait_start_time", None)
         data["last_wait_event"] = getattr(self, "last_wait_event", None)
 
+        # Human-in-the-Loop (full confirmation support)
         data["needs_approval"] = getattr(self, "needs_approval", False)
         data["pending_approval_prompt"] = getattr(self, "pending_approval_prompt", "")
-
-        data["duration"] = round(self.duration, 2)
-        data["current_task_name"] = self.current_task_name
-        data["has_sub_tasks"] = self.has_sub_tasks
-        data["goal_reached"] = self.goal_reached
+        data["last_confirmation_request"] = getattr(
+            self, "last_confirmation_request", None
+        )
 
         if data.get("waiting"):
             data["wait_summary"] = {
