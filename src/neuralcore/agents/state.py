@@ -86,6 +86,7 @@ class AgentState:
     total_tool_calls: int = 0
     empty_loops: int = 0
     action_restarts: int = 0
+    is_soft_restart: bool = False
 
     # ==================== Loop Control Signals (NEW - Option 3) ====================
     # Generic inbox for engine-level loop commands (restart / pause / wait / resume / break).
@@ -120,6 +121,15 @@ class AgentState:
         return round(time.time() - self.wait_start_time, 1)
 
     # ==================== FindTool Helpers ====================
+    def set_soft_restart(self, value: bool = True) -> None:
+        self.is_soft_restart = value
+        logger.debug(f"AgentState → soft_restart flag set to {value}")
+
+    def clear_soft_restart(self) -> None:
+        if self.is_soft_restart:
+            self.is_soft_restart = False
+            logger.debug("AgentState → soft_restart flag cleared")
+
     def record_findtool_call(self) -> None:
         self.findtool_call_count += 1
         self.last_findtool_loop = self.loop_count
@@ -259,6 +269,7 @@ class AgentState:
 
         self.clear_loaded_tools()
         self.clear_findtool_tracking()
+        self.clear_soft_restart()
         self.clear_pending_loop_signals()  # ← NEW: clear loop signals on reset
 
         self.start_time = time.time()
