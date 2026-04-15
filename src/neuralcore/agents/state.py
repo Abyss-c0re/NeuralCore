@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Any, List, Dict, Optional
 import time
+from neuralcore.utils.formatting import prepare_chat_messages
 from neuralcore.utils.prompt_builder import PromptBuilder
 from neuralcore.utils.logger import Logger
 
@@ -51,7 +52,7 @@ class AgentState:
     active_sub_agents: List[str] = field(default_factory=list)
 
     # ==================== Messaging & Inter-agent Communication ====================
-    pending_messages: List[Dict[str, Any]] = field(default_factory=list)
+    messages: List[Dict[str, Any]] = field(default_factory=list)
     message_count: int = 0
     last_message_time: float = 0.0
 
@@ -121,6 +122,42 @@ class AgentState:
         return round(time.time() - self.wait_start_time, 1)
 
     # ==================== FindTool Helpers ====================
+    def prepare_messages(
+        self,
+        content: str,
+        system_prompt: str = "",
+        *,
+        reset: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """
+        Centralized helper to prepare chat messages for the current agent state.
+        Populates self.messages if reset=True or if messages list is empty.
+        Returns the prepared message list for use in loops/executors.
+
+        Completely abstract — no business logic, only message formatting.
+        """
+
+        if reset or not self.messages:
+            self.messages.clear()
+            # Build initial messages with system prompt
+            self.messages = prepare_chat_messages(
+                user_content=content,
+                system_prompt=system_prompt or "",
+            )
+        else:
+            # Append user message to existing conversation
+            self.messages.append({"role": "user", "content": content})
+
+        self.message_count = len(self.messages)
+        self.last_message_time = time.time()  # assuming time is imported
+
+        logger.debug(
+            f"AgentState.prepare_messages → prepared {len(self.messages)} messages "
+            f"(reset={reset}, content_len={len(content)})"
+        )
+
+        return self.messages
+
     def set_soft_restart(self, value: bool = True) -> None:
         self.is_soft_restart = value
         logger.debug(f"AgentState → soft_restart flag set to {value}")
@@ -229,7 +266,7 @@ class AgentState:
         self.task_id_map.clear()
         self.sub_agent_results.clear()
         self.active_sub_agents.clear()
-        self.pending_messages.clear()
+        self.messages.clear()
 
         self.phase = None
         self.status = "idle"
@@ -361,7 +398,7 @@ class AgentState:
         logger.error(f"Agent error recorded: {error_msg}")
 
     def add_message(self, message: Dict[str, Any]) -> None:
-        self.pending_messages.append(message)
+        self.messages.append(message)
         self.message_count += 1
         self.last_message_time = time.time()
 
@@ -482,7 +519,7 @@ class AgentState:
         data["tool_results"] = self.tool_results[-20:]
         data["executed_functions"] = self.executed_functions[-15:]
         data["iteration_history"] = self.iteration_history[-10:]
-        data["pending_messages"] = self.pending_messages[-20:]
+        data["messages"] = self.messages[-20:]
         data["findtool_call_count"] = self.findtool_call_count
         data["last_findtool_loop"] = self.last_findtool_loop
         data["tool_calls"] = self.tool_calls or []
