@@ -54,46 +54,91 @@ class AgentExecutors:
     async def _ensure_subtasks_planned(
         self, state: AgentState, original_query: str
     ) -> AsyncIterator[Tuple[str, Any]]:
-        """Generic, LLM-driven structured planning (replaces previous weak version).
-        Populates planned_tasks + task_dependencies + task_tool_assignments using existing state fields.
-        No hardcoding – pure LLM reasoning."""
+        """Generic, LLM-driven structured planning.
+        Robust expected_outcome population with FULL (non-truncated) debug logging."""
+        logger.info("[PLANNING START] _ensure_subtasks_planned called")
         yield ("phase_changed", {"phase": "planning"})
 
         planning_prompt = PromptBuilder.task_decomposition(original_query)
 
+        plan_text = ""
+
         try:
             plan_text = await self.agent.client.chat(
-                planning_prompt, temperature=0.0, max_tokens=1200
+                planning_prompt, temperature=0.0, max_tokens=1500
             )
+
+            logger.info(f"[PLANNING RAW] LLM returned {len(plan_text)} chars")
+            logger.debug(f"[PLANNING RAW JSON]\n{plan_text}")
+
             plan = json.loads(plan_text.strip())
 
             state.planned_tasks.clear()
+            state.task_expected_outcomes.clear()
             state.task_dependencies.clear()
             state.task_tool_assignments.clear()
 
-            for i, step in enumerate(plan.get("steps", [])):
-                state.planned_tasks.append(step["description"])
+            steps = plan.get("steps", [])
+            logger.info(f"[PLANNING] Parsed {len(steps)} steps from JSON")
+
+            for i, step in enumerate(steps):
+                description = step.get("description", f"Step {i + 1}").strip()
+
+                expected = step.get("expected_outcome", "")
+                if not expected or not str(expected).strip():
+                    expected = f"Step {i + 1} completed successfully (file located/analyzed/tool added)"
+
+                state.planned_tasks.append(description)
+                state.task_expected_outcomes.append(str(expected).strip())
+
                 deps = step.get("dependencies", [])
                 state.task_dependencies[i] = [
                     int(d)
                     for d in deps
                     if isinstance(d, (int, str)) and str(d).isdigit()
                 ]
-                # Optional future-proofing
+
                 if step.get("suggested_tool_category"):
                     state.task_tool_assignments[i] = [step["suggested_tool_category"]]
 
+                logger.debug(
+                    f"  → Appended Step {i}: '{description}' | expected='{expected}'"
+                )
+
+            # Safety alignment
+            while len(state.task_expected_outcomes) < len(state.planned_tasks):
+                state.task_expected_outcomes.append("Task step completed successfully")
+
+            warnings = state.validate_state_integrity()
+            if warnings:
+                logger.warning(f"[PLANNING] State integrity warnings: {warnings}")
+            else:
+                logger.info(
+                    "[PLANNING] State integrity check PASSED — expected_outcomes populated correctly"
+                )
+
             logger.info(
-                f"[PLANNING] Created {len(state.planned_tasks)} sub-tasks with dependencies"
+                f"[PLANNING] Final count: {len(state.planned_tasks)} tasks, {len(state.task_expected_outcomes)} expected outcomes"
             )
+
+            # FULL non-castrated debug (no [:80] truncation)
             for i, t in enumerate(state.planned_tasks):
+                expected = state.task_expected_outcomes[i]
                 deps = state.task_dependencies.get(i, [])
-                logger.debug(f"  Step {i}: {t[:80]}... | deps={deps}")
+                logger.debug(f"  Step {i}: {t} | expected='{expected}' | deps={deps}")
 
             yield ("planning_complete", {"planned_tasks": state.planned_tasks})
-        except Exception as e:
-            logger.error(f"Planning failed: {e}. Falling back to single task.")
+            logger.info("[PLANNING END] Planning completed successfully")
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Planning JSON parse failed: {e}\nRaw: {plan_text[:400]}...")
             state.planned_tasks = [original_query]
+            state.task_expected_outcomes = ["Task completed successfully"]
+            yield ("planning_fallback", {"reason": "JSON parse error"})
+        except Exception as e:
+            logger.error(f"Planning failed: {e}", exc_info=True)
+            state.planned_tasks = [original_query]
+            state.task_expected_outcomes = ["Task completed successfully"]
             yield ("planning_fallback", {"reason": str(e)})
 
     async def _goal_driven_task_loop(
@@ -102,7 +147,8 @@ class AgentExecutors:
         state: AgentState,
         is_sub_agent: bool = False,
     ) -> AsyncIterator[Tuple[str, Any]]:
-        """FINAL STATE-DRIVEN goal loop – uses full state tracking of completed steps + aggressive prompt readjustment to prevent repeating tools (e.g. read_pdf) and force correct next tool."""
+        """FINAL STATE-DRIVEN goal loop – uses generic success indicator from Action + expected outcomes.
+        Requires real completion signals before advancing or finishing. Keeps NeuralCore abstract."""
         logger.info(f"[STATE-DRIVEN TASK LOOP] Starting for: {original_query[:120]}...")
 
         if state.goal_reached or state.loop_count > 0:
@@ -118,19 +164,19 @@ class AgentExecutors:
             if is_multi_step:
                 logger.info("[MULTI-STEP] Detected → structured planning")
                 yield ("phase_changed", {"phase": "planning"})
-                async for ev, pl in self.agent.flow._ensure_subtasks_planned(
+                async for ev, pl in self._ensure_subtasks_planned(
                     state, original_query
                 ):
                     yield ev, pl
             else:
                 state.planned_tasks = [original_query]
+                state.task_expected_outcomes = ["Task completed successfully"]
 
         is_multi_step = len(state.planned_tasks) > 1
         marker = "[FINAL_ANSWER_COMPLETE]"
 
         self.agent.manager.unload_all()
-
-        max_loops = 12
+        max_loops = 25
 
         while not state.goal_reached and state.loop_count < max_loops:
             state.increment_loop()
@@ -140,17 +186,15 @@ class AgentExecutors:
             tool_browser_detected = False
             browse_query = original_query
 
-            # ====================== STATE-AWARE PROMPT READJUSTMENT (STRICTED) ======================
+            # ====================== STATE-AWARE PROMPT ======================
             if is_multi_step and 0 <= state.current_task_index < len(
                 state.planned_tasks
             ):
                 task_desc = state.planned_tasks[state.current_task_index]
 
-                # === NEW: Explicit list of every tool already used (prevents drift) ===
                 used_tools = [r.get("name", "unknown") for r in state.tool_results]
                 used_tools_str = ", ".join(set(used_tools)) if used_tools else "none"
 
-                # Build completed steps summary
                 completed = []
                 for i in range(state.current_task_index):
                     if i < len(state.tool_results):
@@ -164,7 +208,6 @@ class AgentExecutors:
                     "\n".join(completed) if completed else "No steps completed yet."
                 )
 
-                # Remaining steps
                 remaining = []
                 for i in range(state.current_task_index + 1, len(state.planned_tasks)):
                     remaining.append(f"Step {i}: {state.planned_tasks[i]}")
@@ -253,12 +296,22 @@ class AgentExecutors:
             # ====================== FINDTOOL RESTART ======================
             if tool_browser_detected:
                 logger.info(
-                    "[FindTool] Detected → handling interception + FULL state reset"
+                    f"[FindTool] Detected → handling interception for query: {browse_query[:100]}..."
                 )
+
                 state.loop_count = 0
                 state.empty_loops = 0
                 state.action_restarts = 0
+
                 await self._handle_browse_tools_interception(browse_query)
+                state.record_findtool_call()
+
+                await self.agent.context_manager.add_message(
+                    "system",
+                    f"[TOOL LOADED SUCCESSFULLY] FindTool has loaded the necessary tool(s). "
+                    f"DO NOT call FindTool again. Proceed directly with the actual tool.",
+                )
+
                 continue
 
             final_reply = text_buffer.strip()
@@ -266,26 +319,23 @@ class AgentExecutors:
             if has_marker:
                 final_reply = final_reply.replace(marker, "").strip()
 
-            # ====================== TOOL RESULT + ANTI-REPEAT ======================
-            if len(state.tool_results) > prev_tool_result_count:
-                if not is_multi_step:
-                    logger.info(
-                        "Single-step task completed via tool result → marking goal achieved"
-                    )
-                    state.mark_goal_achieved("Tool results populated in state")
-                    break
-                else:
-                    logger.info(
-                        f"Tool result received during multi-step (step {state.current_task_index}) – waiting for marker to advance"
-                    )
+            # ====================== TOOL RESULT + GENERIC SUCCESS CHECK ======================
+            new_tool_result = len(state.tool_results) > prev_tool_result_count
 
-            # ====================== MARKER / ADVANCEMENT ======================
-            if has_marker:
+            # Generic success indicator set by Action.__call__ (completely abstract)
+            last_success = getattr(state, "last_tool_success", None)
+            tool_reported_success = bool(last_success and last_success.get("success"))
+
+            strong_completion = has_marker or tool_reported_success
+
+            if has_marker or (new_tool_result and strong_completion):
                 if (
                     not is_multi_step
                     or state.current_task_index >= len(state.planned_tasks) - 1
                 ):
-                    state.mark_goal_achieved("Marker detected + all sub-tasks done")
+                    state.mark_goal_achieved(
+                        "Marker or strong completion detected + all sub-tasks done"
+                    )
                     break
                 else:
                     logger.info(
@@ -293,15 +343,16 @@ class AgentExecutors:
                     )
                     state.current_task_index += 1
                     state.empty_loops = 0
+                    state.last_tool_success = None  # clear after advancement
                     continue
 
-            # ====================== AGGRESSIVE ANTI-REPEAT ======================
-            if tools_called_this_turn and is_multi_step and not has_marker:
+            # ====================== SAFE ANTI-REPEAT ======================
+            if tools_called_this_turn and is_multi_step and not strong_completion:
                 logger.warning(
-                    f"[ANTI-REPEAT FORCE] Tool was called on step {state.current_task_index} but no marker – forcing advance to prevent infinite loop"
+                    f"[ANTI-REPEAT FORCE] Tool called on step {state.current_task_index} but no strong completion. "
+                    f"Staying on current step."
                 )
-                state.current_task_index += 1
-                state.empty_loops = 0
+                state.increment_empty_loop()
                 continue
 
             # ====================== ACTION RESTART / EMPTY LOOP ======================
@@ -329,7 +380,6 @@ class AgentExecutors:
             if action_restart_triggered and action_continuation:
                 state.increment_action_restart()
                 if state.action_restarts > 3:
-                    logger.warning("Max action restarts reached → forcing completion")
                     state.mark_goal_achieved("Max action restarts reached")
                     break
                 else:
@@ -344,8 +394,7 @@ class AgentExecutors:
                 and not action_restart_triggered
             ):
                 state.increment_empty_loop()
-                if state.empty_loops >= 3:
-                    logger.warning("3+ empty loops → forcing completion")
+                if state.empty_loops >= 5:
                     state.mark_goal_achieved("Forced completion after empty loops")
                     break
             else:
@@ -373,7 +422,6 @@ class AgentExecutors:
         )
 
         await self.agent.context_manager.add_message("assistant", final_reply)
-        state.reset_for_new_task()
 
         yield (
             "llm_response",
@@ -384,10 +432,17 @@ class AgentExecutors:
             },
         )
 
-        if not state.goal_reached:
+        # ====================== CONDITIONAL RESET ======================
+        if state.goal_reached:
+            logger.info("Multi-step task completed successfully → full reset")
+            state.reset_for_new_task()
+        else:
             logger.warning(
-                f"Loop ended without explicit goal (loop_count={state.loop_count})"
+                f"Loop ended without explicit goal (loop_count={state.loop_count}) "
+                f"→ light reset (preserving planned_tasks for debugging/continuation)"
             )
+            state.status = "idle"
+            state.is_complete = True
 
     # ====================== REFACTORED AGENTIC LOOP (for sub-agents) ======================
     async def agentic_loop(

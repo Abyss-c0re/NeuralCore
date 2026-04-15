@@ -120,7 +120,6 @@ class PromptBuilder:
 
     @staticmethod
     def task_decomposition(original_query: str) -> str:
-        """Structured task decomposition prompt."""
         return f"""You are a task decomposition expert. Break the following user request into the minimal number of clear, sequential sub-tasks.
 
         USER REQUEST: {original_query}
@@ -128,25 +127,19 @@ class PromptBuilder:
         Rules (strict):
         - Each sub-task must be atomic and actionable.
         - Include explicit dependencies (previous step indices, 0-based).
+        - For each step, define what SUCCESS looks like (expected_outcome).
         - If a step needs a tool that may not be loaded, note "may_require_FindTool".
-        - Output ONLY valid JSON, nothing else:
+        - Output ONLY valid JSON:
 
         {{
         "steps": [
             {{
             "description": "exact sub-task description",
             "dependencies": [list of previous step indices or empty list],
-            "suggested_tool_category": "optional short hint or empty string"
+            "suggested_tool_category": "optional short hint",
+            "expected_outcome": "short description of what must be true when this step is done (e.g. 'file terminal_set.py now contains new async execute_command tool')"
             }},
             ...
-        ]
-        }}
-
-        Example for "open file A and reference it to analyze file B":
-        {{
-        "steps": [
-            {{ "description": "Load and read the full content of file A", "dependencies": [], "suggested_tool_category": "file_read" }},
-            {{ "description": "Analyze file B while referencing the loaded content from file A", "dependencies": [0], "suggested_tool_category": "file_analyze" }}
         ]
         }}
 
@@ -175,6 +168,12 @@ class PromptBuilder:
         TOOLS ALREADY USED IN THIS SESSION (NEVER call these again on any future turn):
         {used_tools_str}
 
+        === IMPORTANT: TOOL AVAILABILITY ===
+        - If FindTool was called on the previous turn, the required tool(s) have now been successfully loaded.
+        - DO NOT call FindTool again in this turn.
+        - Use the newly loaded tool(s) directly to complete the CURRENT SUB-TASK.
+        - You have access to write_file, read_file, search_code, etc. when they appear in the loaded tools.
+
         REMAINING STEPS (after you finish the current one):
         {remaining_context}
 
@@ -182,9 +181,8 @@ class PromptBuilder:
 
         STRICT EXECUTION PROTOCOL FOR THIS TURN ONLY:
         1. Focus EXCLUSIVELY on the CURRENT SUB-TASK above.
-        2. If you need information from a previously read file, use the tool_results / KB context that is already provided — do NOT re-call any tool listed in "TOOLS ALREADY USED".
-        3. If the required tool is missing, call FindTool first. After FindTool succeeds, call the newly loaded tool.
-        4. After the tool for this sub-task succeeds and you have the result, you MUST immediately output EXACTLY this marker and nothing else:
+        2. If the required tool for this sub-task is already loaded, call it directly with correct parameters.
+        3. After the tool for this sub-task succeeds and you have the result, you MUST immediately output EXACTLY this marker and nothing else:
         {marker}
         Do not add any commentary, do not say you are ready for the next step, do not continue thinking, do not summarize.
 
@@ -276,6 +274,19 @@ class PromptBuilder:
         )
 
     @staticmethod
+    def tool_expectations_helper(expected_outcome: str) -> str:
+        """Generates the expectations block for the current sub-task.
+        Completely abstract — only formats the success criteria."""
+        if not expected_outcome or not expected_outcome.strip():
+            return ""
+
+        return f"""Expected outcome for current step: {expected_outcome.strip()}
+
+        When this outcome is achieved (e.g. file successfully modified, 
+        new tool added and working), you MUST output exactly the marker 
+        [FINAL_ANSWER_COMPLETE] and nothing else after it."""
+
+    @staticmethod
     def context_summary_instruction() -> str:
         """Instruction for how to use the context summary block."""
         return "→ Use this context to stay aware. Never repeat the summary."
@@ -300,17 +311,33 @@ class PromptBuilder:
 
     @staticmethod
     def lightweight_agentic_context(
-        objective_text: str, compact_history: str = "", current_subtask: str = ""
+        objective_text: str,
+        compact_history: str = "",
+        current_subtask: str = "",
+        loaded_tools: str = "",
+        tool_expectations: str = "",
     ) -> str:
-        """Ultra-compact context for long-running agentic loops.
-        Used by the new provide_context_agentic_light() path."""
+        """Ultra-compact context optimized for long-running lightweight agentic loops."""
         parts = [f"=== OBJECTIVE ===\n{objective_text}"]
+
         if current_subtask:
             parts.append(f"=== CURRENT SUB-TASK ===\n{current_subtask}")
+
+        if loaded_tools:
+            parts.append(f"=== CURRENTLY LOADED TOOLS ===\n{loaded_tools}")
+
         if compact_history:
-            parts.append(f"=== COMPACT HISTORY ===\n{compact_history}")
+            parts.append(f"=== RECENT TOOL ACTIVITY (last 10) ===\n{compact_history}")
+
+        if tool_expectations.strip():
+            parts.append(f"=== CURRENT STEP EXPECTATIONS ===\n{tool_expectations}")
+
         parts.append(
-            "=== END CONTEXT ===\nStay focused. Use tools. Output [FINAL_ANSWER_COMPLETE] when done."
+            "=== STRICT EXECUTION RULES ===\n"
+            "• If FindTool succeeded on the previous turn, the required tool is now loaded — DO NOT call FindTool again.\n"
+            "• Use only the currently loaded tools to complete the CURRENT SUB-TASK.\n"
+            "• When the expected outcome for the current step is achieved, output exactly: [FINAL_ANSWER_COMPLETE]\n"
+            "• Stay focused. No extra commentary."
         )
         return "\n\n".join(parts)
 

@@ -1169,12 +1169,13 @@ class ContextManager:
         max_kb_tokens: int = 5000,
         chat: bool = False,
         state: Optional["AgentState"] = None,
-        lightweight_agentic: bool = False,  # ← NEW FLAG for long-running tasks
+        lightweight_agentic: bool = False,
     ) -> List[Dict[str, Any]]:
         messages: List[Dict[str, Any]] = []
 
         logger.debug(
-            f"provide_context called | query='{query[:100]}...' | chat={chat} | lightweight_agentic={lightweight_agentic} | has_state={state is not None}"
+            f"provide_context called | query='{query[:100]}...' | chat={chat} | "
+            f"lightweight_agentic={lightweight_agentic} | has_state={state is not None}"
         )
 
         if chat:
@@ -1210,7 +1211,6 @@ class ContextManager:
             )
 
             total_tokens = self.count_tokens(messages)
-            logger.debug(f"CHAT mode - tokens before prune: {total_tokens}")
             if total_tokens > max_input_tokens - reserved_for_output:
                 self.prune_to_fit_context(
                     messages,
@@ -1227,41 +1227,93 @@ class ContextManager:
         logger.debug("→ Entering AGENTIC mode")
 
         if lightweight_agentic and state is not None:
-            # ── LIGHTWEIGHT PATH FOR LONG-RUNNING LOOPS ──
-            logger.debug("→ Using LIGHTWEIGHT agentic context (long-running mode)")
-
-            objective_text = state.get_objective_reminder()
-            current_subtask = (
-                state.planned_tasks[state.current_task_index]
-                if state.planned_tasks
-                and 0 <= state.current_task_index < len(state.planned_tasks)
-                else query.strip() or "Continue with next action"
+            # ── IMPROVED LIGHTWEIGHT PATH FOR LONG-RUNNING LOOPS ──
+            logger.debug(
+                "→ Using IMPROVED LIGHTWEIGHT agentic context (long-running mode)"
             )
 
-            # Compact history: only tool names + very short result preview (kept for context)
+            # Validate state integrity
+            warnings = state.validate_state_integrity()
+            if warnings:
+                logger.warning(
+                    f"AgentState integrity warnings before lightweight context: {warnings}"
+                )
+
+            objective_text = state.get_objective_reminder()
+
+            # BULLETPROOF current_subtask lookup
+            if (
+                state.planned_tasks
+                and isinstance(state.current_task_index, int)
+                and 0 <= state.current_task_index < len(state.planned_tasks)
+            ):
+                current_subtask = state.planned_tasks[state.current_task_index]
+            else:
+                current_subtask = (
+                    query.strip() or "Continue with next action or mark task complete"
+                )
+
+            # Tool expectations via PromptBuilder helper (NO inline strings)
+            tool_expectations = ""
+            if (
+                state.task_expected_outcomes
+                and isinstance(state.current_task_index, int)
+                and 0 <= state.current_task_index < len(state.task_expected_outcomes)
+            ):
+                expected = state.task_expected_outcomes[state.current_task_index]
+                tool_expectations = PromptBuilder.tool_expectations_helper(expected)
+
+            # Enhanced Compact Tool History
             compact_history = ""
             if self.tool_call_history:
                 parts = []
-                for entry in reversed(self.tool_call_history[-8:]):  # last 8 only
+                for entry in reversed(self.tool_call_history[-10:]):
                     tool_name = entry.get("tool", "unknown")
-                    result_preview = str(entry.get("result", ""))[:120].replace(
-                        "\n", " "
-                    )
-                    parts.append(f"[{tool_name}] → {result_preview}...")
+                    raw_result = str(entry.get("result", ""))
+
+                    if tool_name == "FindTool":
+                        loaded = (
+                            "loaded tools" in raw_result.lower()
+                            or "success" in raw_result.lower()
+                        )
+                        preview = raw_result[:180].replace("\n", " ")
+                        status = "SUCCESS" if loaded else "ATTEMPT"
+                        parts.append(f"[FindTool {status}] → {preview}...")
+                    else:
+                        preview = raw_result[:140].replace("\n", " ")
+                        if len(raw_result) > 140:
+                            preview += " [...]"
+                        parts.append(f"[{tool_name}] → {preview}...")
                 compact_history = "\n".join(parts)
 
+            # Loaded tools
+            loaded_tools_str = ""
+            if hasattr(state, "loaded_tools") and state.loaded_tools:
+                loaded_tools_str = PromptBuilder.loaded_tools_summary(
+                    state.loaded_tools
+                )
+            elif hasattr(state, "tool_results") and state.tool_results:
+                used_tools = {r.get("name", "unknown") for r in state.tool_results[-8:]}
+                if used_tools:
+                    loaded_tools_str = PromptBuilder.loaded_tools_summary(
+                        list(used_tools)
+                    )
+
+            # Build context using PromptBuilder helper only
             full_context = PromptBuilder.lightweight_agentic_context(
                 objective_text=objective_text,
                 compact_history=compact_history,
                 current_subtask=current_subtask,
+                loaded_tools=loaded_tools_str,
+                tool_expectations=tool_expectations,
             )
 
             messages.append({"role": "system", "content": full_context})
             tokens_used = self.count_tokens(messages)
 
-            # Minimal KB only when explicitly useful
-            if query.strip() and max_kb_tokens > 1000:
-                kb_text = await self._retrieve_relevant_knowledge(query, 1500)
+            # Smart KB retrieval
+            if query.strip():
+                kb_text = await self._retrieve_relevant_knowledge(query, 1800)
                 if kb_text:
                     messages.append(
                         {
@@ -1300,7 +1352,6 @@ class ContextManager:
             messages.append({"role": "system", "content": full_system})
             tokens_used = self.count_tokens(messages)
 
-            # Goal & state
             if state is not None:
                 objective_text = state.get_objective_reminder()
                 objective_block = PromptBuilder.objective_and_state_section(
@@ -1318,13 +1369,13 @@ class ContextManager:
         target = max_input_tokens - reserved_for_output
         remaining = max(0, target - tokens_used - query_tokens)
 
-        # KB handling
         kb_tokens = (
-            min(max_kb_tokens, remaining // 3) if not lightweight_agentic else 1500
+            min(max_kb_tokens, remaining // 3) if not lightweight_agentic else 1800
         )
         history_budget = max(remaining - kb_tokens, min_history_tokens)
 
-        if query.strip() and kb_tokens > 500:
+        # Extra KB only for rich mode
+        if query.strip() and kb_tokens > 600 and not lightweight_agentic:
             kb_text = await self._retrieve_relevant_knowledge(query, kb_tokens)
             if kb_text:
                 messages.append(
@@ -1337,13 +1388,10 @@ class ContextManager:
                 )
                 tokens_used = self.count_tokens(messages)
 
-        # ── HISTORY HANDLING WITH LIGHTWEIGHT OVERRIDE ──
+        # ── HISTORY HANDLING ──
         if lightweight_agentic:
-            logger.debug(
-                "→ LIGHTWEIGHT MODE: skipping full history (only user query will be added)"
-            )
+            logger.debug("→ LIGHTWEIGHT MODE: skipping full conversation history")
         else:
-            # Rich history for normal agentic mode
             recent_msgs: List[Dict[str, str]] = []
             for msg, t in zip(
                 reversed(self.current_topic.history),
@@ -1356,9 +1404,12 @@ class ContextManager:
                 tokens_used += t
             messages.extend(recent_msgs)
 
-        # Always end with the current user query
+        # Always end with current user query
         messages.append(
-            {"role": "user", "content": query.strip() or "[AUTONOMOUS CONTINUATION]"}
+            {
+                "role": "user",
+                "content": query.strip() or "[AUTONOMOUS CONTINUATION]",
+            }
         )
 
         final_tokens = self.count_tokens(messages)
@@ -1368,20 +1419,19 @@ class ContextManager:
             removed, pruned_turns = self.prune_to_fit_context(
                 messages,
                 max_tokens=target,
-                min_keep_messages=5
-                if not lightweight_agentic
-                else 3,  # lighter min for lightweight
+                min_keep_messages=3 if lightweight_agentic else 5,
                 system_role="system",
                 user_role="user",
                 assistant_role="assistant",
                 tool_role="tool",
             )
-            if pruned_turns and not lightweight_agentic:  # only archive in rich mode
+            if pruned_turns and not lightweight_agentic:
                 self.current_topic.archived_history.extend(pruned_turns)
             logger.debug(f"Pruned {removed} turns to fit token limit")
 
         logger.debug(
-            f"provide_context finished | final messages count = {len(messages)} | lightweight={lightweight_agentic}"
+            f"provide_context finished | messages={len(messages)} | "
+            f"lightweight={lightweight_agentic} | tokens={final_tokens}"
         )
         return messages
 
