@@ -478,15 +478,13 @@ class AgentExecutors:
             yield event, payload
 
     # ====================== CHAT LOOP (casual path + shared task path) ======================
-    async def chat_loop(
-        self, messages: List[Dict], state: AgentState
-    ) -> AsyncIterator[Tuple[str, Any]]:
+    async def chat_loop(self, state: AgentState) -> AsyncIterator[Tuple[str, Any]]:
         logger.debug("=== CHAT LOOP ===")
 
         original_user_query = next(
             (
                 m.get("content", "").strip()
-                for m in reversed(messages or [])
+                for m in reversed(state.messages or [])
                 if m.get("role") == "user" and m.get("content")
             ),
             state.current_task or "[USER REQUEST]",
