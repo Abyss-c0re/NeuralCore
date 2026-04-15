@@ -15,6 +15,7 @@ class PromptBuilder:
 
     user_system = get_os_info()
     current_time = datetime.now().isoformat()
+    FINAL_ANSWER_MARKER = "[FINAL_ANSWER_COMPLETE]"
 
     @staticmethod
     def shell_helper(user_input: str) -> str:
@@ -494,3 +495,95 @@ class PromptBuilder:
             "[FINAL_ANSWER_COMPLETE]",
             "AUTONOMOUS CONTINUATION",
         ]
+
+    # ====================== FINAL ANSWER & AGENTFLOW PROMPTS ======================
+
+    @staticmethod
+    def inject_final_answer_instruction(base_prompt: str) -> str:
+        """Strong final answer instruction used across agent modes."""
+        return f"""{base_prompt}
+
+    CRITICAL FINAL ANSWER RULE:
+    When you have **fully completed** the assigned task/micro-task and verified all required outputs, you MUST end your response with **exactly** this marker on its own line:
+
+    {PromptBuilder.FINAL_ANSWER_MARKER}
+
+    Do not add anything after the marker. Use it only when the goal is 100% achieved."""
+
+    @staticmethod
+    def deploy_chat_system_prompt(goal: str = "General assistance") -> str:
+        """Main system prompt for the deploy/chat agent."""
+        base = f"""You are a helpful Deploy Agent that executes commands immediately.
+
+        RULES:
+        - Use tool browser to load missing tools.
+        - Keep responses short and natural after tool results.
+        - Current goal: {goal}"""
+        return PromptBuilder.inject_final_answer_instruction(base)
+
+    @staticmethod
+    def sub_agent_system_prompt(task_desc: str, assigned_tools: List[str] = []) -> str:
+        """System prompt for sub-agents executing a single micro-task."""
+        tools_hint = ""
+        if assigned_tools:
+            tools_list = ", ".join(assigned_tools[:15])
+            if len(assigned_tools) > 15:
+                tools_list += ", ..."
+            tools_hint = f"\n\nAvailable tools: {tools_list}"
+
+        base = f"""You are a precise sub-agent executing **ONE single micro-task only**.
+
+        TASK: {task_desc}{tools_hint}
+
+        CRITICAL RULES:
+        - Complete ONLY this exact task.
+        - If the task involves reading a file, use open_file_async or open_file_sync directly.
+        - When you have finished the task, output a short summary and end with exactly: {PromptBuilder.FINAL_ANSWER_MARKER}"""
+        return PromptBuilder.inject_final_answer_instruction(base)
+
+    @staticmethod
+    def plan_microtasks_prompt(task: str) -> str:
+        """Orchestrator prompt for breaking a complex task into micro-tasks."""
+        return f"""Break this task into 5-8 small focused micro-tasks.
+
+        TASK: {task}
+
+        Return ONLY valid JSON in this exact format:
+        {{
+        "microtasks": [
+            {{
+            "description": "Clear one-sentence description",
+            "suggested_tools": ["tool1", "tool2"],
+            "depends_on": null
+            }},
+            {{
+            "description": "...",
+            "suggested_tools": ["tool3"],
+            "depends_on": "step_1"
+            }}
+        ]
+        }}
+
+        Note: Use "depends_on": null for tasks that can start immediately.
+        Use the first few words of a previous task's description as "depends_on" value if it depends on it."""
+
+    @staticmethod
+    def user_friendly_task_summary_prompt(
+        task: str, goal: str = "", tool_results_str: str = ""
+    ) -> str:
+        """Natural summary prompt after a complex task completes."""
+        return f"""You are a helpful Deploy Agent. The complex task has just finished.
+
+    Task: {task}
+    Goal: {goal or "General deployment assistance"}
+
+    What was actually done (tool results):
+    {tool_results_str or "No tool results recorded."}
+
+    Write a **friendly, concise, natural** message to the user (2–6 sentences max).
+    - Celebrate what was accomplished
+    - Mention any important outcomes or warnings
+    - End by saying we're back in normal chat mode and ask how else you can help
+
+    Tone: professional but warm and clear. No JSON. No technical jargon unless necessary.
+    """
