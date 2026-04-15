@@ -87,6 +87,11 @@ class AgentState:
     empty_loops: int = 0
     action_restarts: int = 0
 
+    # ==================== Loop Control Signals (NEW - Option 3) ====================
+    # Generic inbox for engine-level loop commands (restart / pause / wait / resume / break).
+    # 100% abstract — used by every @workflow.loop via WorkflowEngine.
+    pending_loop_signals: List[Dict[str, Any]] = field(default_factory=list)
+
     # ==================== Properties ====================
     @property
     def current_task_name(self) -> Optional[str]:
@@ -135,6 +140,36 @@ class AgentState:
     def clear_loaded_tools(self) -> None:
         self.loaded_tools.clear()
         logger.debug("AgentState → loaded_tools cleared")
+
+    # ==================== NEW: Loop Signal Helpers (abstract) ====================
+    def add_loop_signal(
+        self,
+        signal: str,
+        target_loop: Optional[str] = None,
+        reason: str = "",
+        wait_config: Optional[dict] = None,
+        payload: Optional[dict] = None,
+    ) -> None:
+        """Add a generic loop-control signal (restart / pause / wait / resume / break)."""
+        sig = {
+            "signal": signal,
+            "target_loop": target_loop,
+            "reason": reason or f"Signal '{signal}' issued",
+            "wait_config": wait_config,
+            "payload": payload or {},
+            "timestamp": time.time(),
+        }
+        self.pending_loop_signals.append(sig)
+        logger.debug(
+            f"AgentState → loop signal added: {signal} (target={target_loop or 'current'})"
+        )
+
+    def clear_pending_loop_signals(self) -> None:
+        """Clear all pending signals (called after processing)."""
+        count = len(self.pending_loop_signals)
+        self.pending_loop_signals.clear()
+        if count:
+            logger.debug(f"AgentState → cleared {count} pending loop signal(s)")
 
     # ==================== NEW: State Validation ====================
     def validate_state_integrity(self) -> List[str]:
@@ -224,6 +259,7 @@ class AgentState:
 
         self.clear_loaded_tools()
         self.clear_findtool_tracking()
+        self.clear_pending_loop_signals()  # ← NEW: clear loop signals on reset
 
         self.start_time = time.time()
 
@@ -233,8 +269,6 @@ class AgentState:
         self.current_workflow = "default"
 
         logger.debug(f"AgentState reset complete. Goal: '{self.goal[:80]}...'")
-
-    # ... (all other methods unchanged: add_tool_result, add_executed_function, increment_loop, etc.)
 
     def add_tool_result(
         self, tool_name: str, result: Any, success: bool = True
@@ -464,6 +498,9 @@ class AgentState:
         data["last_confirmation_request"] = getattr(
             self, "last_confirmation_request", None
         )
+
+        # Loop Control Signals (NEW)
+        data["pending_loop_signals"] = self.pending_loop_signals[:]
 
         if data.get("waiting"):
             data["wait_summary"] = {

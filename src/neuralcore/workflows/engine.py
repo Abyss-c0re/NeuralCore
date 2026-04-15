@@ -842,6 +842,63 @@ class WorkflowEngine:
         # Signal end of loop steps
         yield ("loop_steps_completed", {"iteration": iteration})
 
+    async def _process_loop_signals(
+        self, loop_name: str, state: AgentState
+    ) -> AsyncIterator[Tuple[str, Any]]:
+        """Process pending loop control signals (restart / pause / wait / resume / break).
+        Generic, abstract engine-level control — part of Option 3 Hybrid approach."""
+        if not getattr(state, "pending_loop_signals", None):
+            return
+
+        signals = state.pending_loop_signals[:]
+        state.clear_pending_loop_signals()  # consume signals once per iteration
+
+        for sig in signals:
+            signal_type = sig.get("signal", "").lower().strip()
+            target = sig.get("target_loop")
+            reason = sig.get("reason", f"Signal {signal_type}")
+            wait_config = sig.get("wait_config") or {}
+
+            # Apply only if no target specified or target matches current loop
+            if target is not None and target != loop_name:
+                # Re-queue for other loops
+                state.pending_loop_signals.append(sig)
+                continue
+
+            logger.info(
+                f"[LOOP SIGNAL] '{signal_type}' received for loop '{loop_name}' | {reason}"
+            )
+
+            if signal_type == "restart":
+                yield ("loop_restart", {"loop_name": loop_name, "reason": reason})
+                state.loop_count = 0
+                state.empty_loops = 0
+                state.action_restarts = 0
+                state.clear_findtool_tracking()
+                continue  # caller will continue the iteration loop
+
+            elif signal_type == "pause":
+                state.start_wait(wait_type="pause", prompt=reason or "Loop paused")
+                yield ("loop_paused", {"loop_name": loop_name, "reason": reason})
+
+            elif signal_type == "wait":
+                # Trigger universal wait (re-uses existing _step_wait)
+                yield ("loop_wait", {"config": wait_config, "reason": reason})
+                # The calling loop can delegate to _step_wait if needed
+
+            elif signal_type == "resume":
+                if state.waiting:
+                    state.complete_wait("resumed_via_signal")
+                yield ("loop_resumed", {"loop_name": loop_name, "reason": reason})
+
+            elif signal_type in ("break", "stop"):
+                yield ("loop_broken", {"loop_name": loop_name, "reason": reason})
+                return  # signal caller to exit the entire loop
+
+            else:
+                logger.warning(f"Unknown loop signal '{signal_type}' for {loop_name}")
+                yield ("unknown_loop_signal", {"signal": signal_type, "reason": reason})
+
     async def execute_loop(
         self, loop_name: str, initial_state: Optional[dict] = None, **kwargs
     ) -> AsyncIterator[Tuple[str, Any]]:
@@ -866,6 +923,12 @@ class WorkflowEngine:
 
         for iteration in range(1, max_iter + 1):
             logger.debug(f"[{loop_name}] iteration {iteration}/{max_iter}")
+
+            # ====================== NEW: LOOP SIGNAL PROCESSING (Option 3) ======================
+            async for event, payload in self._process_loop_signals(loop_name, state):
+                yield event, payload
+                if event == "loop_broken":
+                    return
 
             # If YAML (or merged) steps exist, run them as a mini-workflow
             if "steps" in loop_meta and loop_meta["steps"]:
