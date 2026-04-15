@@ -845,23 +845,19 @@ class WorkflowEngine:
     async def _process_loop_signals(
         self, loop_name: str, state: AgentState
     ) -> AsyncIterator[Tuple[str, Any]]:
-        """Process pending loop control signals (restart / pause / wait / resume / break).
-        Generic, abstract engine-level control — part of Option 3 Hybrid approach."""
+        """Process pending loop control signals. Generic engine-level control."""
         if not getattr(state, "pending_loop_signals", None):
             return
 
         signals = state.pending_loop_signals[:]
-        state.clear_pending_loop_signals()  # consume signals once per iteration
+        state.clear_pending_loop_signals()
 
         for sig in signals:
             signal_type = sig.get("signal", "").lower().strip()
             target = sig.get("target_loop")
             reason = sig.get("reason", f"Signal {signal_type}")
-            wait_config = sig.get("wait_config") or {}
 
-            # Apply only if no target specified or target matches current loop
             if target is not None and target != loop_name:
-                # Re-queue for other loops
                 state.pending_loop_signals.append(sig)
                 continue
 
@@ -875,16 +871,18 @@ class WorkflowEngine:
                 state.empty_loops = 0
                 state.action_restarts = 0
                 state.clear_findtool_tracking()
-                continue  # caller will continue the iteration loop
+                state.set_soft_restart(True)  # ← CRITICAL
+                continue
 
             elif signal_type == "pause":
                 state.start_wait(wait_type="pause", prompt=reason or "Loop paused")
                 yield ("loop_paused", {"loop_name": loop_name, "reason": reason})
 
             elif signal_type == "wait":
-                # Trigger universal wait (re-uses existing _step_wait)
-                yield ("loop_wait", {"config": wait_config, "reason": reason})
-                # The calling loop can delegate to _step_wait if needed
+                yield (
+                    "loop_wait",
+                    {"config": sig.get("wait_config") or {}, "reason": reason},
+                )
 
             elif signal_type == "resume":
                 if state.waiting:
@@ -893,7 +891,7 @@ class WorkflowEngine:
 
             elif signal_type in ("break", "stop"):
                 yield ("loop_broken", {"loop_name": loop_name, "reason": reason})
-                return  # signal caller to exit the entire loop
+                return
 
             else:
                 logger.warning(f"Unknown loop signal '{signal_type}' for {loop_name}")
@@ -916,13 +914,28 @@ class WorkflowEngine:
             initial_state if isinstance(initial_state, AgentState) else AgentState()
         )
 
-        max_iter = loop_meta.get("max_iterations", 10)
+        max_iter = loop_meta.get("max_iterations")  # None = infinite
         break_condition = loop_meta.get("break_condition")
 
-        logger.info(f"🔄 Starting loop '{loop_name}' (max {max_iter} iterations)")
+        if max_iter is None:
+            logger.info(
+                f"🔄 Starting infinite loop '{loop_name}' (runs until break condition or signal)"
+            )
+        else:
+            logger.info(f"🔄 Starting loop '{loop_name}' (max {max_iter} iterations)")
 
-        for iteration in range(1, max_iter + 1):
-            logger.debug(f"[{loop_name}] iteration {iteration}/{max_iter}")
+        iteration = 0
+
+        while True:
+            iteration += 1
+            logger.debug(f"[{loop_name}] iteration {iteration}")
+
+            # Safety guard for non-infinite loops
+            if max_iter is not None and iteration > max_iter:
+                logger.warning(
+                    f"Loop '{loop_name}' reached max iterations ({max_iter})"
+                )
+                break
 
             # ====================== NEW: LOOP SIGNAL PROCESSING (Option 3) ======================
             async for event, payload in self._process_loop_signals(loop_name, state):
@@ -976,9 +989,6 @@ class WorkflowEngine:
                             {"condition": break_condition, "loop_name": loop_name},
                         )
                         return
-
-        else:
-            logger.warning(f"Loop '{loop_name}' reached max iterations ({max_iter})")
 
         yield ("loop_completed", {"loop_name": loop_name})
 

@@ -120,22 +120,32 @@ class Workflow:
         return decorator
 
     # ===================================================================
-    # LOOPS
+    # LOOPS (UPDATED — infinite loops supported)
     # ===================================================================
     def loop(
         self,
         loop_name: str,
         *,
-        max_iterations: int = 10,
+        max_iterations: Optional[
+            int
+        ] = 10,  # None or <= 0 means infinite (run until break_condition / loop signal)
         break_condition: Optional[str] = None,
         continue_condition: Optional[str] = None,
         description: Optional[str] = None,
     ):
         def decorator(fn: Callable):
+            # Normalize infinite loops
+            if max_iterations is None or max_iterations <= 0:
+                effective_max = None
+                max_label = "∞"
+            else:
+                effective_max = max_iterations
+                max_label = str(max_iterations)
+
             self.loops[loop_name] = {
                 "name": loop_name,
                 "handler": fn,
-                "max_iterations": max_iterations,
+                "max_iterations": effective_max,  # None = infinite
                 "break_condition": break_condition,
                 "continue_condition": continue_condition,
                 "description": description or fn.__doc__ or f"Loop: {loop_name}",
@@ -145,7 +155,7 @@ class Workflow:
             self.handlers[step_name] = fn
 
             logger.info(
-                f"✅ Loop '{loop_name}' registered (max={max_iterations}, "
+                f"✅ Loop '{loop_name}' registered (max={max_label}, "
                 f"break={break_condition or continue_condition or 'none'})"
             )
             return fn
@@ -334,7 +344,9 @@ class Workflow:
         loader = get_loader()
         for loop_name, loop_cfg in loader.config.get("loops", {}).items():
             if loop_name not in self.loops:
-                logger.warning(f"Loop '{loop_name}' defined in YAML but not registered via @workflow.loop")
+                logger.warning(
+                    f"Loop '{loop_name}' defined in YAML but not registered via @workflow.loop"
+                )
                 continue
 
             yaml_steps = loop_cfg.get("steps", [])
@@ -346,8 +358,10 @@ class Workflow:
 
             self.loops[loop_name]["steps"].extend(yaml_steps)
 
-            logger.info(f"✅ Merged {len(yaml_steps)} YAML steps into loop '{loop_name}' "
-                       f"(waits and other steps added)")
+            logger.info(
+                f"✅ Merged {len(yaml_steps)} YAML steps into loop '{loop_name}' "
+                f"(waits and other steps added)"
+            )
 
     def debug_print(self):
         print("\n" + "=" * 120)
@@ -370,7 +384,9 @@ class Workflow:
         print(f"\n🔄 Loops ({len(self.loops)}):")
         for name, meta in self.loops.items():
             bc = meta.get("break_condition") or meta.get("continue_condition") or "—"
-            print(f"   • {name:30} max={meta['max_iterations']:2}  break={bc}")
+            max_val = meta.get("max_iterations")
+            max_str = "∞" if max_val is None or max_val <= 0 else str(max_val)
+            print(f"   • {name:30} max={max_str:3}  break={bc}")
 
         print(f"\n✅ Conditions ({len(self.conditions)}):")
         for name in sorted(self.conditions.keys()):
