@@ -6,6 +6,8 @@ from neuralcore.utils.search import fuzzy_score, keyword_score
 from neuralcore.utils.formatting import _tokenize, map_type_to_json
 from neuralcore.actions.actions import Action, ActionSet
 from neuralcore.workflows.registry import Workflow
+from neuralcore.actions.sequence import sequence, ActionFromSequence
+
 
 from inspect import signature, _empty, iscoroutinefunction
 
@@ -48,7 +50,6 @@ class ActionRegistry:
         self._add_to_index(action, set_name)
 
     def _add_to_index(self, action: Action, set_name: str):
-        """Improved indexing: separate name, description, tags, set_name for better scoring."""
         self.all_actions[action.name] = (action, set_name)
 
         name_tokens = _tokenize(action.name)
@@ -65,9 +66,9 @@ class ActionRegistry:
             {
                 "action": action,
                 "set": set_name,
-                "name_tokens": name_tokens,  # ← new
-                "text": searchable_text,  # full text for fuzzy/keyword
-                "set_tokens": set_tokens,  # ← new
+                "name_tokens": name_tokens,
+                "text": searchable_text,
+                "set_tokens": set_tokens,
             }
         )
         logger.debug(f"Added action '{action.name}' to index under set '{set_name}'")
@@ -888,3 +889,88 @@ def tool(set_name: str, **kwargs):
         return fn
 
     return wrapper
+
+
+def sequenced(
+    name: str,
+    description: str,
+    *,
+    steps: List[str],  # tool names as strings (lazy resolved)
+    propagate: bool = True,
+    output_from: Union[int, str, None] = -1,
+    confirm_predicate: Optional[Callable[[Any], bool]] = None,
+    tags: Optional[List[str]] = None,
+    set_name: str,  # required, same as @tool
+    dependencies: Optional[Dict[str, Union[str, Dict[str, str]]]] = None,
+) -> Callable[[Callable], Action]:
+    """
+    Decorator to register a multi-step sequence as a first-class Action.
+
+    Example:
+    @sequenced(
+        name="find_and_read_file",
+        description="Search and read first matching file",
+        set_name="FileEditingTools",
+        steps=["search_files", "read_file"],
+        dependencies={
+            "search_files": {"name": "input"},
+            "read_file": {"file_path": "search_files"}
+        }
+    )
+    def find_and_read_file():
+        pass
+    """
+
+    def decorator(original_func: Callable) -> Action:
+        if not steps:
+            logger.warning(f"[SEQUENCED] Sequence '{name}' has no steps defined.")
+
+        # Create the SequenceAction with lazy step resolution
+        seq = sequence(
+            name=f"{name}_internal",
+            description=description,
+            steps=[],  # temporary
+            propagate=propagate,  # ← make sure it uses the public name
+            output_from=output_from,
+            confirm_predicate=confirm_predicate,
+            dependencies=dependencies,
+        )
+
+        # Mark for lazy resolution at execution time (this is the cleanest way)
+        seq._step_names_to_resolve = steps  # type: ignore[attr-defined]
+
+        # Optional: store original steps for debugging
+        seq._original_step_names = steps  # type: ignore[attr-defined]
+
+        # Create the final registrable Action
+        final_action = ActionFromSequence.create(
+            sequence=seq,
+            name=name,
+            description=description,
+            tags=tags or ["sequence", "workflow", "composite"],
+        )
+
+        # Register into ActionSet (exactly like @tool decorator)
+        if set_name not in registry.sets:
+            aset = ActionSet(name=set_name, description=f"{set_name} tools")
+            registry.register_set(set_name, aset)
+        else:
+            aset = registry.sets[set_name]
+
+        aset.add(final_action)
+        registry._add_to_index(final_action, set_name)
+
+        logger.info(
+            f"[SEQUENCED] Registered sequence '{name}' into set '{set_name}' "
+            f"(steps: {steps})"
+        )
+
+        # Optional: attach back to original function for introspection
+        try:
+            original_func._registered_sequence_action = final_action  # type: ignore[attr-defined]
+        except Exception:
+            pass  # not critical
+
+        return final_action
+
+    return decorator

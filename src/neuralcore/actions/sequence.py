@@ -1,3 +1,5 @@
+from inspect import signature
+
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from neuralcore.actions.actions import Action
@@ -11,9 +13,10 @@ logger = Logger.get_logger()
 class SequenceAction(Action):
     """
     A composite Action that executes an ordered list of Actions,
-    propagating context between steps.
+    with support for explicit output → input dependencies between steps.
 
-    Supports optional pausing for input (UI or human) and autonomous execution.
+    NeuralCore compliant: remains abstract, no client-specific logic.
+    Supports lazy step resolution by name.
     """
 
     def __init__(
@@ -21,10 +24,11 @@ class SequenceAction(Action):
         name: str,
         description: str,
         steps: List[Action],
-        propagate_context: bool = True,
+        propagate_context: bool = True,  # ← internal name
         output_from: Union[int, str, None] = -1,
         confirm_predicate: Optional[Callable[[Any], bool]] = None,
         step_names: Optional[List[str]] = None,
+        dependencies: Optional[Dict[str, Union[str, Dict[str, str]]]] = None,
     ):
         super().__init__(
             name=name,
@@ -54,45 +58,85 @@ class SequenceAction(Action):
             action_type="tool",
             tags=["composite", "workflow", "multi-step", "agent"],
         )
+
         self.steps = steps
         self.propagate_context = propagate_context
         self.output_from = output_from
         self.confirm_predicate = confirm_predicate
-        self.step_names = step_names or [f"step_{i}" for i in range(len(steps))]
+        self.step_names = step_names or [s.name for s in steps if hasattr(s, "name")]
+
+        self._dependency_map: Dict[str, Dict[str, str]] = self._normalize_dependencies(
+            dependencies or {}
+        )
+
+        # Lazy resolution support
+        self._step_names_to_resolve: Optional[List[str]] = None
+        self._resolved_steps: Optional[List[Action]] = None
+
         self._state: Optional[Dict[str, Any]] = None
 
+    def _normalize_dependencies(
+        self, raw: Dict[str, Union[str, Dict[str, str]]]
+    ) -> Dict[str, Dict[str, str]]:
+        normalized: Dict[str, Dict[str, str]] = {}
+        for target_step, mapping in raw.items():
+            if isinstance(mapping, str):
+                normalized[target_step] = {"input": mapping}
+            elif isinstance(mapping, dict):
+                normalized[target_step] = {k: v for k, v in mapping.items()}
+            else:
+                logger.warning(
+                    f"[SEQUENCE] Invalid dependency format for step '{target_step}'"
+                )
+        return normalized
+
     async def execute(self, **kwargs) -> Dict[str, Any]:
-        """
-        Execute the sequence with context propagation, auto-response, and optional pausing.
-        Logs every key step for observability.
-        """
+        # ====================== LAZY STEP RESOLUTION ======================
+        if self._step_names_to_resolve is not None and self._resolved_steps is None:
+            from neuralcore.actions.manager import registry
+
+            resolved: List[Action] = []
+            for step_name in self._step_names_to_resolve:
+                if step_name not in registry.all_actions:
+                    raise ValueError(
+                        f"[SEQUENCE] Step '{step_name}' not found in registry "
+                        f"when executing sequence '{self.name}'"
+                    )
+                action, _ = registry.all_actions[step_name]
+                resolved.append(action)
+
+            self._resolved_steps = resolved
+            self.steps = resolved
+            self.step_names = [a.name for a in resolved]
+            logger.debug(
+                f"[SEQUENCE] Lazily resolved {len(resolved)} steps for '{self.name}'"
+            )
+
+        # ====================== NORMAL EXECUTION ======================
         logger.info(f"[SEQUENCE START] {self.name}")
-        logger.debug(f"[SEQUENCE INPUT] {self.name} kwargs={kwargs}")
+        logger.info(f"[SEQUENCE INPUT] Raw kwargs passed to sequence: {kwargs}")
 
         input_data = kwargs.get("input")
         user_response = kwargs.get("user_response")
         resume_token = kwargs.get("resume_token")
         auto_response = kwargs.get("auto_response")
 
-        # Ensure context is always a dict
         if isinstance(input_data, str) or input_data is None:
             input_data = {"full_reply": input_data or ""}
 
+        logger.info(f"[SEQUENCE] Effective input_data: {input_data}")
+
         if self._state is None or resume_token is None:
-            # Fresh execution
             self._state = {
                 "step_index": 0,
                 "context": input_data,
                 "results": [],
                 "step_outputs": {},
             }
-            logger.debug(f"[SEQUENCE STATE INIT] {self.name} state={self._state}")
+            logger.debug(f"[SEQUENCE STATE INIT] {self.name}")
         else:
-            # Resuming a paused sequence
             if user_response is None and self.is_waiting():
-                logger.warning(
-                    f"[SEQUENCE RESUME FAIL] {self.name} waiting for human input but none provided"
-                )
+                logger.warning(f"[SEQUENCE RESUME FAIL] {self.name}")
                 return {
                     "status": "error",
                     "message": "Resume requested but no user_response provided",
@@ -107,44 +151,119 @@ class SequenceAction(Action):
         while step_index < len(self.steps):
             current_action = self.steps[step_index]
             step_name = self.step_names[step_index]
+
             logger.info(
-                f"[SEQUENCE STEP START] {self.name} → {step_name} (index={step_index})"
-            )
-            logger.debug(f"[SEQUENCE CONTEXT BEFORE] {context}")
-
-            step_kwargs = (
-                {"input": context} if self.propagate_context else kwargs.copy()
+                f"[SEQUENCE STEP {step_index + 1}/{len(self.steps)}] → {step_name}"
             )
 
+            # ====================== BUILD step_kwargs WITH FULL DEBUG ======================
+            step_kwargs: Dict[str, Any] = {}
+
+            logger.debug(
+                f"[DEPENDENCY MAP for {step_name}] {self._dependency_map.get(step_name)}"
+            )
+
+            if step_name in self._dependency_map:
+                dep_config = self._dependency_map[step_name]
+                for target_param, source in dep_config.items():
+                    logger.info(
+                        f"[DEPENDENCY] Processing {step_name}.{target_param} ← source='{source}'"
+                    )
+
+                    if source == "input":
+                        value_to_inject = context.get("full_reply") or input_data
+                        logger.info(
+                            f"[DEPENDENCY] {step_name}.{target_param} ← sequence input = '{value_to_inject}'"
+                        )
+                    else:
+                        source_result = state["step_outputs"].get(source)
+                        if source_result is None:
+                            value_to_inject = None
+                            logger.warning(
+                                f"[DEPENDENCY] Source '{source}' produced no output yet"
+                            )
+                        elif (
+                            isinstance(source_result, dict)
+                            and source_result.get("status") == "error"
+                        ):
+                            logger.warning(
+                                f"[SEQUENCE] Previous step '{source}' failed → stopping"
+                            )
+                            return {
+                                "status": "failed",
+                                "step": source,
+                                "error": source_result.get("error"),
+                            }
+                        else:
+                            if isinstance(source_result, str):
+                                lines = [
+                                    line.strip()
+                                    for line in source_result.splitlines()
+                                    if line.strip()
+                                ]
+                                value_to_inject = lines[0] if lines else source_result
+                                logger.info(
+                                    f"[DEPENDENCY] {step_name}.{target_param} ← first line of {source}"
+                                )
+                            else:
+                                value_to_inject = source_result
+                                logger.info(
+                                    f"[DEPENDENCY] {step_name}.{target_param} ← full output of {source}"
+                                )
+
+                    if value_to_inject is not None:
+                        step_kwargs[target_param] = value_to_inject
+
+            # Fallback only if nothing was injected
+            if not step_kwargs:
+                try:
+                    sig = signature(current_action.executor)
+                    if "input" in sig.parameters:
+                        step_kwargs = {"input": context.copy()}
+                        logger.info(
+                            f"[FALLBACK] Passing generic 'input' to {step_name}"
+                        )
+                except Exception:
+                    pass
+
+            logger.info(f"[STEP CALL] {step_name} called with kwargs: {step_kwargs}")
+
+            if not step_kwargs and kwargs:
+                step_kwargs = {k: v for k, v in kwargs.items() if k != "input"}
+
+            logger.info(f"[STEP CALL] {step_name} called with kwargs: {step_kwargs}")
+
+            # ====================== EXECUTE ======================
             try:
                 result = await current_action(**step_kwargs)
-                logger.debug(
-                    f"[STEP EXECUTED] {step_name} result_type={type(result).__name__}"
+                logger.info(
+                    f"[STEP RESULT] {step_name} → success (type: {type(result).__name__})"
                 )
+                if isinstance(result, str):
+                    logger.debug(
+                        f"   Output preview (first 300 chars): {result[:300]}..."
+                    )
+                elif isinstance(result, dict):
+                    logger.debug(f"   Output keys: {list(result.keys())}")
+                else:
+                    logger.debug(f"   Output: {result}")
             except Exception as exc:
-                logger.error(
-                    f"[SEQUENCE STEP ERROR] {self.name} step={step_name} index={step_index} error={exc}",
-                    exc_info=True,
-                )
-                return {
-                    "status": "failed",
+                logger.error(f"[STEP ERROR] {step_name}", exc_info=True)
+                result = {
+                    "status": "error",
                     "step": step_name,
-                    "step_index": step_index,
                     "error": str(exc),
-                    "context": context,
+                    "args": step_kwargs,
                 }
 
-            # Handle _ask with auto_response
+            # _ask and confirmation (unchanged)
             if isinstance(result, dict) and "_ask" in result:
-                logger.info(f"[SEQUENCE STEP PAUSED] {step_name} awaiting human input")
+                logger.info(f"[SEQUENCE PAUSED] {step_name} waiting for human")
+                # ... your existing _ask code ...
                 if auto_response is not None:
                     context["_last_user_response"] = auto_response
                     result.pop("_ask")
-                    logger.debug(
-                        f"[SEQUENCE AUTO RESPONSE USED] {step_name} response={auto_response}"
-                    )
                 else:
-                    # Pause for human input
                     state.update(
                         {
                             "step_index": step_index + 1,
@@ -158,18 +277,12 @@ class SequenceAction(Action):
                         "question": result["_ask"],
                         "step": step_name,
                         "step_index": step_index,
-                        "context_preview": str(context)[:400] + "…"
-                        if len(str(context)) > 400
-                        else str(context),
                         "sequence_name": self.name,
                         **{k: v for k, v in result.items() if k != "_ask"},
                     }
 
-            # Optional auto-confirmation
             if self.confirm_predicate and self.confirm_predicate(result):
-                logger.info(
-                    f"[SEQUENCE STEP CONFIRM] {step_name} awaiting confirmation"
-                )
+                # ... your existing confirmation code ...
                 state.update(
                     {
                         "step_index": step_index + 1,
@@ -185,12 +298,10 @@ class SequenceAction(Action):
                     "step_index": step_index,
                 }
 
-            # Normal step completion
+            # Store result
             results.append(result)
             state["step_outputs"][step_name] = result
-            logger.debug(
-                f"[SEQUENCE STEP COMPLETE] {step_name} result={str(result)[:500]}"
-            )
+            logger.info(f"[STEP STORED] {step_name} output saved")
 
             if self.propagate_context:
                 if isinstance(result, dict):
@@ -201,10 +312,11 @@ class SequenceAction(Action):
             state["step_index"] += 1
             step_index += 1
 
-        # Sequence completed
         final_result = self._select_output(results, state["step_outputs"])
-        logger.info(f"[SEQUENCE COMPLETE] {self.name} steps_executed={len(self.steps)}")
-        logger.debug(f"[SEQUENCE FINAL RESULT] {str(final_result)[:500]}")
+        logger.info(
+            f"[SEQUENCE COMPLETE] {self.name} | final output from: {self.output_from}"
+        )
+        logger.debug(f"[FINAL RESULT TYPE] {type(final_result).__name__}")
 
         completed_response = {
             "status": "completed",
@@ -222,16 +334,18 @@ class SequenceAction(Action):
         if self.output_from is None:
             return results
         if self.output_from == -1:
-            return named.get(self.step_names[-1], results[-1])
+            return named.get(self.step_names[-1], results[-1] if results else None)
         if isinstance(self.output_from, int):
             return (
                 results[self.output_from]
                 if 0 <= self.output_from < len(results)
                 else results[-1]
+                if results
+                else None
             )
         if isinstance(self.output_from, str):
-            return named.get(self.output_from, results[-1])
-        return results[-1]
+            return named.get(self.output_from, results[-1] if results else None)
+        return results[-1] if results else None
 
     def is_waiting(self) -> bool:
         return self._state is not None and self._state["step_index"] <= len(self.steps)
@@ -240,35 +354,33 @@ class SequenceAction(Action):
         self._state = None
 
 
+# ─────────────────────────────────────────────────────────────
+# Factories (fixed parameter name)
+# ─────────────────────────────────────────────────────────────
+
+
 def sequence(
     name: str,
     description: str,
     steps: List[Action],
     *,
-    propagate: bool = True,
+    propagate: bool = True,  # public API name (what decorator uses)
     output_from: Union[int, str, None] = -1,
     confirm_predicate: Optional[Callable[[Any], bool]] = None,
+    dependencies: Optional[Dict[str, Union[str, Dict[str, str]]]] = None,
 ) -> SequenceAction:
     """
-    Create a composable sequence of actions — steps must be passed as a list.
-
-    Usage:
-        chain = sequence(
-            name="process_text",
-            description="Uppercase → wrap → finalize",
-            steps=[act_a, act_b, act_c],
-            propagate=True,
-        )
-
-    This version enforces the list style for maximum clarity and consistency.
+    Factory to create a SequenceAction.
+    Maps 'propagate' (public) to 'propagate_context' (internal).
     """
     return SequenceAction(
         name=name,
         description=description,
-        steps=steps,  # no conversion needed — already a list
-        propagate_context=propagate,
+        steps=steps,
+        propagate_context=propagate,  # ← THIS IS THE FIX
         output_from=output_from,
         confirm_predicate=confirm_predicate,
+        dependencies=dependencies,
     )
 
 
@@ -280,17 +392,17 @@ def async_sequence(
     propagate: bool = True,
     output_from: Union[int, str, None] = -1,
     confirm_predicate: Optional[Callable[[Any], bool]] = None,
+    dependencies: Optional[Dict[str, Union[str, Dict[str, str]]]] = None,
 ) -> SequenceAction:
-    """
-    Same interface as sequence(), but name hints at async or concurrent usage.
-    """
-    return SequenceAction(
+    """Alias for clarity in async-heavy workflows."""
+    return sequence(
         name=name,
         description=description,
         steps=steps,
-        propagate_context=propagate,
+        propagate=propagate,  # pass through
         output_from=output_from,
         confirm_predicate=confirm_predicate,
+        dependencies=dependencies,
     )
 
 
@@ -448,29 +560,3 @@ class SequenceRegistry:
                 return
 
         self.engine.register_step(step_name, handler)
-
-# Usage 
-
-# engine = WorkflowEngine(agent)
-
-# from neuralcore.workflows.sequence_registry import SequenceRegistry
-# seq_registry = SequenceRegistry(engine)
-
-# seq = sequence(
-#     name="process_text",
-#     description="Uppercase → wrap → finalize",
-#     steps=[act_a, act_b, act_c],
-# )
-
-# seq_registry.register(seq)
-
-# engine.register_workflow(
-#     name="my_flow",
-#     description="test",
-#     steps=[
-#         "plan_tasks",
-#         "process_text",   # 👈 THIS NOW WORKS
-#         "llm_stream",
-#     ]
-# )
-
