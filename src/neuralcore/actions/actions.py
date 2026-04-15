@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 
 from typing import Any, Callable, Dict, List, Optional, Awaitable
 from inspect import signature
@@ -122,17 +123,15 @@ class Action:
 
     # ====================== EXECUTION ======================
     async def __call__(self, **kwargs) -> Any:
-        """Execute the action and automatically record the FULL tool outcome."""
+        """Execute the action and automatically record the FULL tool outcome + generic success indicator."""
         logger.info(f"[ACTION START] {self.name}")
         logger.debug(f"[ACTION INPUT] {self.name} kwargs={kwargs}")
 
-        # ====================== BOUND AGENT REPORT ======================
         if self._bound_agent is not None:
             agent_id = getattr(self._bound_agent, "agent_id", "NO_AGENT_ID")
             agent_type = type(self._bound_agent).__name__
             logger.debug(
-                f"[ACTION BOUND] {self.name} → bound to {agent_type} "
-                f"(agent_id={agent_id})"
+                f"[ACTION BOUND] {self.name} → bound to {agent_type} (agent_id={agent_id})"
             )
         else:
             logger.debug(f"[ACTION BOUND] {self.name} → NO AGENT BOUND")
@@ -144,28 +143,21 @@ class Action:
 
         try:
             call_args = []
-
             if self._needs_agent:
                 if self._bound_agent is None:
                     raise RuntimeError(
-                        f"Action '{self.name}' expects agent/self as first parameter, "
-                        f"but no agent was bound."
+                        f"Action '{self.name}' expects agent/self but none was bound."
                     )
                 call_args.append(self._bound_agent)
 
-            # ====================== EXECUTE ======================
             result = self.executor(*call_args, **kwargs)
-
             if asyncio.iscoroutine(result) or isinstance(result, Awaitable):
                 logger.debug(f"[ACTION AWAITING] {self.name}")
                 result = await result
 
             self.usage_count += 1
 
-            # ====================== PREPARE RESULT ======================
-            success = not (isinstance(result, dict) and result.get("status") == "error")
-
-            # Convert to nice string for LLM
+            # Convert result for LLM
             if isinstance(result, (dict, list, tuple)):
                 try:
                     final_result = json.dumps(result, ensure_ascii=False, indent=2)
@@ -174,48 +166,42 @@ class Action:
             else:
                 final_result = str(result) if result is not None else ""
 
-            # Fallback for empty results
             if not final_result or final_result.strip() in ("{}", "[]", "None", ""):
-                final_result = (
-                    f"{self.name} executed successfully.\n"
-                    f"No output was returned by the tool."
-                )
+                final_result = f"{self.name} executed successfully.\nNo output was returned by the tool."
                 logger.debug(f"[ACTION NORMALIZED EMPTY RESULT] {self.name}")
 
-            # ====================== DEBUG: ACTUAL RESULT BEFORE RECORDING ======================
-            result_preview = (
-                final_result[:400] + "..." if len(final_result) > 400 else final_result
-            )
-            logger.debug(
-                f"[TOOL RESULT BEFORE RECORD] {self.name} | "
-                f"size={len(final_result):,} chars | success={success}\n"
-                f"Preview: {result_preview}"
-            )
+            success = not (isinstance(result, dict) and result.get("status") == "error")
 
-            # ====================== RECORD FULL RESULT ======================
+            # ====================== GENERIC SUCCESS INDICATOR ======================
+            step_success_indicator = {
+                "tool_name": self.name,
+                "success": success,
+                "timestamp": time.time(),
+                "step_index": getattr(self._bound_agent.state, "current_task_index", -1)
+                if self._bound_agent is not None
+                else -1,
+            }
+
+            # ====================== RECORDING ======================
             if self._bound_agent is not None:
-                recorded_to_state = False
-                recorded_to_context = False
-
-                # 1. AgentState → lightweight structured preview (operational memory)
+                # 1. AgentState — lightweight structured success flag
                 if hasattr(self._bound_agent, "state"):
                     try:
-                        # Always use preview for State (keeps it serializable & fast)
-                        preview = (
-                            final_result[:800] + "..."
-                            if len(final_result) > 800
-                            else final_result
-                        )
                         self._bound_agent.state.add_tool_result(
                             tool_name=self.name,
-                            result=preview,
+                            result=final_result[:800] + "..."
+                            if len(final_result) > 800
+                            else final_result,
                             success=success,
                         )
-                        recorded_to_state = True
+                        # Store generic indicator for executor to check later
+                        self._bound_agent.state.last_tool_success = (
+                            step_success_indicator
+                        )
                     except Exception as e:
                         logger.warning(f"[STATE RECORD FAILED] {self.name}: {e}")
 
-                # 2. ContextManager → full fidelity (semantic KB / RAG)
+                # 2. ContextManager — full fidelity for KB/RAG
                 if hasattr(self._bound_agent, "context_manager"):
                     try:
                         await self._bound_agent.context_manager.record_tool_outcome(
@@ -227,23 +213,17 @@ class Action:
                                 "usage_count": self.usage_count,
                                 "success": success,
                                 "raw_type": type(result).__name__,
+                                "step_success_indicator": step_success_indicator,
                             },
                         )
-                        recorded_to_context = True
                     except Exception as e:
                         logger.warning(f"[CONTEXT RECORD FAILED] {self.name}: {e}")
 
-                if not recorded_to_state and not recorded_to_context:
-                    logger.warning(
-                        f"[ACTION] {self.name} executed but no recording occurred"
-                    )
-
-            logger.info(f"[ACTION SUCCESS] {self.name}")
+            logger.info(f"[ACTION SUCCESS] {self.name} | success={success}")
             return final_result
 
         except ConfirmationRequired:
             raise
-
         except Exception as exc:
             logger.error(f"[ACTION ERROR] {self.name} error={exc}", exc_info=True)
 
@@ -256,31 +236,22 @@ class Action:
 
             if self._bound_agent is not None:
                 if hasattr(self._bound_agent, "context_manager"):
-                    try:
-                        await self._bound_agent.context_manager.record_tool_outcome(
-                            tool_name=self.name,
-                            result=error_result,
-                            metadata={
-                                "args": kwargs,
-                                "action_type": self.type,
-                                "error": True,
-                            },
-                        )
-                        logger.info(f"✅ Recorded error outcome for: {self.name}")
-                    except Exception as e:
-                        logger.warning(
-                            f"[RECORD ERROR OUTCOME FAILED] {self.name}: {e}"
-                        )
-
+                    await self._bound_agent.context_manager.record_tool_outcome(
+                        tool_name=self.name,
+                        result=error_result,
+                        metadata={"error": True},
+                    )
                 if hasattr(self._bound_agent, "state"):
-                    try:
-                        await self._bound_agent.state.add_tool_result(
-                            tool_name=self.name,
-                            result=error_result,
-                            success=False,
-                        )
-                    except Exception as e:
-                        logger.warning(f"[ADD ERROR RESULT FAILED] {self.name}: {e}")
+                    self._bound_agent.state.add_tool_result(
+                        tool_name=self.name,
+                        result=error_result,
+                        success=False,
+                    )
+                    self._bound_agent.state.last_tool_success = {
+                        "tool_name": self.name,
+                        "success": False,
+                        "timestamp": time.time(),
+                    }
 
             return error_result
 

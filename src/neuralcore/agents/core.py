@@ -386,6 +386,12 @@ class Agent:
         self._stop_event = None
         self.sub_tasks.clear()
         self._sub_task_counter = 0
+        self._sync_loaded_tools_to_state()
+
+    def _sync_loaded_tools_to_state(self) -> None:
+        """Keep AgentState in sync with the real DynamicActionManager."""
+        if hasattr(self, "manager") and hasattr(self.manager, "loaded_tools"):
+            self.state.update_loaded_tools(self.manager.loaded_tools)
 
     # ====================== CONFIG & TOOLS ======================
     def reload_config(self, new_config: dict | str | Path) -> None:
@@ -419,6 +425,7 @@ class Agent:
             if valid_tools:
                 self.manager.unload_all()
                 self.manager.load_tools(valid_tools)
+                self._sync_loaded_tools_to_state()
                 logger.info(
                     f"[SUB-AGENT] '{self.name}' loaded {len(valid_tools)} tools"
                 )

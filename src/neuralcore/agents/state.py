@@ -28,9 +28,18 @@ class AgentState:
     full_reply: str = ""
     tool_results: List[Dict[str, Any]] = field(default_factory=list)
     executed_functions: List[Dict[str, Any]] = field(default_factory=list)
+    last_tool_success: Optional[Dict[str, Any]] = None
+
+    # ==================== Loaded Tools Tracking ====================
+    loaded_tools: List[str] = field(default_factory=list)
+
+    # ==================== NEW: FindTool Tracking ====================
+    findtool_call_count: int = 0
+    last_findtool_loop: int = -1
 
     # ==================== Planning & Orchestration ====================
     planned_tasks: List[str] = field(default_factory=list)
+    task_expected_outcomes: List[str] = field(default_factory=list)  # ← already present
     current_task_index: int = 0
     task_tool_assignments: Dict[int, List[str]] = field(default_factory=dict)
     task_dependencies: Dict[int, List[int]] = field(default_factory=dict)
@@ -78,7 +87,6 @@ class AgentState:
     # ==================== Properties ====================
     @property
     def current_task_name(self) -> Optional[str]:
-        """Safe, type-checker-friendly access."""
         tasks: List[str] = self.planned_tasks
         idx: int = self.current_task_index
         if isinstance(idx, int) and 0 <= idx < len(tasks):
@@ -103,12 +111,71 @@ class AgentState:
             return None
         return round(time.time() - self.wait_start_time, 1)
 
+    # ==================== FindTool Helpers ====================
+    def record_findtool_call(self) -> None:
+        self.findtool_call_count += 1
+        self.last_findtool_loop = self.loop_count
+        logger.debug(
+            f"AgentState → FindTool recorded (total={self.findtool_call_count}, loop={self.loop_count})"
+        )
+
+    def clear_findtool_tracking(self) -> None:
+        self.findtool_call_count = 0
+        self.last_findtool_loop = -1
+        logger.debug("AgentState → FindTool tracking cleared")
+
+    # ==================== Loaded Tools Helpers ====================
+    def update_loaded_tools(self, tools: List[str]) -> None:
+        self.loaded_tools = [t for t in tools if t]
+        logger.debug(f"AgentState → loaded_tools updated: {self.loaded_tools}")
+
+    def clear_loaded_tools(self) -> None:
+        self.loaded_tools.clear()
+        logger.debug("AgentState → loaded_tools cleared")
+
+    # ==================== NEW: State Validation ====================
+    def validate_state_integrity(self) -> List[str]:
+        """Validate that state has all required structures for multi-step execution.
+        Returns list of warnings (empty = healthy)."""
+        warnings = []
+
+        if len(self.planned_tasks) != len(self.task_expected_outcomes):
+            warnings.append(
+                f"planned_tasks ({len(self.planned_tasks)}) and task_expected_outcomes ({len(self.task_expected_outcomes)}) length mismatch"
+            )
+
+        if not isinstance(self.task_dependencies, dict):
+            warnings.append("task_dependencies is not a dict")
+            self.ensure_dependencies_structure()
+
+        if not isinstance(self.task_tool_assignments, dict):
+            warnings.append("task_tool_assignments is not a dict")
+            self.task_tool_assignments = {}
+
+        if self.current_task_index < 0 or (
+            self.planned_tasks and self.current_task_index >= len(self.planned_tasks)
+        ):
+            warnings.append(
+                f"current_task_index {self.current_task_index} out of bounds (0-{len(self.planned_tasks) - 1 if self.planned_tasks else 0})"
+            )
+            if self.planned_tasks:
+                self.current_task_index = min(
+                    max(0, self.current_task_index), len(self.planned_tasks) - 1
+                )
+
+        if self.planned_tasks and not self.task_expected_outcomes:
+            warnings.append(
+                "planned_tasks exist but task_expected_outcomes is empty — planning may be incomplete"
+            )
+
+        return warnings
+
     # ==================== Core Methods ====================
     def reset_for_new_task(self, new_task: str = "", new_goal: str = "") -> None:
-        """Reset state for a new task or iteration cycle – now also clears dependencies safely."""
         logger.info(f"Resetting AgentState for new task: '{new_task[:100]}...'")
 
         self.planned_tasks.clear()
+        self.task_expected_outcomes.clear()
         self.task_tool_assignments.clear()
         self.task_dependencies.clear()
         self.sub_task_ids.clear()
@@ -126,6 +193,7 @@ class AgentState:
         self.full_reply = ""
         self.tool_results.clear()
         self.executed_functions.clear()
+        self.last_tool_success = None
         self.iteration_history.clear()
 
         self.complex_reason = ""
@@ -148,6 +216,9 @@ class AgentState:
         self.action_restarts = 0
         self.message_count = 0
         self.last_message_time = 0.0
+
+        self.clear_loaded_tools()
+        self.clear_findtool_tracking()
 
         self.start_time = time.time()
 
@@ -290,8 +361,19 @@ class AgentState:
                 if self.current_task_name:
                     parts.append(f"Current sub-task: {self.current_task_name[:120]}...")
 
+            # NEW: Include expected outcomes for current step
+            if self.task_expected_outcomes and 0 <= self.current_task_index < len(
+                self.task_expected_outcomes
+            ):
+                expected = self.task_expected_outcomes[self.current_task_index]
+                if expected:
+                    parts.append(f"Expected outcome for current step: {expected}")
+
         if self.tool_results:
             parts.append(f"Tool results available: {len(self.tool_results)}")
+
+        if self.loaded_tools:
+            parts.append(f"Currently loaded tools: {', '.join(self.loaded_tools[:8])}")
 
         if self.empty_loops > 0:
             parts.append(f"Empty loops: {self.empty_loops}/3")
@@ -308,7 +390,7 @@ class AgentState:
         if self.duration > 60:
             parts.append(f"Running for {self.duration:.0f}s")
 
-        # ==================== Dependency-aware reminder (fully safe) ====================
+        # Dependency-aware reminder
         if self.task_dependencies:
             dep_parts: List[str] = []
             for idx, dep_list in self.task_dependencies.items():
@@ -327,7 +409,11 @@ class AgentState:
 
         reminder_body = "\n".join(parts)
 
-        # Delegate full formatting to PromptBuilder
+        # Run validation and log warnings (non-blocking)
+        warnings = self.validate_state_integrity()
+        if warnings:
+            logger.warning(f"AgentState integrity warnings: {warnings}")
+
         return PromptBuilder.objective_reminder(reminder_body)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -350,6 +436,15 @@ class AgentState:
         data["executed_functions"] = self.executed_functions[-15:]
         data["iteration_history"] = self.iteration_history[-10:]
         data["pending_messages"] = self.pending_messages[-20:]
+        data["findtool_call_count"] = self.findtool_call_count
+        data["last_findtool_loop"] = self.last_findtool_loop
+        data["tool_calls"] = self.tool_calls or []
+        data["loaded_tools"] = self.loaded_tools[:]
+
+        data["duration"] = round(self.duration, 2)
+        data["current_task_name"] = self.current_task_name
+        data["has_sub_tasks"] = self.has_sub_tasks
+        data["goal_reached"] = self.goal_reached
 
         data["waiting"] = getattr(self, "waiting", False)
         data["wait_type"] = getattr(self, "wait_type", None)
@@ -362,8 +457,6 @@ class AgentState:
 
         data["needs_approval"] = getattr(self, "needs_approval", False)
         data["pending_approval_prompt"] = getattr(self, "pending_approval_prompt", "")
-
-        data["tool_calls"] = self.tool_calls or []
 
         data["duration"] = round(self.duration, 2)
         data["current_task_name"] = self.current_task_name
