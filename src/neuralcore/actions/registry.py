@@ -174,9 +174,7 @@ logger.debug(f"Global registry created with sets: {list(registry.sets.keys())}")
 def tool(set_name: str, **kwargs):
     """
     Wrap a function as an Action and auto-add it to a set.
-    - First argument can be 'agent' (or 'self') and will be injected automatically
-    - Sync or async functions supported
-    - 'agent' is hidden from the final parameters schema
+    Now correctly forwards require_confirmation and confirmation_preview.
     """
 
     def wrapper(fn: Callable):
@@ -185,11 +183,14 @@ def tool(set_name: str, **kwargs):
         tags = kwargs.get("tags", [])
         aliases = kwargs.get("aliases", [])
 
+        # === NEW: Explicitly read confirmation parameters ===
+        require_confirmation = kwargs.get("require_confirmation", False)
+        confirmation_preview = kwargs.get("confirmation_preview")
+
         sig = signature(fn)
         parameters = dict(kwargs.get("parameters", {}))
         required = list(kwargs.get("required", []))
 
-        # Skip first argument if it's 'agent' or 'self' (hide from schema)
         param_list = list(sig.parameters.items())
         skip_first = bool(param_list and param_list[0][0] in ("agent", "self"))
 
@@ -205,15 +206,14 @@ def tool(set_name: str, **kwargs):
             if param.default is _empty and param_name not in required:
                 required.append(param_name)
 
-        # Wrap executor to inject agent automatically if first param is agent/self
+        # Executor wrapper (unchanged)
         if iscoroutinefunction(fn):
 
             @wraps(fn)
             async def async_wrapper(*args, **kwargs):
                 if skip_first and args and hasattr(args[0], "context_manager"):
                     return await fn(args[0], *args[1:], **kwargs)
-                else:
-                    return await fn(*args, **kwargs)
+                return await fn(*args, **kwargs)
 
             executor = async_wrapper
         else:
@@ -222,12 +222,11 @@ def tool(set_name: str, **kwargs):
             def sync_wrapper(*args, **kwargs):
                 if skip_first and args and hasattr(args[0], "context_manager"):
                     return fn(args[0], *args[1:], **kwargs)
-                else:
-                    return fn(*args, **kwargs)
+                return fn(*args, **kwargs)
 
             executor = sync_wrapper
 
-        # Create Action (agent is hidden from schema)
+        # === FIXED: Pass confirmation flags to Action ===
         action = Action(
             name=name,
             description=description,
@@ -238,9 +237,11 @@ def tool(set_name: str, **kwargs):
             aliases=aliases,
             hidden_for_agents=kwargs.get("hidden_for_agents"),
             hidden_for_subagents=kwargs.get("hidden_for_subagents", False),
+            require_confirmation=require_confirmation,
+            confirmation_preview=confirmation_preview,
         )
 
-        # Add to registry
+        # Register (unchanged)
         if set_name in registry.sets:
             aset = registry.sets[set_name]
         else:
@@ -250,8 +251,10 @@ def tool(set_name: str, **kwargs):
 
         aset.add(action)
         registry._add_to_index(action, set_name)
-        logger.debug(f"Registered action '{name}' under set '{set_name}'")
 
+        logger.info(
+            f"[TOOL REGISTERED] {name} | require_confirmation={require_confirmation} | set={set_name}"
+        )
         return fn
 
     return wrapper
