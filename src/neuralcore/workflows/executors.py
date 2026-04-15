@@ -407,11 +407,20 @@ class AgentExecutors:
         # ====================== FINAL SYNTHESIS ======================
         yield ("phase_changed", {"phase": "generating_final_answer"})
 
+        # IMPROVED: rich, explicit synthesis prompt that includes full task context + tool results
+        synthesis_query = PromptBuilder.final_synthesis(original_query)
+        if state.tool_results:
+            synthesis_query += "\n\nTool results summary:\n" + "\n".join(
+                f"• {r.get('name', 'unknown')}: {str(r.get('result', ''))[:500]}..."
+                for r in state.tool_results[-3:]  # last 3 results
+            )
+
         final_messages = await self.agent.context_manager.provide_context(
-            query=PromptBuilder.final_synthesis(original_query),
+            query=synthesis_query,
             max_input_tokens=self.agent.max_tokens,
             reserved_for_output=8000,
-            system_prompt=self._build_objective_reminder() + "\n\nFINAL ANSWER MODE",
+            system_prompt=self._build_objective_reminder()
+            + "\n\nFINAL ANSWER MODE\nProvide a clear, complete summary of what was accomplished.",
             include_logs=True,
             chat=False,
             state=state,
