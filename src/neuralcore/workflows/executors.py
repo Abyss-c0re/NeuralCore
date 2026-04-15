@@ -6,7 +6,7 @@ from typing import AsyncIterator, Dict, Any, List, Optional, Tuple
 from neuralcore.agents.state import AgentState
 from neuralcore.actions.actions import ActionSet
 from neuralcore.utils.logger import Logger
-from neuralcore.actions.manager import registry
+from neuralcore.actions.registry import registry
 from neuralcore.utils.prompt_builder import PromptBuilder
 
 logger = Logger.get_logger()

@@ -6,7 +6,6 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Callable, Un
 from neuralcore.agents.state import AgentState
 from neuralcore.utils.logger import Logger
 
-from neuralcore.actions.sequence import SequenceRegistry
 from neuralcore.utils.config import get_loader
 
 
@@ -35,8 +34,6 @@ class WorkflowEngine:
         self.workflow_description: str = ""
 
         self._custom_conditions: Dict[str, Callable] = {}
-
-        self.sequence_registry = SequenceRegistry(self)
 
         # Load from config
         self.load_workflow_from_config()

@@ -1132,7 +1132,7 @@ class ContextManager:
                     r"^```(?:json)?|```$", "", response, flags=re.IGNORECASE
                 ).strip()
 
-                # PRODUCTION: JSON-first parsing
+                # JSON-first parsing
                 try:
                     data = json.loads(clean)
                     name = data.get("name") or data.get("topic") or "unknown"

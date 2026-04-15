@@ -8,16 +8,16 @@ from neuralcore.workflows.engine import WorkflowEngine
 from neuralcore.workflows.registry import workflow
 from neuralcore.cognition.memory import ContextManager
 from neuralcore.clients.factory import get_clients
-from neuralcore.actions.manager import tool
+from neuralcore.actions.registry import tool
 from neuralcore.utils.logger import Logger
 from neuralcore.agents.state import AgentState
+from neuralcore.actions.registry import registry
 from neuralcore.actions.manager import (
     ActionRegistry,
-    AgentActionHelper,
     ToolBrowser,
     DynamicActionManager,
-    registry,
 )
+
 
 logger = Logger.get_logger()
 
@@ -268,7 +268,7 @@ class Agent:
         # ====================== INFRASTRUCTURE (never goes into state) ======================
         self.manager = DynamicActionManager(self.registry, self)
         self.context_manager = ContextManager(self.max_tokens)
-        self.agent_tools = AgentActionHelper(self)
+        # self.agent_tools = AgentActionHelper(self)
         self.workflow = WorkflowEngine(self, workflow)
         ToolBrowser(self.registry, self.manager)
 
