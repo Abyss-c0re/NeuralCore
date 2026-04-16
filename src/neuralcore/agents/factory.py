@@ -1,16 +1,8 @@
-"""
-NeuralCore Factories
-Pure, abstract builders. No YAML parsing here — that stays in ConfigLoader.
-Used by NeuralHub for deployment and NeuralLabs for live editing.
-"""
-
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from neuralcore.clients.factory import get_clients
 from neuralcore.agents.core import Agent
-from neuralcore.actions.registry import registry
-from neuralcore.actions.manager import DynamicActionManager, ToolBrowser
 
 
 class AgentFactory:
@@ -20,7 +12,7 @@ class AgentFactory:
     """
 
     def __init__(self, loader):
-        self.loader = loader   # reference back only for tool loading & app_root
+        self.loader = loader  # reference back only for tool loading & app_root
 
     def create_agent(
         self,
@@ -38,7 +30,9 @@ class AgentFactory:
             raise ValueError(f"Agent config for '{agent_id}' is empty or not found")
 
         # Use override if provided (for sub-agents or live edits)
-        final_config = dict(config_override) if config_override is not None else dict(config)
+        final_config = (
+            dict(config_override) if config_override is not None else dict(config)
+        )
 
         # Client resolution (still needed here — it's part of agent construction)
         clients = get_clients()
@@ -52,8 +46,7 @@ class AgentFactory:
             agent_id=final_config.get("id", agent_id),
             loader=self.loader,
             app_root=app_root,
-            # Pass the already-parsed config directly — no more parsing inside Agent
-            config=final_config,          # ← NEW: we will update Agent.__init__ to accept this
+            config=final_config,
             sub_agent=sub_agent,
         )
 

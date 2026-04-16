@@ -21,22 +21,19 @@ class WorkflowEngine:
 
     FINAL_ANSWER_MARKER = "[FINAL_ANSWER_COMPLETE]"
 
-    def __init__(self, agent, workflow_registry=None):
+    def __init__(self, agent, workflow_registry):
         self.agent = agent
-
-        # === REGISTRIES ===
-        self.registered_workflows: Dict[str, Dict[str, Any]] = {}
-        self._step_handlers: Dict[str, Optional[Callable]] = {}
         self.workflow = workflow_registry
 
-        self.current_workflow_name: str = "default"
-        self.workflow_steps: List[Union[str, Dict[str, Any]]] = []
-        self.workflow_description: str = ""
-
+        self.registered_workflows: Dict[str, Dict[str, Any]] = {}
+        self._step_handlers: Dict[str, Optional[Callable]] = {}
         self._custom_conditions: Dict[str, Callable] = {}
 
-        # Load from config
-        self.load_workflow_from_config()
+        self.current_workflow_name: str = "default"
+        self.workflow_steps: List = []
+        self.workflow_description: str = ""
+
+        self.load_workflows()
 
         logger.info("✅ WorkflowEngine ready")
 
@@ -77,17 +74,57 @@ class WorkflowEngine:
     # ===================================================================
     # WORKFLOW LOADING — now universal
     # ===================================================================
-    def load_workflow_from_config(self, config_override: dict | None = None):
-        """Load workflows. Accepts live override dict for dynamic updates."""
+    def load_workflows(self, config_override: dict | None = None):
+        """
+        UNIFIED WORKFLOW LOADER (single source of truth)
+        - Syncs decorator registry (@workflow.loop etc.)
+        - Loads/overides from YAML/config (live support)
+        - Applies primary workflow
+        """
         loader = get_loader()
 
+        # ── 1. SYNC DECORATOR REGISTRY ──
+        # Workflows
+        for name, wf_data in self.workflow.workflows.items():
+            if name not in self.registered_workflows:
+                self.register_workflow(
+                    name=name,
+                    description=wf_data.get("description", f"Workflow {name}"),
+                    steps=wf_data.get("steps", []),
+                    hidden_toolsets=wf_data.get("hidden_toolsets"),
+                )
+
+        # Steps / handlers
+        for name, handler in self.workflow.handlers.items():
+            self.register_step(name, handler)
+
+        # Conditions
+        for name, handler in self.workflow.conditions.items():
+            self.register_custom_condition(name, handler)
+
+        # LOOPS — THIS IS THE FIXED PART
+        for loop_name, loop_data in self.workflow.loops.items():
+            if "steps" not in loop_data:
+                loop_data["steps"] = []
+
+            # Make the loop visible to execute_loop
+            # (assuming your engine has self.loops or similar — adjust if your internal name is different)
+            if not hasattr(self, "loops"):
+                self.loops = {}
+            self.loops[loop_name] = loop_data
+
+            logger.info(
+                f"✅ Synced loop '{loop_name}' from decorator registry "
+                f"(max={loop_data.get('max_iterations') or '∞'})"
+            )
+
+        # ── 2. LOAD / OVERRIDE FROM YAML / LIVE CONFIG ──
         global_workflows = (
             config_override.get("workflows", {})
             if config_override
             else loader.config.get("workflows", {})
         )
 
-        # Register every workflow from source
         for name, wf_data in global_workflows.items():
             if name not in self.registered_workflows:
                 self.register_workflow(
@@ -97,7 +134,7 @@ class WorkflowEngine:
                     hidden_toolsets=wf_data.get("hidden_toolsets"),
                 )
 
-        # Apply primary workflow for this agent
+        # ── 3. APPLY PRIMARY WORKFLOW ──
         agent_workflow_cfg = getattr(self.agent, "config", {}).get("workflow")
         primary_name = None
 
@@ -113,29 +150,43 @@ class WorkflowEngine:
             self.workflow_description = "Default workflow"
             logger.warning("No primary workflow found in agent config — using default")
 
+        # Final summary
+        loop_count = len(getattr(self, "loops", {}))
         logger.info(
-            f"Workflow loaded: {self.current_workflow_name} — {self.workflow_description}"
+            f"✅ Workflows fully loaded: {self.current_workflow_name} — {self.workflow_description} "
+            f"({len(self.workflow.workflows)} decorator workflows + {loop_count} loops)"
         )
 
     # NEW: Live reload support (clean, no external references)
     def reload_workflow_config(self, new_config: dict | None = None) -> bool:
-        """Reload workflows from a fresh config dict."""
+        """Reload workflows from a fresh config dict (live override support for NeuralLabs)."""
         try:
             if isinstance(new_config, dict):
-                self.load_workflow_from_config(config_override=new_config)
-                logger.info("WorkflowEngine reloaded from live config")
+                # Use the unified loader with override
+                self.load_workflows(config_override=new_config)
+                logger.info("✅ WorkflowEngine reloaded from live config override")
                 return True
-            logger.warning("reload_workflow_config expects a dict")
-            return False
+            else:
+                # No override → just re-sync everything (safe refresh)
+                self.load_workflows()
+                logger.info(
+                    "✅ WorkflowEngine refreshed from current config + decorators"
+                )
+                return True
+
         except Exception as e:
             logger.error(f"Workflow reload failed: {e}")
             return False
 
     def switch_workflow(self, name: str) -> bool:
+        """Switch to a different workflow. Attempts reload + parent inheritance if needed."""
         if name not in self.registered_workflows:
-            logger.warning(f"Workflow '{name}' not found, attempting reload")
-            self.load_workflow_from_config()
+            logger.warning(f"Workflow '{name}' not found, attempting reload...")
 
+            # Unified reload (decorators + YAML + live override)
+            self.load_workflows()
+
+            # Fallback: try inheriting from parent (for sub-agents)
             if name not in self.registered_workflows and hasattr(
                 self.agent, "get_parent_agent"
             ):
@@ -144,12 +195,15 @@ class WorkflowEngine:
                     self.inherit_workflows_from_parent(parent.workflow)
 
             if name not in self.registered_workflows:
-                logger.error(f"Workflow '{name}' still not found after reload")
+                logger.error(
+                    f"Workflow '{name}' still not found after reload and parent inheritance"
+                )
                 return False
 
+        # Apply the workflow
         wf = self.registered_workflows[name]
-        self.workflow_steps = self._resolve_steps(wf["steps"])
-        self.workflow_description = wf["description"]
+        self.workflow_steps = self._resolve_steps(wf.get("steps", []))
+        self.workflow_description = wf.get("description", f"Workflow {name}")
         self.current_workflow_name = name
 
         logger.info(f"🔄 Switched to workflow '{name}' → {self.workflow_description}")

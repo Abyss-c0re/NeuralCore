@@ -24,12 +24,13 @@ class ConfigLoader:
         # Universal parse on init — keeps old behavior but now supports in-memory too
         self.config: dict[str, Any] = self.parse_config(cli_path)
 
-        # Do NOT create the factory here at all
-        self.agent_factory = None   # created on first use
+        self.agent_factory = None  # created on first use
+        self.workflow_factory = None
 
         print(
             f"[DEBUG] ConfigLoader initialized with {len(self.config)} top-level keys"
         )
+
     # ===================================================================
     # UNIVERSAL PARSER
     # ===================================================================
@@ -274,6 +275,7 @@ class ConfigLoader:
         # Lazy factory creation — this is what actually breaks the circular import
         if self.agent_factory is None:
             from neuralcore.agents.factory import AgentFactory
+
             self.agent_factory = AgentFactory(self)
 
         return self.agent_factory.create_agent(
@@ -281,6 +283,26 @@ class ConfigLoader:
             config=agent_cfg,
             app_root=self.app_root,
         )
+
+    def create_workflow_engine(self, agent):
+        """Create WorkflowEngine using factory (clean separation)."""
+        if self.workflow_factory is None:
+            from neuralcore.workflows.factory import WorkflowFactory
+
+            self.workflow_factory = WorkflowFactory()
+
+        # Register workflows from config into factory
+        for name, wf_data in self.config.get("workflows", {}).items():
+            self.workflow_factory.register_workflow(
+                name=name,
+                description=wf_data.get("description", f"Workflow {name}"),
+                steps=wf_data.get("steps", []),
+                hidden_toolsets=wf_data.get("hidden_toolsets"),
+            )
+
+        from neuralcore.workflows.engine import WorkflowEngine
+
+        return WorkflowEngine(agent=agent, workflow_registry=self.workflow_factory)
 
     def parse_agent_config_for_labs(self, agent_id_or_dict: str | dict) -> dict:
         """
