@@ -183,7 +183,7 @@ class ConfigLoader:
 
             # Registry check (your original)
             try:
-                from neuralcore.actions.manager import registry
+                from neuralcore.actions.registry import registry
 
                 if imported_any and getattr(registry, "sets", {}).get(set_name):
                     print(f"[INFO] Tool set '{set_name}' registered successfully")
