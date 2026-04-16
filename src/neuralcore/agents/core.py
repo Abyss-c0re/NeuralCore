@@ -222,6 +222,7 @@ class Agent:
         app_root: Path,
         config_file: Optional[Path] = None,
         config_override: Optional[dict] = None,
+        config: Optional[dict] = None,
         sub_agent: bool = False,
         action_registry: ActionRegistry = registry,
     ):
@@ -235,8 +236,13 @@ class Agent:
 
         # ====================== CONFIG HANDLING ======================
         self.sub_agent: bool = sub_agent
-        if config_override is not None:
+
+        if config is not None and isinstance(config, dict):
+            self.config = dict(config)
+        # 2. config_override (still supported for SubAgent and direct calls)
+        elif config_override is not None:
             self.config = dict(config_override)
+        # 3. Legacy fallback (old direct Agent(...) calls)
         else:
             if config_file:
                 full_config = self.loader.parse_config(config_file)
@@ -402,10 +408,7 @@ class Agent:
     def reload_config(self, new_config: dict | str | Path) -> None:
         try:
             parsed = self.loader.parse_config(new_config)
-            if isinstance(parsed.get("agents"), dict):
-                agent_cfg = parsed["agents"].get(self.agent_id, {})
-            else:
-                agent_cfg = parsed
+            agent_cfg = parsed.get("agents", {}).get(self.agent_id, {}) or parsed
 
             if isinstance(agent_cfg, dict) and agent_cfg:
                 self.config = dict(agent_cfg)
@@ -416,11 +419,10 @@ class Agent:
                     "system_prompt", self.system_prompt
                 )
 
-                # Sync important fields into state
                 self.state.current_role = self.config.get(
                     "role", self.state.current_role
                 )
-                logger.info(f"Agent '{self.name}' reloaded config from NeuralLabs")
+                logger.info(f"Agent '{self.name}' reloaded config")
         except Exception as e:
             logger.error(f"reload_config failed: {e}")
 

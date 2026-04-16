@@ -24,10 +24,12 @@ class ConfigLoader:
         # Universal parse on init — keeps old behavior but now supports in-memory too
         self.config: dict[str, Any] = self.parse_config(cli_path)
 
+        # Do NOT create the factory here at all
+        self.agent_factory = None   # created on first use
+
         print(
             f"[DEBUG] ConfigLoader initialized with {len(self.config)} top-level keys"
         )
-
     # ===================================================================
     # UNIVERSAL PARSER
     # ===================================================================
@@ -254,7 +256,7 @@ class ConfigLoader:
         agent_id: str | None = None,
     ):
         """
-        NeuralHub's favorite method: spin up an agent from ANY config source.
+        Main entry point for creating agents.
         """
         if config_source is not None:
             self.config = self.parse_config(config_source)
@@ -265,7 +267,20 @@ class ConfigLoader:
             if not agent_id:
                 raise ValueError("No agents found in config")
 
-        return self.load_agent_from_config(agent_id)
+        agent_cfg = self.get_agent_config(agent_id)
+        if not agent_cfg:
+            raise ValueError(f"No agent config found for '{agent_id}'")
+
+        # Lazy factory creation — this is what actually breaks the circular import
+        if self.agent_factory is None:
+            from neuralcore.agents.factory import AgentFactory
+            self.agent_factory = AgentFactory(self)
+
+        return self.agent_factory.create_agent(
+            agent_id=agent_id,
+            config=agent_cfg,
+            app_root=self.app_root,
+        )
 
     def parse_agent_config_for_labs(self, agent_id_or_dict: str | dict) -> dict:
         """
