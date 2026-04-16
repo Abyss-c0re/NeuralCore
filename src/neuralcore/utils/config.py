@@ -9,11 +9,8 @@ from pathlib import Path
 
 class ConfigLoader:
     """
-    UNIVERSAL CONFIG PARSER for NeuralCore — the single brain for NeuralHub + NeuralLabs.
+    UNIVERSAL CONFIG PARSER for NeuralCore
     - Accepts: file (Path/str), raw YAML string, or dict (live generated/edited configs).
-    - Removes ALL duplication with Agent._load_agent_config and WorkflowEngine.
-    - Zero breakage on existing CLI/singleton/file flows.
-    - Prepares core for external management + live visualization/editing.
     """
 
     DEFAULT_API_KEY = "not-needed"
@@ -38,7 +35,7 @@ class ConfigLoader:
         """
         One method to rule them all.
         - str/Path → file (classic)
-        - dict → in-memory (NeuralHub deploy, NeuralLabs live edit)
+        - dict → in-memory
         - raw YAML str → direct from VR canvas
         Returns normalized config dict.
         """
@@ -49,7 +46,7 @@ class ConfigLoader:
             raw = self._load_yaml(path)
             print(f"[INFO] Loaded config from file: {path}")
         elif isinstance(source, dict):
-            print("[INFO] Using live in-memory dict (NeuralHub/NeuralLabs mode)")
+            print("[INFO] Using live in-memory dict")
             raw = copy.deepcopy(source)
         elif isinstance(source, str) and source.strip().startswith(("---", "{")):
             print("[INFO] Parsing raw YAML/JSON string from editor")
@@ -129,9 +126,7 @@ class ConfigLoader:
     def load_tool_sets(
         self, sets_to_load: list[str] | None = None, config_override: dict | None = None
     ):
-        """
-        Now accepts optional config_override for live editing in NeuralLabs.
-        """
+
         sets_cfg = (config_override or self.config).get("tools", {})
 
         print(f"[DEBUG] Loading tool sets: {sets_to_load or 'ALL'}")
@@ -303,24 +298,6 @@ class ConfigLoader:
         from neuralcore.workflows.engine import WorkflowEngine
 
         return WorkflowEngine(agent=agent, workflow_registry=self.workflow_factory)
-
-    def parse_agent_config_for_labs(self, agent_id_or_dict: str | dict) -> dict:
-        """
-        Returns config enriched for NeuralLabs visualization/editing.
-        Call this from VR canvas → instant node graph.
-        """
-        if isinstance(agent_id_or_dict, dict):
-            cfg = copy.deepcopy(agent_id_or_dict)
-        else:
-            cfg = self.get_agent_config(agent_id_or_dict)
-
-        cfg["_neural_labs"] = {
-            "type": "agent",
-            "can_have_sub_agents": cfg.get("max_sub_agents", 6) > 0,
-            "workflow_count": len(self.config.get("workflows", {})),
-            "tool_sets": list(self.get_tool_sets().keys()),
-        }
-        return cfg
 
     # ===================================================================
     # LEGACY METHODS — now powered by universal parser

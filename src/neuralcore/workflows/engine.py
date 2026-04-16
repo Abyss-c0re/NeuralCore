@@ -159,7 +159,7 @@ class WorkflowEngine:
 
     # NEW: Live reload support (clean, no external references)
     def reload_workflow_config(self, new_config: dict | None = None) -> bool:
-        """Reload workflows from a fresh config dict (live override support for NeuralLabs)."""
+        """Reload workflows from a fresh config dict."""
         try:
             if isinstance(new_config, dict):
                 # Use the unified loader with override
