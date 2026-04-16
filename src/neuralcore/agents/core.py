@@ -320,6 +320,11 @@ class Agent:
     def status(self, value: str) -> None:
         self.state.status = value
 
+    async def add_message(self, role: str, message: str) -> None:
+        msg_dict = {"role": role, "content": message}
+        self.state.add_message(msg_dict)
+        await self.context_manager.add_message(role, message)
+
     def get_full_state_dict(self) -> Dict[str, Any]:
         """Public, generic snapshot of the entire agent for any transport layer."""
         base = {

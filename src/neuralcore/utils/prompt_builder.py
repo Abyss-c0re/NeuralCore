@@ -587,3 +587,51 @@ class PromptBuilder:
 
     Tone: professional but warm and clear. No JSON. No technical jargon unless necessary.
     """
+
+    @staticmethod
+    def agent_objective_reminder(
+        state,
+    ) -> str:  # or accept individual fields if you prefer pure data
+        """Rich, state-aware objective reminder (used by both main agent and sub-agents)."""
+        if not state:
+            return "Current goal: No goal set."
+
+        parts = [f"Current goal: {state.goal or 'Complete the assigned task'}"]
+
+        # Sub-task / progress awareness
+        if state.planned_tasks and len(state.planned_tasks) > 1:
+            current_idx = state.current_task_index + 1
+            total = len(state.planned_tasks)
+            parts.append(f"Progress: Sub-task {current_idx}/{total}")
+
+        if state.current_task:
+            parts.append(f"Current micro-task: {state.current_task[:150]}...")
+
+        if state.tool_results:
+            parts.append(f"Available tool results: {len(state.tool_results)}")
+
+        if state.empty_loops > 0:
+            parts.append(f"Empty loops counter: {state.empty_loops}")
+
+        if state.phase:
+            parts.append(f"Current phase: {state.phase}")
+
+        # Critical tool usage rule (centralized)
+        parts.append(
+            "CRITICAL TOOL USAGE RULE:\n"
+            "- If the tool you need is missing, FIRST call FindTool to discover and load it.\n"
+            "- ONLY after FindTool has successfully loaded the tool should you call the actual tool."
+        )
+
+        # Termination marker (already in FINAL_ANSWER_MARKER constant)
+        parts.append(
+            f"\nWhen you have FULLY completed the current micro-task, "
+            f"you MUST end your final response with exactly:\n{PromptBuilder.FINAL_ANSWER_MARKER}"
+        )
+
+        return "\n\n".join(parts)
+
+    @staticmethod
+    def sub_agent_objective_reminder(state) -> str:
+        """Convenience alias — currently identical to objective_reminder but kept separate for future divergence."""
+        return PromptBuilder.objective_reminder(state)

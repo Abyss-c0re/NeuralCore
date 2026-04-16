@@ -1,10 +1,10 @@
 import json
 
-from typing import AsyncIterator, Dict, Any, List, Optional, Tuple
+from typing import AsyncIterator, Any, Tuple
 
 
 from neuralcore.agents.state import AgentState
-from neuralcore.actions.actions import ActionSet
+
 from neuralcore.utils.logger import Logger
 from neuralcore.actions.registry import registry
 from neuralcore.utils.prompt_builder import PromptBuilder
@@ -21,18 +21,6 @@ class AgentExecutors:
         self.Phase = phase_enum
 
     # ====================== FAST CASUAL DETECTOR ======================
-    async def _classify_intent(self, query: str) -> str:
-        prompt = PromptBuilder.classify_intent(query)
-        try:
-            result = await self.agent.client.chat(
-                prompt, temperature=0.0, max_tokens=20
-            )
-            return "CASUAL" if "CASUAL" in result.upper() else "TASK"
-        except Exception:
-            return "CASUAL" if len(query.split()) < 25 else "TASK"
-
-    def _build_casual_system_prompt(self) -> str:
-        return PromptBuilder.casual_system_prompt()
 
     async def _is_multi_step_task(self, query: str) -> bool:
         """Improved generic detection – now explicitly recognizes chained file operations."""
@@ -143,12 +131,26 @@ class AgentExecutors:
 
     async def _goal_driven_task_loop(
         self,
-        original_query: str,
         state: AgentState,
         is_sub_agent: bool = False,
     ) -> AsyncIterator[Tuple[str, Any]]:
         """FINAL STATE-DRIVEN goal loop – uses generic success indicator from Action + expected outcomes.
         Requires real completion signals before advancing or finishing. Keeps NeuralCore abstract."""
+
+        original_query = next(
+            (
+                m.get("content", "").strip()
+                for m in reversed(state.messages or [])
+                if m.get("role") == "user" and m.get("content")
+            ),
+            state.current_task or "[USER REQUEST]",
+        )
+
+        # ====================== TASK PATH – FULL CLEAN RESET ======================
+        logger.info("→ [MODE SWITCH] Casual → TASK → full state reset")
+        state.reset_for_new_task(new_task=original_query, new_goal=original_query)
+        state.planned_tasks = []  # force re-planning on first loop
+
         logger.info(f"[STATE-DRIVEN TASK LOOP] Starting for: {original_query[:120]}...")
 
         if state.goal_reached or state.loop_count > 0:
@@ -242,7 +244,7 @@ class AgentExecutors:
                 query=current_query,
                 max_input_tokens=self.agent.max_tokens,
                 reserved_for_output=12000,
-                system_prompt=self._build_objective_reminder()
+                system_prompt=PromptBuilder.agent_objective_reminder(self.agent.state)
                 + f"\n\nWhen you finish the current sub-task, you MUST output exactly: {marker}",
                 include_logs=True,
                 chat=False,
@@ -419,7 +421,7 @@ class AgentExecutors:
             query=synthesis_query,
             max_input_tokens=self.agent.max_tokens,
             reserved_for_output=8000,
-            system_prompt=self._build_objective_reminder()
+            system_prompt=PromptBuilder.agent_objective_reminder(self.agent.state)
             + "\n\nFINAL ANSWER MODE\nProvide a clear, complete summary of what was accomplished.",
             include_logs=True,
             chat=False,
@@ -452,83 +454,6 @@ class AgentExecutors:
             )
             state.status = "idle"
             state.is_complete = True
-
-    # ====================== REFACTORED AGENTIC LOOP (for sub-agents) ======================
-    async def agentic_loop(
-        self,
-        iteration: int,
-        state: AgentState,
-        tools: Optional[ActionSet] = None,
-    ) -> AsyncIterator[Tuple[str, Any]]:
-        """Headless sub-agent loop — now uses the same robust goal-driven logic as chat TASK path."""
-        state.phase = self.Phase.EXECUTE
-        yield ("phase_changed", {"phase": state.phase.value})
-
-        original_query = (
-            state.current_task
-            or self.agent.state.goal
-            or "Complete the assigned micro-task"
-        )
-
-        async for event, payload in self._goal_driven_task_loop(
-            original_query=original_query,
-            state=state,
-            is_sub_agent=True,
-        ):
-            yield event, payload
-
-    # ====================== CHAT LOOP (casual path + shared task path) ======================
-    async def chat_loop(self, state: AgentState) -> AsyncIterator[Tuple[str, Any]]:
-        logger.debug("=== CHAT LOOP ===")
-
-        original_user_query = next(
-            (
-                m.get("content", "").strip()
-                for m in reversed(state.messages or [])
-                if m.get("role") == "user" and m.get("content")
-            ),
-            state.current_task or "[USER REQUEST]",
-        )
-
-        intent = await self._classify_intent(original_user_query)
-        await self.agent.context_manager.add_message("user", original_user_query)
-        logger.info(f"[CHAT INTENT] {intent} | '{original_user_query[:80]}...'")
-
-        if intent == "CASUAL":
-            logger.info("[CASUAL MODE] Pure basic chat")
-            yield ("phase_changed", {"phase": "casual chat"})
-
-            casual_messages = await self.agent.context_manager.provide_context(
-                query=original_user_query,
-                max_input_tokens=self.agent.max_tokens,
-                reserved_for_output=12000,
-                system_prompt=self._build_casual_system_prompt(),
-                include_logs=False,
-                chat=True,
-            )
-
-            final_reply = await self.agent.client.chat(
-                casual_messages, temperature=0.85, top_p=0.95
-            )
-
-            await self.agent.context_manager.add_message("assistant", final_reply)
-            yield ("llm_response", {"full_reply": final_reply, "is_complete": True})
-            return
-
-        # ====================== TASK PATH – FULL CLEAN RESET ======================
-        logger.info("→ [MODE SWITCH] Casual → TASK → full state reset")
-        state.reset_for_new_task(
-            new_task=original_user_query, new_goal=original_user_query
-        )
-        state.planned_tasks = []  # force re-planning on first loop
-
-        # TASK path — use the shared robust loop
-        async for event, payload in self._goal_driven_task_loop(
-            original_query=original_user_query,
-            state=state,
-            is_sub_agent=False,
-        ):
-            yield event, payload
 
     # ====================== SMART TWO-STAGE FindTool INTERCEPTION (unchanged) ======================
     async def _handle_browse_tools_interception(self, original_user_query: str):
@@ -608,54 +533,3 @@ class AgentExecutors:
             logger.warning(
                 f"[FindTool] No tools found even after refinement for '{refined_query}'"
             )
-
-    # ====================== HELPERS ======================
-    def _build_objective_reminder(self) -> str:
-        """Build a rich objective reminder using the full state context."""
-        if hasattr(self.agent, "state") and self.agent.state:
-            return self.agent.state.get_objective_reminder()
-        return f"Current goal: {self.agent.state.goal or 'No goal set'}"
-
-    def _build_sub_agent_objective_reminder(self) -> str:
-        """Rich, state-aware objective reminder for sub-agents."""
-        state = self.agent.state
-
-        base = f"Current goal: {state.goal or 'Complete the assigned micro-task'}"
-
-        parts = [base]
-
-        # Sub-task / progress awareness
-        if state.planned_tasks and len(state.planned_tasks) > 1:
-            current_idx = state.current_task_index + 1
-            total = len(state.planned_tasks)
-            parts.append(f"Progress: Sub-task {current_idx}/{total}")
-
-        if state.current_task:
-            parts.append(f"Current micro-task: {state.current_task[:150]}...")
-
-        # Tool & execution status
-        if state.tool_results:
-            parts.append(f"Available tool results: {len(state.tool_results)}")
-
-        if state.empty_loops > 0:
-            parts.append(f"Empty loops counter: {state.empty_loops}")
-
-        if state.phase:
-            parts.append(f"Current phase: {state.phase}")
-
-        # Strong FindTool reminder (this is the key part you wanted)
-        parts.append(
-            "CRITICAL TOOL USAGE RULE:\n"
-            "- If the tool you need is missing or not available, FIRST call FindTool to discover and load it.\n"
-            "- ONLY after FindTool has successfully loaded the required tool should you call the actual tool.\n"
-            "- Do not guess or hallucinate tool names."
-        )
-
-        # Termination instruction
-        parts.append(
-            "\nWhen you have FULLY completed the current micro-task, "
-            "you MUST end your final response with exactly this marker:\n"
-            "[FINAL_ANSWER_COMPLETE]"
-        )
-
-        return "\n\n".join(parts)
