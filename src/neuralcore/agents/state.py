@@ -89,7 +89,7 @@ class AgentState:
     action_restarts: int = 0
     is_soft_restart: bool = False
 
-    # ==================== Loop Control Signals (NEW - Option 3) ====================
+    # ==================== Loop Control Signals ====================
     # Generic inbox for engine-level loop commands (restart / pause / wait / resume / break).
     # 100% abstract — used by every @workflow.loop via WorkflowEngine.
     pending_loop_signals: List[Dict[str, Any]] = field(default_factory=list)
@@ -133,8 +133,6 @@ class AgentState:
         Centralized helper to prepare chat messages for the current agent state.
         Populates self.messages if reset=True or if messages list is empty.
         Returns the prepared message list for use in loops/executors.
-
-        Completely abstract — no business logic, only message formatting.
         """
 
         if reset or not self.messages:
