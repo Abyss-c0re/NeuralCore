@@ -83,16 +83,19 @@ class PromptBuilder:
 
     @staticmethod
     def classify_intent(query: str) -> str:
-        """Fast casual vs task intent classification."""
-        return f"""Classify this user message as either CASUAL or TASK.
+        """Return a clean, one-shot classification prompt."""
+        return f"""You are an intent classifier. Classify the FINAL user message as exactly one of:
 
-        CASUAL = greeting, small talk, "how are you", joke, opinion, thank you, chit-chat, storytelling, emotional support, philosophy, roleplay, simple general-knowledge questions.
-        TASK   = anything that might need tools, search, calculation, research, file/code work, actions, multi-step goal, current events, data lookup, etc.
+    CASUAL → greeting, small talk, chit-chat, joke, opinion, thanks, storytelling, emotional support, philosophy, roleplay, simple factual questions that need no tools.
 
-        User message: {query}
+    TASK   → anything that could benefit from tools, code, files, search, calculation, research, multi-step planning, current events, data lookup, actions, or workflow execution.
 
-        Answer with **exactly one word**: CASUAL or TASK"""
+    User message to classify:
+    {query}
 
+    Answer with **exactly one word** on its own line: CASUAL or TASK
+    Do not explain. Do not add any other text."""
+    
     @staticmethod
     def casual_system_prompt() -> str:
         """System prompt for casual chat mode."""
