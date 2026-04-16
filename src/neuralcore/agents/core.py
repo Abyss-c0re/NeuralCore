@@ -751,6 +751,86 @@ class Agent:
         ):
             yield event, payload
 
+    async def start_background_loop(
+        self,
+        loop_name: str,
+        task_description: Optional[str] = None,
+        initial_state: Optional[dict] = None,
+        **kwargs,
+    ) -> str:
+        """Launch a named loop from WorkflowEngine as a true background task.
+        Returns the task_id for monitoring/cancellation."""
+        self._sub_task_counter += 1
+        task_id = f"bg_loop_{self.agent_id}_{self._sub_task_counter:03d}"
+
+        display_name = task_description or f"Background loop: {loop_name}"
+
+        self.sub_tasks[task_id] = {
+            "id": task_id,
+            "display_name": display_name,
+            "type": "background_loop",
+            "loop_name": loop_name,
+            "status": "running",
+            "started_at": asyncio.get_event_loop().time(),
+            "task_obj": None,
+            "result": None,
+            "error": None,
+        }
+
+        async def _background_loop_runner():
+            try:
+                async for event, payload in self.execute_loop(
+                    loop_name=loop_name,
+                    initial_state=initial_state,
+                    **kwargs,
+                ):
+                    # Forward important events to parent
+                    await self.post_control(
+                        {
+                            "event": "background_loop_event",
+                            "task_id": task_id,
+                            "loop_name": loop_name,
+                            "type": event,
+                            "payload": payload
+                            if isinstance(payload, dict)
+                            else {"data": str(payload)},
+                        }
+                    )
+
+                    # Auto-update sub_task status on completion signals
+                    if event in ("loop_completed", "loop_broken"):
+                        self.sub_tasks[task_id]["status"] = (
+                            "completed" if event == "loop_completed" else "broken"
+                        )
+
+            except asyncio.CancelledError:
+                self.sub_tasks[task_id]["status"] = "cancelled"
+                await self.post_control(
+                    {"event": "background_loop_cancelled", "task_id": task_id}
+                )
+                raise
+            except Exception as exc:
+                logger.error(f"Background loop {loop_name} failed", exc_info=True)
+                self.sub_tasks[task_id].update({"status": "failed", "error": str(exc)})
+                await self.post_control(
+                    {
+                        "event": "background_loop_failed",
+                        "task_id": task_id,
+                        "error": str(exc),
+                    }
+                )
+            finally:
+                if self.sub_tasks[task_id]["status"] == "running":
+                    self.sub_tasks[task_id]["status"] = "completed"
+
+        task = asyncio.create_task(_background_loop_runner(), name=f"bg_loop_{task_id}")
+        self.sub_tasks[task_id]["task_obj"] = task
+
+        logger.info(
+            f"Agent '{self.name}' started background loop '{loop_name}' → task_id={task_id}"
+        )
+        return task_id
+
     # ====================== REFACTORED RUN METHODS ======================
 
     def _setup_for_run(
