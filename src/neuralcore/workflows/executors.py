@@ -172,7 +172,7 @@ class AgentExecutors:
                 state.task_expected_outcomes = ["Task completed successfully"]
 
         is_multi_step = len(state.planned_tasks) > 1
-        marker = "[FINAL_ANSWER_COMPLETE]"
+        marker = PromptBuilder.FINAL_ANSWER_MARKER
 
         self.agent.manager.unload_all()
         max_loops = 25

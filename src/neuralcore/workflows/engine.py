@@ -4,6 +4,7 @@ from inspect import signature
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Callable, Union
 
 from neuralcore.agents.state import AgentState
+from neuralcore.utils.prompt_builder import PromptBuilder
 from neuralcore.utils.logger import Logger
 
 from neuralcore.utils.config import get_loader
@@ -18,8 +19,6 @@ class WorkflowEngine:
     - All workflows come from top-level 'workflows:'
     - Supports both file-based config and live dict injection
     """
-
-    FINAL_ANSWER_MARKER = "[FINAL_ANSWER_COMPLETE]"
 
     def __init__(self, agent, workflow_registry):
         self.agent = agent
@@ -455,8 +454,8 @@ class WorkflowEngine:
     def _build_objective_reminder(self) -> str:
         return (
             f"OBJECTIVE LOCKED:\nTask: {self.agent.state.task}\n"
-            f"You MUST NOT output {self.FINAL_ANSWER_MARKER} until the goal is 100% complete.\n"
-            f"Only append exactly {self.FINAL_ANSWER_MARKER} after verification passes."
+            f"You MUST NOT output {PromptBuilder.FINAL_ANSWER_MARKER} until the goal is 100% complete.\n"
+            f"Only append exactly {PromptBuilder.FINAL_ANSWER_MARKER} after verification passes."
         )
 
     def _log_iteration_state(self, iteration: int, state: AgentState):

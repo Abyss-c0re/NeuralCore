@@ -2,6 +2,7 @@ import time
 import asyncio
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Union
+from neuralcore.utils.prompt_builder import PromptBuilder
 
 
 from neuralcore.workflows.engine import WorkflowEngine
@@ -1183,18 +1184,12 @@ class Agent:
                 ):
                     sub_agent.manager.load_tools([core])
 
-            # === 3. SYSTEM PROMPT ===
+            # === 3. SYSTEM PROMPT — RELOCATED TO PROMPTBUILDER (NeuralCore) ===
             sub_system = getattr(sub_agent, "system_prompt", "")
             if not sub_system or "precise sub-agent" not in sub_system.lower():
-                sub_system = f"""You are a precise sub-agent executing one focused micro-task.
-
-            Task: {task_description}
-
-            Rules:
-            - Complete ONLY this exact task.
-            - Use only the tools you were given.
-            - When finished, output a short summary and end with exactly: [FINAL_ANSWER_COMPLETE]
-            - Never mention other steps."""
+                sub_system = PromptBuilder.sub_agent_system_prompt(
+                    task_desc=task_description, assigned_tools=assigned
+                )
 
             # === 4. EXECUTE ===
             async for event, payload in sub_agent.run(
@@ -1377,18 +1372,7 @@ class Agent:
             for r in getattr(sub_agent, "tool_results", [])[-12:]
         )
 
-        prompt = f"""You are a helpful Deploy Agent. A complex background task has just finished.
-
-        Task: {task}
-
-        Key results from tools:
-        {tool_results_str or "No detailed tool output available."}
-
-        Write a friendly, concise summary (3-7 sentences) for the user.
-        - Mention what was accomplished
-        - Highlight any important outcomes or warnings
-        - Use natural language and light emojis if appropriate
-        - Keep it easy to read"""
+        prompt = PromptBuilder.task_execution_summary_prompt(task, tool_results_str)
 
         try:
             summary = await self.client.chat([{"role": "user", "content": prompt}])

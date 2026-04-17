@@ -203,7 +203,7 @@ class PromptBuilder:
         - Stay focused on the current goal and sub-task.
         - If the required tool for the current action is missing, FIRST use the FindTool tool to discover and load it.
         - Only after the needed tool has been successfully loaded via FindTool should you call the actual tool.
-        - When a sub-task is complete, output exactly: [FINAL_ANSWER_COMPLETE]
+        - When a sub-task is complete, output exactly: 
         - Use only verified information from tool_results when summarizing."""
 
     @staticmethod
@@ -256,14 +256,14 @@ class PromptBuilder:
     @staticmethod
     def agentic_action_system_prefix() -> str:
         """Strong, always-present instruction that forces tool usage over explanation in agentic mode."""
-        return """You are an ACTION-ORIENTED AGENT with direct tool access.
+        return f"""You are an ACTION-ORIENTED AGENT with direct tool access.
 
         CORE RULES (never violate):
         - If the user request involves any concrete action (add, create, write, modify, execute, implement, read, analyze with tools, etc.) → CALL THE APPROPRIATE TOOL immediately.
         - NEVER respond with a summary, report, or explanation when a tool can fulfill the request.
         - You have access to write_file, read_file, execute commands, FindTool, and many others. Use them directly.
         - If the exact tool you need is not currently loaded, call FindTool first.
-        - After a tool succeeds and the current request is complete, output exactly: [FINAL_ANSWER_COMPLETE]
+        - After a tool succeeds and the current request is complete, output exactly: {PromptBuilder.FINAL_ANSWER_MARKER}
         - Do not add commentary like "Based on previous analysis..." unless explicitly asked.
 
         Stay in tool-execution mode until the goal is achieved."""
@@ -288,7 +288,7 @@ class PromptBuilder:
 
         When this outcome is achieved (e.g. file successfully modified, 
         new tool added and working), you MUST output exactly the marker 
-        [FINAL_ANSWER_COMPLETE] and nothing else after it."""
+        {PromptBuilder.FINAL_ANSWER_MARKER} and nothing else after it."""
 
     @staticmethod
     def context_summary_instruction() -> str:
@@ -340,7 +340,7 @@ class PromptBuilder:
             "=== STRICT EXECUTION RULES ===\n"
             "• If FindTool succeeded on the previous turn, the required tool is now loaded — DO NOT call FindTool again.\n"
             "• Use only the currently loaded tools to complete the CURRENT SUB-TASK.\n"
-            "• When the expected outcome for the current step is achieved, output exactly: [FINAL_ANSWER_COMPLETE]\n"
+            f"• When the expected outcome for the current step is achieved, output exactly: {PromptBuilder.FINAL_ANSWER_MARKER}\n"
             "• Stay focused. No extra commentary."
         )
         return "\n\n".join(parts)
@@ -495,7 +495,7 @@ class PromptBuilder:
             "CONTEXT WINDOW STATUS",
             "RELEVANT EXTERNAL CONTEXT",
             "CHAT CONTEXT (light)",
-            "[FINAL_ANSWER_COMPLETE]",
+            f"{PromptBuilder.FINAL_ANSWER_MARKER}",
             "AUTONOMOUS CONTINUATION",
         ]
 
@@ -638,3 +638,20 @@ class PromptBuilder:
     def sub_agent_objective_reminder(state) -> str:
         """Convenience alias — currently identical to objective_reminder but kept separate for future divergence."""
         return PromptBuilder.objective_reminder(state)
+
+    @staticmethod
+    def task_execution_summary_prompt(task: str, tool_results_str: str = "") -> str:
+        """Exact relocation of the original _generate_deployment_summary prompt.
+        Centralized, reusable, and free of any client-specific logic."""
+        return f"""You are a helpful Deploy Agent. A complex background task has just finished.
+
+        Task: {task}
+
+        Key results from tools:
+        {tool_results_str or "No detailed tool output available."}
+
+        Write a friendly, concise summary (3-7 sentences) for the user.
+        - Mention what was accomplished
+        - Highlight any important outcomes or warnings
+        - Use natural language and light emojis if appropriate
+        - Keep it easy to read"""
