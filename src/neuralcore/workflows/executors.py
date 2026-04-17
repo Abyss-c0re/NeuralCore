@@ -2,11 +2,9 @@ import json
 
 from typing import AsyncIterator, Any, Tuple
 
-
 from neuralcore.agents.state import AgentState
 
 from neuralcore.utils.logger import Logger
-from neuralcore.actions.registry import registry
 from neuralcore.utils.prompt_builder import PromptBuilder
 
 logger = Logger.get_logger()
@@ -132,7 +130,6 @@ class AgentExecutors:
     async def _goal_driven_task_loop(
         self,
         state: AgentState,
-        is_sub_agent: bool = False,
     ) -> AsyncIterator[Tuple[str, Any]]:
         """FINAL STATE-DRIVEN goal loop – uses generic success indicator from Action + expected outcomes.
         Requires real completion signals before advancing or finishing. Keeps NeuralCore abstract."""
@@ -185,8 +182,6 @@ class AgentExecutors:
 
             text_buffer = ""
             tools_called_this_turn = False
-            tool_browser_detected = False
-            browse_query = original_query
 
             # ====================== STATE-AWARE PROMPT ======================
             if is_multi_step and 0 <= state.current_task_index < len(
@@ -255,7 +250,7 @@ class AgentExecutors:
             queue = await self.agent.client.stream_with_tools(
                 manager=self.agent.manager,
                 messages=messages,
-                temperature=0.2 if not is_sub_agent else self.agent.temperature,
+                temperature=self.agent.temperature,
                 max_tokens=self.agent.max_tokens,
                 tool_choice="auto",
                 auto_stop_on_complete_tool=True,
@@ -277,11 +272,11 @@ class AgentExecutors:
                                 or "unknown"
                             )
                             if "FindTool" in tool_name:
-                                tool_browser_detected = True
-                                browse_query = payload.get("args", {}).get(
-                                    "query", original_query
-                                )
                                 yield ("phase_changed", {"phase": "handling_findtool"})
+                                state.loop_count = 0
+                                state.empty_loops = 0
+                                state.action_restarts = 0
+                                state.record_findtool_call()
                                 break
 
                     elif kind == "finish":
@@ -294,27 +289,6 @@ class AgentExecutors:
                 logger.error(f"Stream error: {e}", exc_info=True)
                 yield "error", str(e)
                 return
-
-            # ====================== FINDTOOL RESTART ======================
-            if tool_browser_detected:
-                logger.info(
-                    f"[FindTool] Detected → handling interception for query: {browse_query[:100]}..."
-                )
-
-                state.loop_count = 0
-                state.empty_loops = 0
-                state.action_restarts = 0
-
-                await self._handle_browse_tools_interception(browse_query)
-                state.record_findtool_call()
-
-                await self.agent.context_manager.add_message(
-                    "system",
-                    f"[TOOL LOADED SUCCESSFULLY] FindTool has loaded the necessary tool(s). "
-                    f"DO NOT call FindTool again. Proceed directly with the actual tool.",
-                )
-
-                continue
 
             final_reply = text_buffer.strip()
             has_marker = marker in final_reply
@@ -454,82 +428,3 @@ class AgentExecutors:
             )
             state.status = "idle"
             state.is_complete = True
-
-    # ====================== SMART TWO-STAGE FindTool INTERCEPTION (unchanged) ======================
-    async def _handle_browse_tools_interception(self, original_user_query: str):
-        # (your exact code from the paste — unchanged)
-        logger.info(f"[FindTool INTERCEPT] original='{original_user_query[:150]}...'")
-
-        refined_query = await self.agent.client.chat(
-            PromptBuilder.findtool_refinement(original_user_query),
-            temperature=0.0,
-            max_tokens=80,
-        )
-        refined_query = refined_query.strip().strip("\"'").strip()
-        logger.info(f"[FindTool] REFINED search query → '{refined_query}'")
-
-        all_tools = registry.list_all_tools(limit=120)
-        tool_list_str = "\n".join(
-            f"• {t['name']} (@{t['set_name']}) — {t['description'][:110]}"
-            for t in all_tools
-        )
-
-        selection_prompt = PromptBuilder.findtool_selection(
-            refined_query=refined_query,
-            original_user_query=original_user_query,
-            tool_list_str=tool_list_str,
-        )
-
-        selection_text = await self.agent.client.chat(
-            selection_prompt, temperature=0.0, max_tokens=700
-        )
-
-        try:
-            choice = json.loads(selection_text.strip())
-            tool_name = choice.get("tool_name")
-            params = choice.get("parameters", {}) or {}
-            reason = choice.get("reason", "")
-
-            if tool_name and tool_name in registry.all_actions:
-                self.agent.manager.load_tools([tool_name])
-                logger.info(f"[FindTool] LLM selected → {tool_name} | reason: {reason}")
-
-                enhanced_directive = (
-                    f"Use the '{tool_name}' tool to handle the request. "
-                    f"Parameters: {json.dumps(params) if params else 'none needed'}.\n"
-                    f"Refined intent was: {refined_query}"
-                )
-
-                await self.agent.context_manager.add_message(
-                    "system", f"[SMART TOOL ROUTER] {enhanced_directive}"
-                )
-
-                await self.agent.context_manager.record_tool_outcome(
-                    tool_name="FindTool",
-                    result=f"Selected {tool_name} for refined query '{refined_query}'",
-                    metadata={
-                        "refined_query": refined_query,
-                        "original": original_user_query[:200],
-                    },
-                )
-                return
-
-        except (json.JSONDecodeError, Exception) as e:
-            logger.warning(
-                f"[FindTool] Selection JSON parse failed: {e}. Falling back..."
-            )
-
-        fallback_results = registry.search(refined_query, limit=3)
-        if fallback_results:
-            names = [a.name for a, _ in fallback_results]
-            self.agent.manager.load_tools(names)
-            logger.info(f"[FindTool] Fallback loaded via refined query: {names}")
-
-            await self.agent.context_manager.add_message(
-                "system",
-                f"[SMART TOOL ROUTER FALLBACK] Loaded tools for refined intent '{refined_query}': {', '.join(names)}",
-            )
-        else:
-            logger.warning(
-                f"[FindTool] No tools found even after refinement for '{refined_query}'"
-            )
