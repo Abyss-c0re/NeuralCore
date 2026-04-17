@@ -165,6 +165,26 @@ class ActionRegistry:
         action.usage_count = getattr(action, "usage_count", 0) + 1
         return result
 
+    async def aexecute(
+        self,
+        name: str,
+        **kwargs: Any,
+    ) -> Any:
+        """
+        Generic direct execution of ANY registered Action or SequenceAction.
+        Uses the full Action.__call__ path (confirmation, binding, recording, etc.).
+        Completely abstract — no LLM involvement, no DynamicActionManager required.
+        """
+        if name not in self.all_actions:
+            raise ValueError(f"Action/Sequence '{name}' not found in registry")
+
+        action, set_name = self.all_actions[name]
+        logger.debug(f"[DIRECT EXEC] {name} (from set '{set_name}') | kwargs={kwargs}")
+
+        # Full Action.__call__ flow (handles SequenceAction.execute internally)
+        result = await action(**kwargs)
+        return result
+
 
 # Global singleton
 registry = ActionRegistry()
