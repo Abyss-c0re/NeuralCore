@@ -87,10 +87,6 @@ class DynamicActionManager:
         if isinstance(tool_names, str):
             tool_names = [tool_names]
 
-        if not isinstance(tool_names, list):
-            logger.warning(f"Invalid tool_names type: {type(tool_names)}. Skipping.")
-            return
-
         loaded = []
         for name in tool_names:
             if not name or not isinstance(name, str):
@@ -115,12 +111,6 @@ class DynamicActionManager:
 
         if isinstance(toolset_names, str):
             toolset_names = [toolset_names]
-
-        if not isinstance(toolset_names, list):
-            logger.warning(
-                f"Invalid toolset_names type: {type(toolset_names)}. Skipping."
-            )
-            return 0
 
         loaded_count = 0
         loaded_tools_list: List[str] = []
@@ -171,13 +161,6 @@ class DynamicActionManager:
             from neuralcore.workflows.registry import workflow as global_workflow
 
             workflow = global_workflow
-
-        if workflow is None:
-            logger.warning(
-                f"No Workflow instance for step '{step_name}'. Unloading all."
-            )
-            self.unload_all()
-            return 0
 
         meta = workflow.get_step_metadata(step_name)
         if not meta:
