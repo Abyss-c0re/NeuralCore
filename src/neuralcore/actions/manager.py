@@ -416,6 +416,45 @@ class DynamicActionManager:
 
         return action
 
+    async def execute_direct(
+        self,
+        action_name: str,
+        **kwargs: Any,
+    ) -> Any:
+        """
+        Direct execution using currently loaded tools in DynamicCore.
+        - Auto-loads the action if missing (respects hidden_for_agents / subagents)
+        - Falls back safely to registry.aexecute
+        - Never returns None — raises clear error instead
+        """
+        if action_name not in self.current_set.by_name:
+            logger.info(
+                f"[DIRECT EXEC] Action '{action_name}' not in DynamicCore → attempting auto-load"
+            )
+            # Reuse existing search (respects all hiding rules)
+            results = self.registry.search(action_name, limit=1)
+            if results:
+                self.load_tools([results[0][0].name])
+                logger.debug(f"[DIRECT EXEC] Auto-loaded '{action_name}'")
+            else:
+                logger.warning(
+                    f"[DIRECT EXEC] No match found for '{action_name}' → falling back to registry"
+                )
+                return await self.registry.aexecute(action_name, **kwargs)
+
+        # Safe get
+        action = self.current_set.get_executor(action_name)
+        if action is None:
+            raise RuntimeError(
+                f"[DIRECT EXEC FAILED] get_executor returned None for '{action_name}' "
+                f"(even after auto-load). Check registry or hidden_for_agents rules."
+            )
+
+        logger.debug(
+            f"[DIRECT EXEC via DynamicManager] {action_name} | kwargs={kwargs}"
+        )
+        return await action(**kwargs)  # ← full Action.__call__
+
     @property
     def actions(self):
         return self.current_set.actions
