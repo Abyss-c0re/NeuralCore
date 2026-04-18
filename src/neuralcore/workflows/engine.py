@@ -910,8 +910,9 @@ class WorkflowEngine:
             target = sig.get("target_loop")
             reason = sig.get("reason", f"Signal {signal_type}")
 
-            if target is not None and target != loop_name:
-                state.pending_loop_signals.append(sig)
+            # Skip signals meant for other loops
+            if target is not None and target != loop_name and target != "all":
+                state.pending_loop_signals.append(sig)  # re-queue for later
                 continue
 
             logger.info(
@@ -919,13 +920,33 @@ class WorkflowEngine:
             )
 
             if signal_type == "restart":
-                yield ("loop_restart", {"loop_name": loop_name, "reason": reason})
-                state.loop_count = 0
-                state.empty_loops = 0
-                state.action_restarts = 0
-                state.clear_findtool_tracking()
-                state.set_soft_restart(True)  # ← CRITICAL
-                continue
+                reset_counters = sig.get("payload", {}).get("reset_counters", True)
+
+                yield (
+                    "loop_restart",
+                    {
+                        "loop_name": loop_name,
+                        "reason": reason,
+                        "reset_counters": reset_counters,
+                    },
+                )
+
+                if reset_counters:
+                    state.loop_count = 0
+                    state.empty_loops = 0
+                    state.action_restarts = 0
+                    state.clear_findtool_tracking()
+
+                state.set_soft_restart(True)
+                continue  # allow other signals to be processed
+
+            elif signal_type in ("stop", "break"):
+                yield (
+                    "loop_stopped",
+                    {"loop_name": loop_name, "reason": reason, "signal": signal_type},
+                )
+                state.clear_soft_restart()
+                return  # exit the loop immediately
 
             elif signal_type == "pause":
                 state.start_wait(wait_type="pause", prompt=reason or "Loop paused")
@@ -941,10 +962,6 @@ class WorkflowEngine:
                 if state.waiting:
                     state.complete_wait("resumed_via_signal")
                 yield ("loop_resumed", {"loop_name": loop_name, "reason": reason})
-
-            elif signal_type in ("break", "stop"):
-                yield ("loop_broken", {"loop_name": loop_name, "reason": reason})
-                return
 
             else:
                 logger.warning(f"Unknown loop signal '{signal_type}' for {loop_name}")
@@ -1317,7 +1334,6 @@ class WorkflowEngine:
         logger.info(f"Starting run with workflow: {self.current_workflow_name}")
         logger.info(f"Active steps: {self.workflow_steps}")
 
-        
         await self.agent.add_message("user", user_prompt)
 
         iteration = 0
