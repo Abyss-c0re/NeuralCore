@@ -1713,3 +1713,77 @@ class ContextManager:
             used_tokens += block_tokens
 
         return "\n".join(parts) if parts else ""
+
+    async def sync_to_agent_state(self, state: "AgentState") -> None:
+        """Automatically populate AgentState from ContextManager (single source of truth).
+        Called after every significant change. Keeps state lightweight and in sync.
+        """
+        # 1. Messages (light mirror - only recent + count)
+        if self.mode == "chat":
+            state.messages = self.pure_chat_history[-20:]  # keep last 20 only
+        else:
+            # Agentic: use current topic history (most relevant)
+            recent = (
+                self.current_topic.history[-15:] if self.current_topic.history else []
+            )
+            state.messages = [
+                msg.copy() for msg in recent
+            ]  # shallow copy to avoid mutation issues
+
+        state.message_count = len(state.messages)
+        state.last_message_time = time.time()
+
+        # 2. Tool tracking (lightweight only)
+        state.tool_results = [
+            {
+                "name": entry.get("tool", "unknown"),
+                "result": str(entry.get("result", ""))[:300]
+                + ("..." if len(str(entry.get("result", ""))) > 300 else ""),
+                "success": True,
+                "timestamp": entry.get("timestamp", time.time()),
+            }
+            for entry in self.tool_call_history[-12:]  # only last 12, compact
+        ]
+        state.executed_functions = [
+            {"name": t, "timestamp": time.time()} for t in self.tools_executed[-20:]
+        ]
+
+        # 3. Investigation / Planning state sync (bidirectional safe)
+        inv = self.investigation_state
+        state.goal = inv.get("goal", state.goal or "")
+
+        # Planned tasks from investigation + task contexts
+        if hasattr(self, "_task_contexts") and self._task_contexts:
+            state.planned_tasks = list(self._task_contexts.keys())
+            state.task_expected_outcomes = [
+                f"Complete task: {name}" for name in state.planned_tasks
+            ]
+        else:
+            state.planned_tasks = inv.get("subtasks", state.planned_tasks or [])
+            state.task_expected_outcomes = inv.get(
+                "pending", state.task_expected_outcomes or []
+            )
+
+        if state.planned_tasks and isinstance(state.current_task_index, int):
+            if 0 <= state.current_task_index < len(state.planned_tasks):
+                state.current_task = state.planned_tasks[state.current_task_index]
+
+        # 4. Sub-task / deployment awareness
+        state.sub_task_ids = (
+            list(self._task_contexts.keys()) if hasattr(self, "_task_contexts") else []
+        )
+        state.active_sub_agents = [f"task_{k}" for k in state.sub_task_ids]
+
+        # 5. Status & metrics from context stats
+        state.loop_count = (
+            self.context_stats.get("messages_added", 0) // 2
+        )  # rough proxy
+        state.total_tool_calls = len(self.tools_executed)
+
+        # 6. Waiting / confirmation state (already in state - leave as primary there)
+        # ContextManager does NOT own waiting/confirmation - that's orchestration
+
+        logger.debug(
+            f"ContextManager → AgentState synced | messages={len(state.messages)} | "
+            f"tools={len(state.tool_results)} | tasks={len(state.planned_tasks)}"
+        )

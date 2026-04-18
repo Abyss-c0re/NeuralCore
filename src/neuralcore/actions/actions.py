@@ -251,17 +251,7 @@ class Action:
                         result=error_result,
                         metadata={"error": True},
                     )
-                if hasattr(self._bound_agent, "state"):
-                    self._bound_agent.state.add_tool_result(
-                        tool_name=self.name,
-                        result=error_result,
-                        success=False,
-                    )
-                    self._bound_agent.state.last_tool_success = {
-                        "tool_name": self.name,
-                        "success": False,
-                        "timestamp": time.time(),
-                    }
+                self._bound_agent._auto_sync_state()
 
             return error_result
 

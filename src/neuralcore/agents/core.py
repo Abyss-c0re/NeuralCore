@@ -275,6 +275,7 @@ class Agent:
         # ====================== INFRASTRUCTURE (never goes into state) ======================
         self.manager = DynamicActionManager(self.registry, self)
         self.context_manager = ContextManager(self.max_tokens)
+        self._last_sync_ts = 0.0
         # self.agent_tools = AgentActionHelper(self)
         self.workflow = WorkflowEngine(self, workflow)
         ToolBrowser(self.registry, self.manager)
@@ -467,9 +468,8 @@ class Agent:
 
     # ====================== MESSAGING ======================
     async def add_message(self, role: str, message: str) -> None:
-        msg_dict = {"role": role, "content": message}
-        self.state.add_message(msg_dict)
         await self.context_manager.add_message(role, message)
+        await self._auto_sync_state()
 
     async def post_message(self, message: str | Dict[str, Any]) -> None:
         if isinstance(message, str):
@@ -516,6 +516,14 @@ class Agent:
         await self.message_queue.put(item)
         self.state.add_message(item)
         logger.debug(f"Agent '{self.name}' ← control posted")
+
+    async def _auto_sync_state(self) -> None:
+        """Lightweight auto-sync with rate limiting (prevent spam in tight loops)."""
+        now = time.time()
+        if now - self._last_sync_ts < 0.3:  # max ~3 syncs/sec
+            return
+        self._last_sync_ts = now
+        await self.context_manager.sync_to_agent_state(self.state)
 
     async def on_background_event(self, event: str, payload: Any) -> None:
         """Generic hook for background/headless events.
