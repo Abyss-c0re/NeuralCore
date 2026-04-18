@@ -284,10 +284,11 @@ class Agent:
         self.message_queue: asyncio.Queue[Any] = asyncio.Queue()
         self._input_event: asyncio.Event = asyncio.Event()
         self._input_counter: int = 0
-        self._background_task: Optional[asyncio.Task] = None
+        self._background_task: Optional[asyncio.Task[None]] = None
         self._stop_event: Optional[asyncio.Event] = None
 
         # Light operational containers
+
         self.sub_tasks: Dict[str, Dict[str, Any]] = {}
         self._sub_task_counter: int = 0
         self.task_context: Optional["ContextManager.TaskContext"] = None
@@ -541,6 +542,31 @@ class Agent:
             f"Agent '{self.name}' ← control posted as system | event={event_name}"
         )
 
+    async def wait_for_incoming_message(self, timeout: float = 30.0) -> Optional[Any]:
+        """Wait for a message forwarded by the background queue listener.
+
+        Returns the raw_msg (dict or str) or None on timeout/stop.
+        This is the clean bridge so client loops don't touch the queue directly.
+        """
+        if self._stop_event and self._stop_event.is_set():
+            return None
+
+        # Simple implementation using a temporary internal queue or event + buffer.
+        try:
+            # Wait on the event that the listener sets
+            await asyncio.wait_for(self._input_event.wait(), timeout=timeout)
+            self._input_event.clear()
+
+            # Non-blocking get the message the listener already dequeued
+            try:
+                return self.message_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return None
+        except asyncio.TimeoutError:
+            return None
+        except asyncio.CancelledError:
+            return None
+
     async def _auto_sync_state(self) -> None:
         """Lightweight auto-sync with rate limiting (prevent spam in tight loops)."""
         now = time.time()
@@ -735,6 +761,95 @@ class Agent:
             self.state.pending_approval_prompt = ""
             self.state.last_confirmation_request = None
 
+    async def start_background_queue_listener(self) -> asyncio.Task[None]:
+        """Generic persistent background listener for message_queue.
+
+        - Drains the queue and forwards events.
+        - Returns the task so client can await/cancel it if needed.
+        """
+        if self._background_task is not None and not self._background_task.done():
+            logger.debug(f"[QUEUE LISTENER] Already active for Agent '{self.name}'")
+            return self._background_task
+
+        # Ensure stop_event exists
+        if self._stop_event is None:
+            self._stop_event = asyncio.Event()
+
+        self.state.status = "listening"
+
+        async def _generic_queue_consumer() -> None:
+            logger.info(
+                f"[QUEUE LISTENER] Generic background queue listener STARTED for '{self.name}'"
+            )
+
+            assert self._stop_event is not None  # type guard for mypy
+
+            try:
+                while not self._stop_event.is_set():
+                    try:
+                        raw_msg = await asyncio.wait_for(
+                            self.message_queue.get(), timeout=1.0
+                        )
+                    except asyncio.TimeoutError:
+                        continue
+                    except asyncio.CancelledError:
+                        break
+
+                    if not raw_msg:
+                        self.message_queue.task_done()
+                        continue
+
+                    await self.on_background_event(
+                        "queue_message_received",
+                        {
+                            "content": raw_msg.get("content", "")
+                            if isinstance(raw_msg, dict)
+                            else str(raw_msg),
+                            "raw": raw_msg,
+                            "agent_id": self.agent_id,
+                        },
+                    )
+                    self._input_event.set()
+                    self.message_queue.task_done()
+
+            except Exception as exc:
+                logger.error(
+                    f"[QUEUE LISTENER] Error in generic listener for '{self.name}'",
+                    exc_info=True,
+                )
+                await self.on_background_event("listener_error", {"error": str(exc)})
+            finally:
+                self.state.status = "idle"
+                self._background_task = None
+                logger.info(
+                    f"[QUEUE LISTENER] Generic background queue listener STOPPED for '{self.name}'"
+                )
+
+        # Create task with proper typing
+        self._background_task = asyncio.create_task(
+            _generic_queue_consumer(), name=f"queue_listener_{self.agent_id}"
+        )
+        return self._background_task
+
+    async def stop_background_listener(self) -> None:
+        """Gracefully stop the generic queue listener."""
+        if self._background_task is None or self._background_task.done():
+            return
+
+        if self._stop_event is not None:
+            self._stop_event.set()
+
+        self._background_task.cancel()
+        try:
+            await self._background_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.warning(f"Error while stopping listener: {e}")
+
+        self._background_task = None
+        logger.info(f"[QUEUE LISTENER] Stopped for Agent '{self.name}'")
+
     async def run_background(
         self,
         user_prompt: Optional[str] = None,
@@ -751,6 +866,7 @@ class Agent:
         self.state.status = "running_background"
 
         async def _background_consumer():
+            await self.start_background_queue_listener()
             try:
                 async for event, payload in self.run(
                     user_prompt=user_prompt,
@@ -782,6 +898,7 @@ class Agent:
                 self.state.status = "idle"
                 self.state.current_task = ""
                 self._background_task = None
+                await self.stop_background_listener()
 
         self._background_task = asyncio.create_task(
             _background_consumer(), name=f"bg_{self.agent_id}"
@@ -793,6 +910,7 @@ class Agent:
         self, loop_name: str, initial_state: Optional[dict] = None, **kwargs
     ) -> AsyncIterator[Tuple[str, Any]]:
         """Delegate loop execution to the WorkflowEngine and yield events"""
+        await self.start_background_queue_listener()
         async for event, payload in self.workflow.execute_loop(
             loop_name, initial_state, **kwargs
         ):
@@ -1002,6 +1120,7 @@ class Agent:
     ) -> AsyncIterator[Tuple[str, Any]]:
         """Main agent execution loop with full built-in confirmation support."""
         stop_event = stop_event or asyncio.Event()
+        await self.start_background_queue_listener()
 
         system_prompt = system_prompt or self.system_prompt
         temperature = temperature if temperature is not None else self.temperature
