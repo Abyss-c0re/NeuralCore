@@ -285,7 +285,6 @@ class Agent:
         self._input_event: asyncio.Event = asyncio.Event()
         self._input_counter: int = 0
         self._background_task: Optional[asyncio.Task[None]] = None
-        self._stop_event: Optional[asyncio.Event] = None
 
         # Light operational containers
 
@@ -324,6 +323,11 @@ class Agent:
     @property
     def status(self) -> str:
         return self.state.status
+
+    @property
+    def stop_event(self) -> asyncio.Event:
+        """Always returns the client's current stop event (never None)."""
+        return getattr(self.client, "_current_stop_event", None) or asyncio.Event()
 
     @status.setter
     def status(self, value: str) -> None:
@@ -392,7 +396,6 @@ class Agent:
         self.message_queue = asyncio.Queue()  # fresh queue
         self._input_event.clear()
         self._input_counter = 0
-        self._stop_event = None
         self.sub_tasks.clear()
         self._sub_task_counter = 0
         self._sync_loaded_tools_to_state()
@@ -512,7 +515,6 @@ class Agent:
         """Control messages:
         - Go to queue (for workflow loop)
         - Are logged to ContextManager as system messages (clean "event: xxx" format)
-        - Do NOT go into AgentState.messages (prevents bloat)
         """
         if isinstance(control, str):
             item = {"event": control}
@@ -542,29 +544,85 @@ class Agent:
             f"Agent '{self.name}' ← control posted as system | event={event_name}"
         )
 
-    async def wait_for_incoming_message(self, timeout: float = 30.0) -> Optional[Any]:
-        """Wait for a message forwarded by the background queue listener.
+    async def wait_for_incoming_message(
+        self,
+        timeout: float | None = 30.0,
+        role: Optional[str] = None,           # filter by role ("user", "system", etc.)
+        contains: Optional[str] = None,       # filter by substring in content
+        return_content_only: bool = False,    # ← new optional flag
+    ) -> Optional[Union[dict, str]]:
+        """Wait for an incoming message with optional filtering and output format.
 
-        Returns the raw_msg (dict or str) or None on timeout/stop.
-        This is the clean bridge so client loops don't touch the queue directly.
+        timeout:
+            - float > 0   → wait that many seconds
+            - None        → wait forever (ideal for persistent chat_tool_loop)
+            - <= 0        → treated as None (infinite)
+
+        role / contains:
+            Same selective waiting as before.
+
+        return_content_only:
+            - False (default) → returns the full original message dict (as posted)
+            - True            → returns only the cleaned content string
+                              (never the old fake placeholder)
+
+        Returns None on timeout/cancellation.
         """
-        if self._stop_event and self._stop_event.is_set():
-            return None
+        if timeout is None or timeout <= 0:
+            effective_timeout: float | None = None
+        else:
+            effective_timeout = timeout
 
-        # Simple implementation using a temporary internal queue or event + buffer.
         try:
-            # Wait on the event that the listener sets
-            await asyncio.wait_for(self._input_event.wait(), timeout=timeout)
-            self._input_event.clear()
+            while True:  # inner loop for filtering
+                if effective_timeout is None:
+                    await self._input_event.wait()
+                else:
+                    await asyncio.wait_for(
+                        self._input_event.wait(), timeout=effective_timeout
+                    )
 
-            # Non-blocking get the message the listener already dequeued
-            try:
-                return self.message_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                return None
+                self._input_event.clear()
+
+                if not self.message_queue.empty():
+                    msg = self.message_queue.get_nowait()
+
+                    # === SELECTIVE FILTERING (unchanged) ===
+                    if role is not None:
+                        if isinstance(msg, dict) and msg.get("role") != role:
+                            continue
+
+                    if contains is not None:
+                        content_str = (
+                            msg.get("content", "") if isinstance(msg, dict)
+                            else str(msg)
+                        )
+                        if contains not in content_str:
+                            continue
+
+                    # === NEW OUTPUT FORMAT LOGIC ===
+                    if return_content_only:
+                        # Return clean content string only
+                        if isinstance(msg, dict):
+                            content = msg.get("content", "")
+                            if not isinstance(content, str):
+                                content = str(content)
+                            return content.strip()
+                        else:
+                            return str(msg).strip()
+                    else:
+                        # Return full original message (dict or raw)
+                        return msg
+
+                logger.debug("wait_for_incoming_message: queue empty after wake")
+
         except asyncio.TimeoutError:
             return None
         except asyncio.CancelledError:
+            logger.debug("wait_for_incoming_message: cancelled")
+            return None
+        except Exception as e:
+            logger.debug(f"wait_for_incoming_message error: {e}")
             return None
 
     async def _auto_sync_state(self) -> None:
@@ -761,6 +819,32 @@ class Agent:
             self.state.pending_approval_prompt = ""
             self.state.last_confirmation_request = None
 
+    async def _generic_queue_consumer(self) -> None:
+        logger.info(
+            f"[QUEUE LISTENER] Generic background queue listener STARTED for '{self.name}'"
+        )
+        try:
+            while True:
+                try:
+                    # Wait for any item to appear
+                    await self.message_queue.get()  # blocks until something is there
+                    self.message_queue.task_done()  # immediately mark as done — we don't consume here
+
+                    self._input_event.set()  # wake the main loop
+                    await self.on_background_event(
+                        "queue_message_received",
+                        {
+                            "content": "message available",
+                            "agent_id": self.agent_id,
+                        },
+                    )
+                except asyncio.CancelledError:
+                    break
+                except Exception:
+                    pass
+        finally:
+            logger.info(f"[QUEUE LISTENER] ... STOPPED")
+
     async def start_background_queue_listener(self) -> asyncio.Task[None]:
         """Generic persistent background listener for message_queue.
 
@@ -771,63 +855,11 @@ class Agent:
             logger.debug(f"[QUEUE LISTENER] Already active for Agent '{self.name}'")
             return self._background_task
 
-        # Ensure stop_event exists
-        if self._stop_event is None:
-            self._stop_event = asyncio.Event()
-
         self.state.status = "listening"
-
-        async def _generic_queue_consumer() -> None:
-            logger.info(
-                f"[QUEUE LISTENER] Generic background queue listener STARTED for '{self.name}'"
-            )
-
-            assert self._stop_event is not None  # type guard for mypy
-
-            try:
-                while not self._stop_event.is_set():
-                    try:
-                        raw_msg = await asyncio.wait_for(
-                            self.message_queue.get(), timeout=1.0
-                        )
-                    except asyncio.TimeoutError:
-                        continue
-                    except asyncio.CancelledError:
-                        break
-
-                    if not raw_msg:
-                        self.message_queue.task_done()
-                        continue
-
-                    await self.on_background_event(
-                        "queue_message_received",
-                        {
-                            "content": raw_msg.get("content", "")
-                            if isinstance(raw_msg, dict)
-                            else str(raw_msg),
-                            "raw": raw_msg,
-                            "agent_id": self.agent_id,
-                        },
-                    )
-                    self._input_event.set()
-                    self.message_queue.task_done()
-
-            except Exception as exc:
-                logger.error(
-                    f"[QUEUE LISTENER] Error in generic listener for '{self.name}'",
-                    exc_info=True,
-                )
-                await self.on_background_event("listener_error", {"error": str(exc)})
-            finally:
-                self.state.status = "idle"
-                self._background_task = None
-                logger.info(
-                    f"[QUEUE LISTENER] Generic background queue listener STOPPED for '{self.name}'"
-                )
 
         # Create task with proper typing
         self._background_task = asyncio.create_task(
-            _generic_queue_consumer(), name=f"queue_listener_{self.agent_id}"
+            self._generic_queue_consumer(), name=f"queue_listener_{self.agent_id}"
         )
         return self._background_task
 
@@ -835,9 +867,6 @@ class Agent:
         """Gracefully stop the generic queue listener."""
         if self._background_task is None or self._background_task.done():
             return
-
-        if self._stop_event is not None:
-            self._stop_event.set()
 
         self._background_task.cancel()
         try:
