@@ -121,7 +121,7 @@ class AgentState:
             return None
         return round(time.time() - self.wait_start_time, 1)
 
-    # ==================== FindTool Helpers ====================
+    # ==================== Helpers ====================
     def prepare_messages(
         self,
         content: str,
@@ -155,6 +155,62 @@ class AgentState:
         )
 
         return self.messages
+
+        # ==================== Loop Restart Control (RECOMMENDED) ====================
+
+    def request_loop_restart(
+        self,
+        reason: str = "explicit",
+        target_loop: Optional[str] = None,
+        reset_counters: bool = True,
+    ) -> None:
+        """
+        Unified, abstract way to request a restart of the current loop iteration.
+
+        This is the **preferred** method throughout NeuralCore + NeuralVoid + client apps.
+        Works for both:
+          - WorkflowEngine.run() main loop
+          - WorkflowEngine.execute_loop() (YAML + @workflow.loop)
+        """
+        self.add_loop_signal(
+            signal="restart",
+            target_loop=target_loop,
+            reason=reason,
+            payload={"reset_counters": reset_counters},
+        )
+
+        self.set_soft_restart(True)
+
+        if reset_counters:
+            self.loop_count = 0  # optional: depends on semantics
+            self.empty_loops = 0
+            self.action_restarts = 0
+            self.clear_findtool_tracking()
+
+        logger.info(
+            f"🔄 Loop restart requested → {reason} "
+            f"(target_loop={target_loop or 'current'})"
+        )
+
+    def request_loop_stop(
+        self,
+        reason: str = "explicit",
+        target_loop: Optional[str] = None,
+    ) -> None:
+        """
+        Request graceful stop/break of the current loop (or specific loop).
+        This is the counterpart to request_loop_restart.
+        Works for both main run() workflow and execute_loop().
+        """
+        self.add_loop_signal(
+            signal="stop",
+            target_loop=target_loop,
+            reason=reason,
+            payload={"immediate": True},
+        )
+        logger.info(
+            f"⛔ Loop stop requested → {reason} (target={target_loop or 'current'})"
+        )
 
     def set_soft_restart(self, value: bool = True) -> None:
         self.is_soft_restart = value
