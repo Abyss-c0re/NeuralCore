@@ -406,7 +406,7 @@ class AgentExecutors:
             final_messages, temperature=0.0, top_p=0.1
         )
 
-        await self.agent.context_manager.add_message("assistant", final_reply)
+        await self.agent.add_message("assistant", final_reply)
 
         yield (
             "llm_response",

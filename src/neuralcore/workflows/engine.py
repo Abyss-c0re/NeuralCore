@@ -1317,9 +1317,8 @@ class WorkflowEngine:
         logger.info(f"Starting run with workflow: {self.current_workflow_name}")
         logger.info(f"Active steps: {self.workflow_steps}")
 
-        if hasattr(self.agent, "context_manager"):
-            self.agent.context_manager.set_goal(user_prompt)
-            await self.agent.context_manager.add_message("user", user_prompt)
+        
+        await self.agent.add_message("user", user_prompt)
 
         iteration = 0
         state = self.agent.state

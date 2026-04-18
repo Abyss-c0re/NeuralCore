@@ -327,11 +327,6 @@ class Agent:
     def status(self, value: str) -> None:
         self.state.status = value
 
-    async def add_message(self, role: str, message: str) -> None:
-        msg_dict = {"role": role, "content": message}
-        self.state.add_message(msg_dict)
-        await self.context_manager.add_message(role, message)
-
     def get_full_state_dict(self) -> Dict[str, Any]:
         """Public, generic snapshot of the entire agent for any transport layer."""
         base = {
@@ -471,6 +466,11 @@ class Agent:
         return "deploy_chat"
 
     # ====================== MESSAGING ======================
+    async def add_message(self, role: str, message: str) -> None:
+        msg_dict = {"role": role, "content": message}
+        self.state.add_message(msg_dict)
+        await self.context_manager.add_message(role, message)
+
     async def post_message(self, message: str | Dict[str, Any]) -> None:
         if isinstance(message, str):
             item = {"role": "user", "content": message}
@@ -481,6 +481,12 @@ class Agent:
         self._input_counter += 1
         self._input_event.set()
         self.state.add_message(item)
+        role_str = item.get("role", "user")
+        content_str = item.get("content", "")
+        if not isinstance(content_str, str):
+            content_str = str(content_str)
+
+        await self.context_manager.add_message(role_str, content_str)
         logger.debug(f"Agent '{self.name}' ← user message posted")
 
     async def post_system_message(self, message: str | Dict[str, Any]) -> None:
@@ -491,6 +497,12 @@ class Agent:
 
         await self.message_queue.put(item)
         self.state.add_message(item)
+        role_str = item.get("role", "system")
+        content_str = item.get("content", "")
+        if not isinstance(content_str, str):
+            content_str = str(content_str)
+
+        await self.context_manager.add_message(role_str, content_str)
         logger.debug(f"Agent '{self.name}' ← system message posted")
 
     async def post_control(self, control: str | Dict[str, Any]) -> None:
