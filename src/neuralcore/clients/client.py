@@ -90,7 +90,7 @@ class LLMClient:
         )
 
         # Streaming control
-        self._current_stop_event: Optional[asyncio.Event] = None
+        self._current_stop_event: asyncio.Event = asyncio.Event()
         self._current_output_queue: Optional[asyncio.Queue] = None
         self._current_stream_task: Optional[asyncio.Task] = None
 
@@ -101,11 +101,11 @@ class LLMClient:
 
     def stop_stream(self) -> bool:
         """Request to interrupt only the active streaming call."""
-        if self._current_stop_event is not None:
+        if not self._current_stop_event.is_set():
             self._current_stop_event.set()
-            logger.debug(f"stop_stream() called on model={self.model}")
+            logger.debug(f"stop_stream() called on model={self.model} | event_set=True")
             return True
-        logger.debug("stop_stream() called but no active stream")
+        logger.debug(f"stop_stream() called on model={self.model} | already stopping")
         return False
 
     def request_cancel_all(self):
@@ -170,7 +170,7 @@ class LLMClient:
                 if self._current_stream_task is asyncio.current_task():
                     self._current_stream_task = None
                 if self._current_stop_event is stop_event:
-                    self._current_stop_event = None
+                    self._current_stop_event = asyncio.Event()
                 if self._current_output_queue is queue:
                     self._current_output_queue = None
 
@@ -645,7 +645,7 @@ class LLMClient:
             finally:
                 await queue.put(None)
                 if self._current_stop_event is stop_event:
-                    self._current_stop_event = None
+                    self._current_stop_event = asyncio.Event()
                 if self._current_output_queue is queue:
                     self._current_output_queue = None
 
@@ -656,16 +656,14 @@ class LLMClient:
     async def _drain_queue(
         self, queue: asyncio.Queue
     ) -> AsyncIterator[Tuple[str, Any]]:
-        stop_event = getattr(self, "_current_stop_event", None)
+        stop_event = self._current_stop_event  # always exists now
 
         while True:
-            # 🔴 Check cancellation BEFORE blocking
-            if stop_event and stop_event.is_set():
+            if stop_event.is_set():
                 yield ("cancelled", "Stream cancelled")
                 return
 
             try:
-                # ✅ Non-blocking wait
                 item = await asyncio.wait_for(queue.get(), timeout=0.1)
             except asyncio.TimeoutError:
                 continue
@@ -673,11 +671,9 @@ class LLMClient:
             if item is None:
                 break
 
-            kind, payload = item
-            yield kind, payload
+            yield item  # or unpack if you prefer
 
-            # 🔴 Optional: check again after yield
-            if stop_event and stop_event.is_set():
+            if stop_event.is_set():
                 yield ("cancelled", "Stream cancelled")
                 return
 
