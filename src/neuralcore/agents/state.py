@@ -13,7 +13,6 @@ class AgentState:
     # ==================== Core Identity & Goal ====================
     agent_id: str = ""
     task: str = ""
-    goal: str = ""
     current_role: str = "general_assistant"
     current_task: str = ""
     current_workflow: str = "default"
@@ -309,8 +308,7 @@ class AgentState:
         return warnings
 
     # ==================== Core Methods ====================
-    def reset_for_new_task(self, new_task: str = "", new_goal: str = "") -> None:
-        logger.info(f"Resetting AgentState for new task: '{new_task[:100]}...'")
+    def reset_for_new_task(self, new_task: str = "") -> None:
 
         self.planned_tasks.clear()
         self.task_expected_outcomes.clear()
@@ -366,11 +364,10 @@ class AgentState:
         self.start_time = time.time()
 
         self.task = new_task
-        self.goal = new_goal or new_task
         self.current_task = ""
         self.current_workflow = "default"
 
-        logger.debug(f"AgentState reset complete. Goal: '{self.goal[:80]}...'")
+        logger.debug(f"AgentState reset complete. Goal: '{self.task[:80]}...'")
 
     def add_tool_result(
         self, tool_name: str, result: Any, success: bool = True
@@ -491,7 +488,7 @@ class AgentState:
         """Builds dynamic state reminder and delegates formatting to PromptBuilder."""
         parts: List[str] = []
 
-        goal_text = self.goal or self.task or "No goal set"
+        goal_text = self.task or "No goal set"
         parts.append(f"Current goal: {goal_text}")
 
         if self.planned_tasks:

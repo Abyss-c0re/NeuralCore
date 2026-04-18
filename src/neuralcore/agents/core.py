@@ -370,7 +370,7 @@ class Agent:
             "status": self.state.status,
             "phase": self.state.phase,
             "current_task": self.state.current_task,
-            "goal": self.state.goal,
+            "goal": self.state.task,
             "duration": round(self.state.duration, 1),
             "loop_count": self.state.loop_count,
             "total_tool_calls": self.state.total_tool_calls,
@@ -546,10 +546,10 @@ class Agent:
 
     async def wait_for_incoming_message(
         self,
-        timeout: float | None = 30.0,
-        role: Optional[str] = None,           # filter by role ("user", "system", etc.)
-        contains: Optional[str] = None,       # filter by substring in content
-        return_content_only: bool = False,    # ← new optional flag
+        timeout: float | None = None,
+        role: Optional[str] = None,  # filter by role ("user", "system", etc.)
+        contains: Optional[str] = None,  # filter by substring in content
+        return_content_only: bool = False,  # ← new optional flag
     ) -> Optional[Union[dict, str]]:
         """Wait for an incoming message with optional filtering and output format.
 
@@ -594,7 +594,8 @@ class Agent:
 
                     if contains is not None:
                         content_str = (
-                            msg.get("content", "") if isinstance(msg, dict)
+                            msg.get("content", "")
+                            if isinstance(msg, dict)
                             else str(msg)
                         )
                         if contains not in content_str:
@@ -686,7 +687,7 @@ class Agent:
                 "name": self.name,
                 "role": self.state.current_role,
                 "task": self.state.current_task,
-                "goal": self.state.goal,
+                "goal": self.state.task,
                 "status": self.state.status,
                 "phase": self.state.phase,
                 "duration": round(self.state.duration, 1),
@@ -828,7 +829,6 @@ class Agent:
                 try:
                     # Wait for any item to appear
                     await self.message_queue.get()  # blocks until something is there
-                    self.message_queue.task_done()  # immediately mark as done — we don't consume here
 
                     self._input_event.set()  # wake the main loop
                     await self.on_background_event(
@@ -1046,7 +1046,6 @@ class Agent:
         if user_prompt:
             # Sync to both places
             self.state.task = user_prompt
-            self.state.goal = user_prompt
 
         self.current_task = user_prompt or (
             "chat session" if chat_mode else "headless processing"
@@ -1159,7 +1158,6 @@ class Agent:
 
         if user_prompt:
             self.state.task = user_prompt
-            self.state.goal = user_prompt
             self.state.current_task = user_prompt
 
         self.state.status = "running"
@@ -1295,7 +1293,6 @@ class Agent:
             )
 
             sub_agent.state.task = task_description
-            sub_agent.state.goal = task_description
             sub_agent.current_task = task_description
             sub_agent.current_role = f"sub-agent:{display_name}"
 

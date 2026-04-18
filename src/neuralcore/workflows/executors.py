@@ -134,41 +134,18 @@ class AgentExecutors:
         """FINAL STATE-DRIVEN goal loop – uses generic success indicator from Action + expected outcomes.
         Requires real completion signals before advancing or finishing. Keeps NeuralCore abstract."""
 
-        original_query = next(
-            (
-                m.get("content", "").strip()
-                for m in reversed(state.messages or [])
-                if m.get("role") == "user" and m.get("content")
-            ),
-            state.current_task or "[USER REQUEST]",
-        )
-
-        # ====================== TASK PATH – FULL CLEAN RESET ======================
-        logger.info("→ [MODE SWITCH] Casual → TASK → full state reset")
-        state.reset_for_new_task(new_task=original_query, new_goal=original_query)
-        state.planned_tasks = []  # force re-planning on first loop
-
-        logger.info(f"[STATE-DRIVEN TASK LOOP] Starting for: {original_query[:120]}...")
-
-        if state.goal_reached or state.loop_count > 0:
-            logger.info("[DEFENSIVE] State was dirty on entry → resetting")
-            state.reset_for_new_task(new_task=original_query, new_goal=original_query)
-            state.planned_tasks = []
-
         yield ("phase_changed", {"phase": "thinking"})
 
         # ====================== ONE-TIME PLANNING ======================
         if not state.planned_tasks:
-            is_multi_step = await self._is_multi_step_task(original_query)
+            is_multi_step = await self._is_multi_step_task(state.task)
             if is_multi_step:
                 logger.info("[MULTI-STEP] Detected → structured planning")
                 yield ("phase_changed", {"phase": "planning"})
-                async for ev, pl in self._ensure_subtasks_planned(
-                    state, original_query
-                ):
+                async for ev, pl in self._ensure_subtasks_planned(state, state.task):
                     yield ev, pl
             else:
-                state.planned_tasks = [original_query]
+                state.planned_tasks = [state.task]
                 state.task_expected_outcomes = ["Task completed successfully"]
 
         is_multi_step = len(state.planned_tasks) > 1
@@ -214,7 +191,7 @@ class AgentExecutors:
                 )
 
                 current_query = PromptBuilder.sub_task_execution(
-                    original_query=original_query,
+                    original_query=state.task,
                     task_desc=task_desc,
                     current_index=state.current_task_index,
                     total_tasks=len(state.planned_tasks),
@@ -226,9 +203,9 @@ class AgentExecutors:
                 )
             else:
                 current_query = (
-                    original_query
+                    state.task
                     if state.loop_count == 1
-                    else f"USER ORIGINAL REQUEST: {original_query}\n\nPrevious results are in state.tool_results. Continue."
+                    else f"USER ORIGINAL REQUEST: {state.task}\n\nPrevious results are in state.tool_results. Continue."
                 )
 
             yield ("phase_changed", {"phase": "searching_tools"})
@@ -384,7 +361,7 @@ class AgentExecutors:
         yield ("phase_changed", {"phase": "generating_final_answer"})
 
         # IMPROVED: rich, explicit synthesis prompt that includes full task context + tool results
-        synthesis_query = PromptBuilder.final_synthesis(original_query)
+        synthesis_query = PromptBuilder.final_synthesis(state.task)
         if state.tool_results:
             synthesis_query += "\n\nTool results summary:\n" + "\n".join(
                 f"• {r.get('name', 'unknown')}: {str(r.get('result', ''))[:500]}..."
