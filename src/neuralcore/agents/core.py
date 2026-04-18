@@ -480,32 +480,39 @@ class Agent:
         await self.message_queue.put(item)
         self._input_counter += 1
         self._input_event.set()
-        self.state.add_message(item)
+
         role_str = item.get("role", "user")
         content_str = item.get("content", "")
         if not isinstance(content_str, str):
             content_str = str(content_str)
 
-        await self.context_manager.add_message(role_str, content_str)
+        await self.add_message(role_str, content_str)
         logger.debug(f"Agent '{self.name}' ← user message posted")
 
     async def post_system_message(self, message: str | Dict[str, Any]) -> None:
+        """System messages go to queue + ContextManager + AgentState (as before)."""
         if isinstance(message, str):
             item = {"role": "system", "content": message}
         else:
             item = {"role": "system", **message}
 
         await self.message_queue.put(item)
-        self.state.add_message(item)
+
+        # Still route through add_message → ContextManager + state sync
         role_str = item.get("role", "system")
         content_str = item.get("content", "")
         if not isinstance(content_str, str):
             content_str = str(content_str)
 
-        await self.context_manager.add_message(role_str, content_str)
+        await self.add_message(role_str, content_str)  # This triggers auto-sync
         logger.debug(f"Agent '{self.name}' ← system message posted")
 
     async def post_control(self, control: str | Dict[str, Any]) -> None:
+        """Control messages:
+        - Go to queue (for workflow loop)
+        - Are logged to ContextManager as system messages (clean "event: xxx" format)
+        - Do NOT go into AgentState.messages (prevents bloat)
+        """
         if isinstance(control, str):
             item = {"event": control}
         else:
@@ -513,14 +520,31 @@ class Agent:
             if not any(k in item for k in ("event", "action", "control")):
                 item["event"] = "custom_control"
 
+        # 1. Always put raw control into queue for internal processing
         await self.message_queue.put(item)
-        self.state.add_message(item)
-        logger.debug(f"Agent '{self.name}' ← control posted")
+
+        # 2. Convert to clean system message for ContextManager only
+        event_name = item.get("event", "custom_control")
+        clean_content = f"event: {event_name}"
+
+        # Add extra useful info if available (without bloating)
+        if "task_id" in item:
+            clean_content += f" | task_id={item['task_id']}"
+        if "status" in item:
+            clean_content += f" | status={item['status']}"
+        if "sub_agent_name" in item:
+            clean_content += f" | sub_agent={item['sub_agent_name']}"
+
+        await self.add_message("system", clean_content)
+
+        logger.debug(
+            f"Agent '{self.name}' ← control posted as system | event={event_name}"
+        )
 
     async def _auto_sync_state(self) -> None:
         """Lightweight auto-sync with rate limiting (prevent spam in tight loops)."""
         now = time.time()
-        if now - self._last_sync_ts < 0.3:  # max ~3 syncs/sec
+        if now - self._last_sync_ts < 0.3:
             return
         self._last_sync_ts = now
         await self.context_manager.sync_to_agent_state(self.state)
