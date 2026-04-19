@@ -366,6 +366,7 @@ class AgentState:
         self.task = new_task
         self.current_task = ""
         self.current_workflow = "default"
+        self.planned_tasks = []
 
         logger.debug(f"AgentState reset complete. Goal: '{self.task[:80]}...'")
 
