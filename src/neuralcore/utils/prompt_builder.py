@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from neuralcore.utils.os_info import get_os_info
 from neuralcore.utils.logger import Logger
@@ -658,34 +658,63 @@ class PromptBuilder:
 
     @staticmethod
     def abstract_concept_extraction(
-        goal: str, hypotheses: List[str], findings: List[str], relevant_items: List[Any]
+        goal: str,
+        hypotheses: List[str],
+        findings: List[str],
+        relevant_items: List[Any],
+        existing_concepts: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """Centralized prompt for higher-dimensional concept extraction.
-        Used by KnowledgeConsolidator._distill_concepts.
-        """
-        context_snippets = []
-        for item in relevant_items[:8]:
-            src = getattr(item, "source_type", "unknown")
-            content = getattr(item, "content", "")[:850]
-            if len(getattr(item, "content", "")) > 850:
-                content += "..."
-            context_snippets.append(f"[{src}] {content}")
+        """Strongly guided prompt that forces use of hypotheses and findings
+        while encouraging refinement of existing concepts."""
 
-        return f"""You are an expert knowledge consolidator for a self-improving agent.
+        # Format hypotheses and findings clearly
+        hyp_text = "\n".join(f"- {h}" for h in hypotheses) if hypotheses else "None provided."
+        find_text = "\n".join(f"- {f}" for f in findings) if findings else "None provided."
 
-        Goal: {goal}
+        items_text = "\n\n".join(
+            f"ITEM {i+1} [source: {getattr(item, 'source_type', 'unknown')}]\n"
+            f"{getattr(item, 'content', '')[:1400]}..."
+            for i, item in enumerate(relevant_items[:8])
+        )
 
-        Hypotheses: {hypotheses[-10:]}
-        Findings: {findings[-10:]}
+        existing_text = ""
+        if existing_concepts and len(existing_concepts) > 0:
+            existing_text = "EXISTING CONCEPTS (refine, extend, or link to these when relevant):\n" + "\n".join(
+                f"- {name}: {concept.get('description', '')[:280]}"
+                for name, concept in list(existing_concepts.items())[:12]
+            )
 
-        Recent relevant observations (may include large files or tool outcomes):
-        {"\n\n".join(context_snippets)}
+        return f"""You are a precise computational neuroscientist performing grounded abstraction.
 
-        Extract 3-7 high-level **abstract concepts, strategies, patterns, heuristics or insights**.
-        Focus on reusable principles, causal patterns, and generalizable knowledge — not raw facts or full outputs.
+        Task: Extract or refine 5–9 high-quality abstract concepts by analyzing the provided code artifacts against neuroscience theory (Purves et al.).
 
-        Return ONLY a valid JSON array:
+        You MUST use the following high-level signals to guide your abstraction:
+        - Goal: {goal}
+        - Hypotheses: 
+        {hyp_text}
+        - Findings:
+        {find_text}
+
+        Rules (strict):
+        - Every concept must be a true higher-dimensional abstraction grounded in BOTH the code and the neuroscience principles.
+        - Prefer refining or linking to EXISTING concepts when they fit.
+        - Create new concepts only when genuinely novel patterns emerge.
+        - Avoid fabricating classes, methods, or mechanisms that do not exist in the provided items.
+        - Output ONLY a valid JSON array. No extra text.
+
+        {existing_text}
+
+        RELEVANT CODE & BOOK EXCERPTS:
+        {items_text}
+
+        Output format (JSON array only):
         [
-        {{"name": "short name", "type": "strategy|pattern|heuristic|insight|anti_pattern", "description": "clear 2-4 sentence explanation", "score": 0.85}}
+        {{
+            "name": "short, precise name",
+            "description": "1-2 sentence grounded mapping between code and neuroscience",
+            "type": "mechanism | strategy | principle | analogy",
+            "score": 0.75,
+            "links_to": ["existing_concept_name_if_relevant"]
+        }}
         ]
-        """.strip()
+        """
