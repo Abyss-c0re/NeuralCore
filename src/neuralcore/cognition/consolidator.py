@@ -281,7 +281,13 @@ class KnowledgeConsolidator:
         )
         relevant = await self.rerank(goal, candidates, k=40)
 
-        extracted = await self._distill_concepts(relevant, goal, hypotheses, findings)
+        extracted = await self._distill_concepts(
+            relevant,
+            goal,
+            hypotheses,
+            findings,
+            self.concept_graph,  # pass existing concepts
+        )
 
         added = 0
         for concept in extracted:
@@ -334,7 +340,12 @@ class KnowledgeConsolidator:
             )
 
     async def _distill_concepts(
-        self, relevant_items: List[Any], goal: str, hypotheses: List, findings: List
+        self,
+        relevant_items: List[Any],
+        goal: str,
+        hypotheses: List,
+        findings: List,
+        existing_concepts: Optional[Dict[str, Any]] = None,
     ) -> List[Dict]:
         if not relevant_items:
             return []
@@ -344,6 +355,7 @@ class KnowledgeConsolidator:
             hypotheses=hypotheses,
             findings=findings,
             relevant_items=relevant_items,
+            existing_concepts=existing_concepts,
         )
 
         try:
@@ -517,3 +529,34 @@ class KnowledgeConsolidator:
         except Exception as e:
             logger.warning(f"Could not load reranker: {e}")
             self.reranker_model = None
+
+    def reset_model(self, keep_graph: bool = True):
+        """Clean reset for when prompt or extraction logic changes significantly."""
+        logger.info("🔄 Resetting LambdaMART model due to prompt/extraction changes")
+
+        # Clear training buffer
+        self.training_data.clear()
+
+        # Reset model in memory
+        self.reranker_model = None
+        self.feature_names = []
+
+        # Optionally keep the concept graph (usually yes)
+        if not keep_graph:
+            self.concept_graph.clear()
+            logger.info("Concept graph also cleared")
+        else:
+            logger.info(
+                f"Kept existing concept_graph with {len(self.concept_graph)} concepts"
+            )
+
+        # Delete the saved model file so next training starts fresh
+        model_path = self._get_model_path()
+        if os.path.exists(model_path):
+            try:
+                os.remove(model_path)
+                logger.info(f"Deleted old model file: {model_path}")
+            except Exception as e:
+                logger.warning(f"Could not delete model file: {e}")
+
+        logger.info("✅ Model reset complete. Next training will start from scratch.")
