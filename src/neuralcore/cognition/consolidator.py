@@ -30,7 +30,7 @@ class KnowledgeConsolidator:
 
         # Real training data
         self.training_data: List[Tuple[Dict[str, float], int]] = []
-        self.min_samples_for_training = 20
+        self.min_samples_for_training = 10
 
         # Simple debounce for heavy extraction
         self._last_extraction_ts = 0.0
@@ -116,6 +116,7 @@ class KnowledgeConsolidator:
         if len(candidates) <= k:
             return candidates[:k]
 
+        # Always extract features
         features_df = await asyncio.to_thread(
             self._extract_features_sync,
             query,
@@ -124,12 +125,13 @@ class KnowledgeConsolidator:
         )
 
         if self.reranker_model is not None:
+            # Use trained model
             scores_raw = await asyncio.to_thread(
                 self.reranker_model.predict, features_df
             )
             scores = np.asarray(scores_raw, dtype=np.float64).flatten()
         else:
-            # cold-start hybrid (unchanged)
+            # Cold-start hybrid score - completely safe, no .to_numpy / .values on None
             if features_df is None or len(features_df) == 0:
                 scores = np.zeros(len(candidates), dtype=np.float64)
             else:
@@ -143,13 +145,17 @@ class KnowledgeConsolidator:
                 recency = np.array(
                     features_df.get("recency_score", 0.0), dtype=np.float64
                 )
+
                 scores = dense * 0.4 + inv_align * 0.3 + kw_score * 0.2 + recency * 0.1
 
         scored_items = list(zip(candidates, scores))
         ranked = sorted(scored_items, key=lambda x: float(x[1]), reverse=True)
+        reranked_items = [item for item, _ in ranked[:k]]
 
-        # LESS AGGRESSIVE: return more candidates than requested so provide_context has breathing room
-        return [item for item, _ in ranked[: max(k, 30)]]
+        # ALWAYS collect training sample
+        self._collect_training_sample(query, candidates, reranked_items)
+
+        return reranked_items
 
     def _collect_training_sample(
         self, query: str, candidates: List[Any], chosen_items: List[Any]
@@ -342,7 +348,7 @@ class KnowledgeConsolidator:
 
         try:
             response = await self.agent.client.ask(
-                prompt, temperature=0.28, max_tokens=2800
+                prompt, temperature=0.28, max_tokens=1400
             )
             import re
 
@@ -408,9 +414,7 @@ class KnowledgeConsolidator:
         return str(path / f"{agent_id}_knowledge_consolidator_ltr.txt")
 
     async def train_reranker(self, X: pd.DataFrame, y: np.ndarray, groups: List[int]):
-        """Train LambdaMART with minimalist parameters for accurate, natural retrieval.
-        Designed for cross-domain RAG and adapting to user workflow.
-        Lets higher-dimensional features (dense_cosine, investigation_align) emerge naturally."""
+        """Train LambdaMART with stronger condensation + semantic bias."""
         if len(X) < 10:
             logger.warning("Too few samples to train reranker")
             return
@@ -425,25 +429,25 @@ class KnowledgeConsolidator:
                 "objective": "lambdarank",
                 "metric": "ndcg",
                 "ndcg_eval_at": [5, 10],
-                "learning_rate": 0.05,
-                "num_leaves": 31,
-                "min_data_in_leaf": 5,
+                "learning_rate": 0.06,
+                "num_leaves": 32,
+                "min_data_in_leaf": 6,
                 "boosting_type": "gbdt",
-                "feature_fraction": 0.90,
-                "bagging_fraction": 0.85,
-                "bagging_freq": 3,
+                "feature_fraction": 0.80,
+                "bagging_fraction": 0.80,
+                "bagging_freq": 5,
                 "verbose": -1,
-                "lambda_l1": 0.1,
-                "lambda_l2": 0.2,
+                "lambda_l1": 0.6,  # new: light L1 regularization
+                "lambda_l2": 0.8,  # new: light L2
             }
 
             self.reranker_model = lgb.train(
                 params,
                 train_set,
-                num_boost_round=300,
+                num_boost_round=500,
                 valid_sets=[train_set],
                 callbacks=[
-                    lgb.early_stopping(40, verbose=False),
+                    lgb.early_stopping(80, verbose=False),  # stronger stopping
                     lgb.log_evaluation(0),
                 ],
             )
@@ -460,10 +464,11 @@ class KnowledgeConsolidator:
                 zip(self.feature_names, self.reranker_model.feature_importance())
             )
 
-            if num_trees > 250:
-                logger.info(
-                    f"Model has {num_trees} trees — still growing naturally. "
-                    f"Monitor feature_importances (aim for dense_cosine rising)."
+            # Extra condensation: if too many trees, we can log and optionally re-train stricter next time
+            if num_trees > 180:
+                logger.warning(
+                    f"Model reached {num_trees} trees — condensation working but monitor growth. "
+                    f"Consider increasing min_data_in_leaf or lambda_l1/l2 if dense_cosine stays low."
                 )
 
             self.reranker_model.save_model(model_path)

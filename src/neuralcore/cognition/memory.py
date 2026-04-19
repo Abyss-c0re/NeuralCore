@@ -1030,44 +1030,46 @@ class ContextManager:
         return candidates
 
     async def ranked_retrieve(
-        self, query: str, max_kb_tokens: int = 5000, k: int = 25
+        self, query: str, max_kb_tokens: int = 5000, k: int = 10
     ) -> str:
-        """Main retrieval with gentler reranking for better context quality.
-        Prioritizes semantic depth while still using LTR when available."""
+        """Main retrieval used by provide_context.
+        Always routes through consolidator.rerank() when available (so training data is collected)."""
         if not self.knowledge_base or not query.strip():
             return ""
 
         consolidator = getattr(self, "consolidator", None)
 
-        # 1. Always get broad candidates first (this part stays strong)
+        logger.debug(
+            f"[RANKED_RETRIEVE] START | query='{query[:100]}...' | KB_size={len(self.knowledge_base)} | "
+            f"consolidator_present={consolidator is not None}"
+        )
+
+        # 1. Broad candidates (RRF + boost)
         candidates = await self._get_broad_candidates(query)
         logger.debug(f"[RANKED_RETRIEVE] Broad candidates: {len(candidates)}")
 
-        if not candidates:
-            return ""
-
-        # 2. Gentler reranking logic
-        if consolidator and consolidator.reranker_model is not None:
+        # 2. Rerank (this is the critical point for sample collection)
+        if consolidator:
             logger.debug(
-                f"[RANKED] Using LambdaMART reranker (gentle mode) for: {query[:80]}..."
+                f"[RANKED_RETRIEVE] → Calling KnowledgeConsolidator.rerank() with {len(candidates)} candidates"
             )
-            # Use higher k internally so we don't lose good items too early
-            reranked_items = await consolidator.rerank(
-                query, candidates, k=max(40, k * 2)
-            )
-            # Then take final k — this prevents over-aggressive filtering
-            items_to_format = reranked_items[:k]
+            reranked_items = await consolidator.rerank(query, candidates, k=k)
             logger.debug(
-                f"✅ Used KnowledgeConsolidator reranker → {len(items_to_format)} items"
+                f"[RANKED_RETRIEVE] Reranker returned {len(reranked_items)} items"
             )
         else:
             logger.debug(
-                "[RANKED] No trained reranker yet → using hybrid broad selection"
+                "[RANKED_RETRIEVE] No consolidator → fallback to top broad candidates"
             )
-            items_to_format = candidates[:k]
+            reranked_items = candidates[:k]
 
-        # 3. Format final context
-        return await self._format_knowledge_blocks(items_to_format, max_kb_tokens)
+        # 3. Format
+        result = await self._format_knowledge_blocks(reranked_items, max_kb_tokens)
+
+        logger.debug(
+            f"[RANKED_RETRIEVE] END → formatted {len(result)} chars from {len(reranked_items)} items"
+        )
+        return result
 
     def _is_duplicate_tool_call(
         self, tool_name: str, clean_args: Dict[str, Any]
