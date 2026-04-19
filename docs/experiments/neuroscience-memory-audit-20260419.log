@@ -1,0 +1,637 @@
+2026-04-19 23:36:20,875 - neuralcore - DEBUG - provide_context called | query='analyze /home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/memory.py and /home/v...' | chat=True | lightweight_agentic=True | has_state=True
+2026-04-19 23:36:20,881 - neuralcore - DEBUG - → Entering CHAT mode
+2026-04-19 23:36:21,038 - neuralcore - DEBUG - ContextManager → AgentState synced | messages=2 | tools=0 | tasks=0
+2026-04-19 23:36:21,039 - neuralcore - DEBUG - [CONSOLIDATE] KB stats | total_tokens≈0 | concepts=0 | tool_outcomes=0 | large_item=False
+2026-04-19 23:36:21,039 - neuralcore - DEBUG - [CONSOLIDATE] Knowledge still small (tokens≈0, concepts=0)
+2026-04-19 23:36:21,039 - neuralcore - INFO - [CONSOLIDATE] Starting extraction | goal: general task... | trace len=2
+2026-04-19 23:36:21,039 - neuralcore - DEBUG - [CONSOLIDATE] Reranking 0 candidates for concept distillation
+2026-04-19 23:36:21,039 - neuralcore - DEBUG - [CONSOLIDATE] No new concepts distilled this round
+2026-04-19 23:36:21,039 - neuralcore - DEBUG - [TRAINING TRIGGER] Growth too small for full retrain (added=0, tokens≈0, concepts=0)
+2026-04-19 23:36:21,039 - neuralcore - DEBUG - Agent 'Terminal Chat Agent' ← user message posted
+2026-04-19 23:36:21,384 - neuralcore - INFO - [TASK-DRIVEN MODE] Delegating to goal_driven_loop
+2026-04-19 23:36:21,384 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:36:21,385 - neuralcore - DEBUG - [UI] PHASE_CHANGED: goal_driven
+2026-04-19 23:36:21,385 - neuralcore - DEBUG - AgentState → loaded_tools cleared
+2026-04-19 23:36:21,385 - neuralcore - DEBUG - AgentState → FindTool tracking cleared
+2026-04-19 23:36:21,385 - neuralcore - DEBUG - AgentState reset complete. Goal: 'analyze /home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/memory.py and /home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/consolidator.py from the perspective of this book /home/user/Documents/neuroscience.pdf and save it to report.md'
+2026-04-19 23:36:21,385 - neuralcore - DEBUG - [QUEUE LISTENER] Already active for Agent 'Terminal Chat Agent'
+2026-04-19 23:36:21,385 - neuralcore - INFO - No trained model at /home/user/.neuralcore/models/agent_002_knowledge_consolidator_ltr.txt. Will bootstrap from hybrid scores.
+2026-04-19 23:36:21,385 - neuralcore - INFO - 🔄 Starting infinite loop 'goal_driven_loop' (runs until break condition or signal)
+2026-04-19 23:36:21,385 - neuralcore - DEBUG - [goal_driven_loop] iteration 1
+2026-04-19 23:36:21,385 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:36:21,385 - neuralcore - DEBUG - [UI] PHASE_CHANGED: thinking
+2026-04-19 23:36:21,385 - neuralcore - INFO - Unloaded dynamic tools. Persistent protected. keep_discovered=False → 0 kept
+2026-04-19 23:36:21,697 - neuralcore - INFO - [MULTI-STEP] LLM decided → COMPLEX | Query: analyze /home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/memory.py and /home/v...
+2026-04-19 23:36:21,697 - neuralcore - INFO - [MULTI-STEP] Detected → structured planning
+2026-04-19 23:36:21,697 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:36:21,697 - neuralcore - DEBUG - [UI] PHASE_CHANGED: planning
+2026-04-19 23:36:21,697 - neuralcore - INFO - [PLANNING START] _ensure_subtasks_planned called
+2026-04-19 23:36:21,697 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:36:21,697 - neuralcore - DEBUG - [UI] PHASE_CHANGED: planning
+2026-04-19 23:36:30,999 - neuralcore - INFO - [PLANNING RAW] LLM returned 2041 chars
+2026-04-19 23:36:30,999 - neuralcore - DEBUG - [PLANNING RAW JSON]
+{
+  "steps": [
+    {
+      "description": "Load and parse the content of /home/user/Documents/neuroscience.pdf to extract relevant concepts, terminology, and theoretical frameworks related to memory consolidation.",
+      "dependencies": [],
+      "suggested_tool_category": "PDF Parser",
+      "expected_outcome": "A structured data object containing key neuroscience concepts from the PDF, specifically those relating to memory systems and consolidation processes."
+    },
+    {
+      "description": "Load and parse the source code of /home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/memory.py.",
+      "dependencies": [0],
+      "suggested_tool_category": "Code Reader",
+      "expected_outcome": "A structured representation of the memory.py file, including class definitions, functions, and comments."
+    },
+    {
+      "description": "Load and parse the source code of /home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/consolidator.py.",
+      "dependencies": [0, 1],
+      "suggested_tool_category": "Code Reader",
+      "expected_outcome": "A structured representation of the consolidator.py file, including class definitions, functions, and comments."
+    },
+    {
+      "description": "Perform a comparative analysis between the extracted neuroscience concepts (from step 0) and the implementation details in memory.py and consolidator.py (from steps 1 and 2).",
+      "dependencies": [0, 1, 2],
+      "suggested_tool_category": "Logic/Analysis Engine",
+      "expected_outcome": "A structured analysis report identifying alignments, discrepancies, or novel implementations in the code relative to the book's theory."
+    },
+    {
+      "description": "Format the comparative analysis into a Markdown document and save it to /home/user/Dev/AI/ProjectNexus/NeuralCore/report.md.",
+      "dependencies": [3],
+      "suggested_tool_category": "File Writer",
+      "expected_outcome": "The file report.md exists at the specified path and contains the formatted analysis."
+    }
+  ]
+}
+2026-04-19 23:36:30,999 - neuralcore - INFO - [PLANNING] Parsed 5 steps from JSON
+2026-04-19 23:36:30,999 - neuralcore - DEBUG -   → Appended Step 0: 'Load and parse the content of /home/user/Documents/neuroscience.pdf to extract relevant concepts, terminology, and theoretical frameworks related to memory consolidation.' | expected='A structured data object containing key neuroscience concepts from the PDF, specifically those relating to memory systems and consolidation processes.'
+2026-04-19 23:36:30,999 - neuralcore - DEBUG -   → Appended Step 1: 'Load and parse the source code of /home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/memory.py.' | expected='A structured representation of the memory.py file, including class definitions, functions, and comments.'
+2026-04-19 23:36:30,999 - neuralcore - DEBUG -   → Appended Step 2: 'Load and parse the source code of /home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/consolidator.py.' | expected='A structured representation of the consolidator.py file, including class definitions, functions, and comments.'
+2026-04-19 23:36:30,999 - neuralcore - DEBUG -   → Appended Step 3: 'Perform a comparative analysis between the extracted neuroscience concepts (from step 0) and the implementation details in memory.py and consolidator.py (from steps 1 and 2).' | expected='A structured analysis report identifying alignments, discrepancies, or novel implementations in the code relative to the book's theory.'
+2026-04-19 23:36:30,999 - neuralcore - DEBUG -   → Appended Step 4: 'Format the comparative analysis into a Markdown document and save it to /home/user/Dev/AI/ProjectNexus/NeuralCore/report.md.' | expected='The file report.md exists at the specified path and contains the formatted analysis.'
+2026-04-19 23:36:30,999 - neuralcore - INFO - [PLANNING] State integrity check PASSED — expected_outcomes populated correctly
+2026-04-19 23:36:30,999 - neuralcore - INFO - [PLANNING] Final count: 5 tasks, 5 expected outcomes
+2026-04-19 23:36:30,999 - neuralcore - DEBUG -   Step 0: Load and parse the content of /home/user/Documents/neuroscience.pdf to extract relevant concepts, terminology, and theoretical frameworks related to memory consolidation. | expected='A structured data object containing key neuroscience concepts from the PDF, specifically those relating to memory systems and consolidation processes.' | deps=[]
+2026-04-19 23:36:30,999 - neuralcore - DEBUG -   Step 1: Load and parse the source code of /home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/memory.py. | expected='A structured representation of the memory.py file, including class definitions, functions, and comments.' | deps=[0]
+2026-04-19 23:36:30,999 - neuralcore - DEBUG -   Step 2: Load and parse the source code of /home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/consolidator.py. | expected='A structured representation of the consolidator.py file, including class definitions, functions, and comments.' | deps=[0, 1]
+2026-04-19 23:36:31,000 - neuralcore - DEBUG -   Step 3: Perform a comparative analysis between the extracted neuroscience concepts (from step 0) and the implementation details in memory.py and consolidator.py (from steps 1 and 2). | expected='A structured analysis report identifying alignments, discrepancies, or novel implementations in the code relative to the book's theory.' | deps=[0, 1, 2]
+2026-04-19 23:36:31,000 - neuralcore - DEBUG -   Step 4: Format the comparative analysis into a Markdown document and save it to /home/user/Dev/AI/ProjectNexus/NeuralCore/report.md. | expected='The file report.md exists at the specified path and contains the formatted analysis.' | deps=[3]
+2026-04-19 23:36:31,000 - neuralcore - DEBUG - [UI] Event: planning_complete
+2026-04-19 23:36:31,000 - neuralcore - INFO - [PLANNING END] Planning completed successfully
+2026-04-19 23:36:31,000 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:36:31,001 - neuralcore - DEBUG - [UI] PHASE_CHANGED: searching_tools
+2026-04-19 23:36:31,001 - neuralcore - DEBUG - provide_context called | query='You are executing **ONE SPECIFIC SUB-TASK ONLY**. Ignore everything else.
+
+        ORIGINAL USER REQ...' | chat=False | lightweight_agentic=True | has_state=True
+2026-04-19 23:36:31,001 - neuralcore - DEBUG - → Entering AGENTIC mode
+2026-04-19 23:36:31,001 - neuralcore - DEBUG - → Using IMPROVED LIGHTWEIGHT agentic context (long-running mode)
+2026-04-19 23:36:31,003 - neuralcore - DEBUG - → LIGHTWEIGHT MODE: skipping full conversation history
+2026-04-19 23:36:31,004 - neuralcore - DEBUG - Final context before prune → 1276 tokens
+2026-04-19 23:36:31,004 - neuralcore - DEBUG - provide_context finished | messages=2 | lightweight=True | tokens=1276
+2026-04-19 23:36:32,743 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:36:32,743 - neuralcore - DEBUG - [UI] PHASE_CHANGED: handling_findtool
+2026-04-19 23:36:32,743 - neuralcore - DEBUG - AgentState → FindTool recorded (total=1, loop=1)
+2026-04-19 23:36:32,743 - neuralcore - DEBUG - AgentState → loop signal added: restart (target=goal_driven_loop)
+2026-04-19 23:36:32,743 - neuralcore - DEBUG - AgentState → soft_restart flag set to True
+2026-04-19 23:36:32,743 - neuralcore - DEBUG - AgentState → FindTool tracking cleared
+2026-04-19 23:36:32,743 - neuralcore - INFO - 🔄 Loop restart requested → FindTool called (target_loop=goal_driven_loop)
+2026-04-19 23:36:32,743 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:36:32,743 - neuralcore - DEBUG - [UI] PHASE_CHANGED: restarting_loop
+2026-04-19 23:36:32,743 - neuralcore - DEBUG - [goal_driven_loop] iteration 2
+2026-04-19 23:36:32,743 - neuralcore - DEBUG - AgentState → cleared 1 pending loop signal(s)
+2026-04-19 23:36:32,743 - neuralcore - INFO - [LOOP SIGNAL] 'restart' received for loop 'goal_driven_loop' | FindTool called
+2026-04-19 23:36:32,743 - neuralcore - DEBUG - [UI] Event: loop_restart
+2026-04-19 23:36:32,743 - neuralcore - DEBUG - AgentState → FindTool tracking cleared
+2026-04-19 23:36:32,743 - neuralcore - DEBUG - AgentState → soft_restart flag set to True
+2026-04-19 23:36:32,743 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:36:32,743 - neuralcore - DEBUG - [UI] PHASE_CHANGED: thinking
+2026-04-19 23:36:32,744 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:36:32,744 - neuralcore - DEBUG - [UI] PHASE_CHANGED: searching_tools
+2026-04-19 23:36:32,744 - neuralcore - DEBUG - provide_context called | query='You are executing **ONE SPECIFIC SUB-TASK ONLY**. Ignore everything else.
+
+        ORIGINAL USER REQ...' | chat=False | lightweight_agentic=True | has_state=True
+2026-04-19 23:36:32,744 - neuralcore - DEBUG - → Entering AGENTIC mode
+2026-04-19 23:36:32,744 - neuralcore - DEBUG - → Using IMPROVED LIGHTWEIGHT agentic context (long-running mode)
+2026-04-19 23:36:32,745 - neuralcore - DEBUG - → LIGHTWEIGHT MODE: skipping full conversation history
+2026-04-19 23:36:32,747 - neuralcore - DEBUG - Final context before prune → 1276 tokens
+2026-04-19 23:36:32,747 - neuralcore - DEBUG - provide_context finished | messages=2 | lightweight=True | tokens=1276
+2026-04-19 23:36:34,641 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:36:34,641 - neuralcore - DEBUG - [UI] PHASE_CHANGED: handling_findtool
+2026-04-19 23:36:34,641 - neuralcore - DEBUG - AgentState → FindTool recorded (total=1, loop=1)
+2026-04-19 23:36:34,642 - neuralcore - DEBUG - AgentState → loop signal added: restart (target=goal_driven_loop)
+2026-04-19 23:36:34,642 - neuralcore - DEBUG - AgentState → soft_restart flag set to True
+2026-04-19 23:36:34,642 - neuralcore - DEBUG - AgentState → FindTool tracking cleared
+2026-04-19 23:36:34,642 - neuralcore - INFO - 🔄 Loop restart requested → FindTool called (target_loop=goal_driven_loop)
+2026-04-19 23:36:34,642 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:36:34,642 - neuralcore - DEBUG - [UI] PHASE_CHANGED: restarting_loop
+2026-04-19 23:36:34,642 - neuralcore - DEBUG - [goal_driven_loop] iteration 3
+2026-04-19 23:36:34,642 - neuralcore - DEBUG - AgentState → cleared 1 pending loop signal(s)
+2026-04-19 23:36:34,642 - neuralcore - INFO - [LOOP SIGNAL] 'restart' received for loop 'goal_driven_loop' | FindTool called
+2026-04-19 23:36:34,642 - neuralcore - DEBUG - [UI] Event: loop_restart
+2026-04-19 23:36:34,642 - neuralcore - DEBUG - AgentState → FindTool tracking cleared
+2026-04-19 23:36:34,642 - neuralcore - DEBUG - AgentState → soft_restart flag set to True
+2026-04-19 23:36:34,642 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:36:34,642 - neuralcore - DEBUG - [UI] PHASE_CHANGED: thinking
+2026-04-19 23:36:34,642 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:36:34,642 - neuralcore - DEBUG - [UI] PHASE_CHANGED: searching_tools
+2026-04-19 23:36:34,642 - neuralcore - DEBUG - provide_context called | query='You are executing **ONE SPECIFIC SUB-TASK ONLY**. Ignore everything else.
+
+        ORIGINAL USER REQ...' | chat=False | lightweight_agentic=True | has_state=True
+2026-04-19 23:36:34,642 - neuralcore - DEBUG - → Entering AGENTIC mode
+2026-04-19 23:36:34,642 - neuralcore - DEBUG - → Using IMPROVED LIGHTWEIGHT agentic context (long-running mode)
+2026-04-19 23:36:34,644 - neuralcore - DEBUG - → LIGHTWEIGHT MODE: skipping full conversation history
+2026-04-19 23:36:34,645 - neuralcore - DEBUG - Final context before prune → 1276 tokens
+2026-04-19 23:36:34,645 - neuralcore - DEBUG - provide_context finished | messages=2 | lightweight=True | tokens=1276
+2026-04-19 23:36:35,467 - neuralcore - DEBUG - [ACTIONSET RESOLVE] Found executor for 'FindTool'
+2026-04-19 23:36:35,467 - neuralcore - INFO - [ACTION START] FindTool
+2026-04-19 23:36:35,467 - neuralcore - DEBUG - [ACTION INPUT] FindTool kwargs={'query': 'read pdf file'}
+2026-04-19 23:36:35,467 - neuralcore - DEBUG - [ACTION BOUND] FindTool → NO AGENT BOUND
+2026-04-19 23:36:35,467 - neuralcore - DEBUG - [ACTION AWAITING] FindTool
+2026-04-19 23:36:35,467 - neuralcore - INFO - ToolBrowser search executed: query='read pdf file'
+2026-04-19 23:36:35,470 - neuralcore - INFO - [ACTIONSET ADD] read_pdf
+2026-04-19 23:36:35,470 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=2
+2026-04-19 23:36:35,470 - neuralcore - DEBUG - [ACTION BIND] read_pdf → Agent (agent_id=agent_002)
+2026-04-19 23:36:35,470 - neuralcore - DEBUG - [BIND ON ADD] read_pdf → agent bound at load time
+2026-04-19 23:36:35,470 - neuralcore - DEBUG - Added tool 'read_pdf' to DynamicCore (origin: FileEditingTools)
+2026-04-19 23:36:35,470 - neuralcore - INFO - [ACTIONSET ADD] read_file
+2026-04-19 23:36:35,470 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=3
+2026-04-19 23:36:35,470 - neuralcore - DEBUG - [ACTION BIND] read_file → Agent (agent_id=agent_002)
+2026-04-19 23:36:35,470 - neuralcore - DEBUG - [BIND ON ADD] read_file → agent bound at load time
+2026-04-19 23:36:35,470 - neuralcore - DEBUG - Added tool 'read_file' to DynamicCore (origin: FileEditingTools)
+2026-04-19 23:36:35,470 - neuralcore - INFO - [ACTIONSET ADD] read_folder
+2026-04-19 23:36:35,470 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=4
+2026-04-19 23:36:35,470 - neuralcore - DEBUG - [ACTION BIND] read_folder → Agent (agent_id=agent_002)
+2026-04-19 23:36:35,470 - neuralcore - DEBUG - [BIND ON ADD] read_folder → agent bound at load time
+2026-04-19 23:36:35,470 - neuralcore - DEBUG - Added tool 'read_folder' to DynamicCore (origin: FileEditingTools)
+2026-04-19 23:36:35,470 - neuralcore - INFO - Loaded 3 individual tools: read_pdf, read_file, read_folder
+2026-04-19 23:36:35,470 - neuralcore - INFO - ToolBrowser: loaded 3 tools
+2026-04-19 23:36:35,470 - neuralcore - INFO - [ACTION SUCCESS] FindTool | success=True
+2026-04-19 23:36:36,594 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:36:36,594 - neuralcore - DEBUG - [UI] PHASE_CHANGED: handling_findtool
+2026-04-19 23:36:36,594 - neuralcore - DEBUG - AgentState → FindTool recorded (total=1, loop=1)
+2026-04-19 23:36:36,594 - neuralcore - DEBUG - AgentState → loop signal added: restart (target=goal_driven_loop)
+2026-04-19 23:36:36,594 - neuralcore - DEBUG - AgentState → soft_restart flag set to True
+2026-04-19 23:36:36,594 - neuralcore - DEBUG - AgentState → FindTool tracking cleared
+2026-04-19 23:36:36,594 - neuralcore - INFO - 🔄 Loop restart requested → FindTool called (target_loop=goal_driven_loop)
+2026-04-19 23:36:36,594 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:36:36,594 - neuralcore - DEBUG - [UI] PHASE_CHANGED: restarting_loop
+2026-04-19 23:36:36,594 - neuralcore - DEBUG - [goal_driven_loop] iteration 4
+2026-04-19 23:36:36,594 - neuralcore - DEBUG - AgentState → cleared 1 pending loop signal(s)
+2026-04-19 23:36:36,594 - neuralcore - INFO - [LOOP SIGNAL] 'restart' received for loop 'goal_driven_loop' | FindTool called
+2026-04-19 23:36:36,594 - neuralcore - DEBUG - [UI] Event: loop_restart
+2026-04-19 23:36:36,594 - neuralcore - DEBUG - AgentState → FindTool tracking cleared
+2026-04-19 23:36:36,594 - neuralcore - DEBUG - AgentState → soft_restart flag set to True
+2026-04-19 23:36:36,594 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:36:36,594 - neuralcore - DEBUG - [UI] PHASE_CHANGED: thinking
+2026-04-19 23:36:36,594 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:36:36,594 - neuralcore - DEBUG - [UI] PHASE_CHANGED: searching_tools
+2026-04-19 23:36:36,594 - neuralcore - DEBUG - provide_context called | query='You are executing **ONE SPECIFIC SUB-TASK ONLY**. Ignore everything else.
+
+        ORIGINAL USER REQ...' | chat=False | lightweight_agentic=True | has_state=True
+2026-04-19 23:36:36,594 - neuralcore - DEBUG - → Entering AGENTIC mode
+2026-04-19 23:36:36,594 - neuralcore - DEBUG - → Using IMPROVED LIGHTWEIGHT agentic context (long-running mode)
+2026-04-19 23:36:36,596 - neuralcore - DEBUG - → LIGHTWEIGHT MODE: skipping full conversation history
+2026-04-19 23:36:36,597 - neuralcore - DEBUG - Final context before prune → 1276 tokens
+2026-04-19 23:36:36,598 - neuralcore - DEBUG - provide_context finished | messages=2 | lightweight=True | tokens=1276
+2026-04-19 23:36:37,463 - neuralcore - DEBUG - [ACTIONSET RESOLVE] Found executor for 'FindTool'
+2026-04-19 23:36:37,463 - neuralcore - INFO - [ACTION START] FindTool
+2026-04-19 23:36:37,463 - neuralcore - DEBUG - [ACTION INPUT] FindTool kwargs={'query': 'read pdf file'}
+2026-04-19 23:36:37,463 - neuralcore - DEBUG - [ACTION BOUND] FindTool → NO AGENT BOUND
+2026-04-19 23:36:37,463 - neuralcore - DEBUG - [ACTION AWAITING] FindTool
+2026-04-19 23:36:37,463 - neuralcore - INFO - ToolBrowser search executed: query='read pdf file'
+2026-04-19 23:36:37,466 - neuralcore - INFO - ToolBrowser: loaded 3 tools
+2026-04-19 23:36:37,466 - neuralcore - INFO - [ACTION SUCCESS] FindTool | success=True
+2026-04-19 23:36:38,908 - neuralcore - DEBUG - [ACTIONSET RESOLVE] Found executor for 'FindTool'
+2026-04-19 23:36:38,908 - neuralcore - INFO - [ACTION START] FindTool
+2026-04-19 23:36:38,908 - neuralcore - DEBUG - [ACTION INPUT] FindTool kwargs={'query': 'read pdf file'}
+2026-04-19 23:36:38,908 - neuralcore - DEBUG - [ACTION BOUND] FindTool → NO AGENT BOUND
+2026-04-19 23:36:38,908 - neuralcore - DEBUG - [ACTION AWAITING] FindTool
+2026-04-19 23:36:38,908 - neuralcore - INFO - ToolBrowser search executed: query='read pdf file'
+2026-04-19 23:36:38,911 - neuralcore - INFO - ToolBrowser: loaded 3 tools
+2026-04-19 23:36:38,911 - neuralcore - INFO - [ACTION SUCCESS] FindTool | success=True
+2026-04-19 23:36:39,288 - neuralcore - DEBUG - [ACTIONSET RESOLVE] Found executor for 'read_pdf'
+2026-04-19 23:36:39,288 - neuralcore - INFO - [ACTION START] read_pdf
+2026-04-19 23:36:39,288 - neuralcore - DEBUG - [ACTION INPUT] read_pdf kwargs={'file_path': '/home/user/Documents/neuroscience.pdf'}
+2026-04-19 23:36:39,288 - neuralcore - DEBUG - [ACTION BOUND] read_pdf → bound to Agent (agent_id=agent_002)
+2026-04-19 23:36:39,288 - neuralcore - DEBUG - [ACTION AWAITING] read_pdf
+2026-04-19 23:37:15,135 - neuralcore - INFO - Tool 'read_pdf' executed → success=True
+2026-04-19 23:37:15,135 - neuralcore - DEBUG - [TOOL CALL LOGGED] read_pdf with args={'file_path': '/home/user/Documents/neuroscience.pdf'}
+2026-04-19 23:37:15,148 - neuralcore - DEBUG - [RECORDING FULL] read_pdf | original=2,604,369 chars | after_clean=2,604,369 chars
+Preview:
+NEUROSCIENCE
+Third Edition
+Purves3/eFM  5/13/04  12:59 PM  Page i
+Purves3/eFM  5/13/04  12:59 PM  Page ii
+Edited by
+D
+ALE PURVES
+GEORGE J. AUGUSTINE
+DAVID FITZPATRICK
+WILLIAM C. HALL
+ANTHONY-SAMUEL LAMANTIA
+JAMES O. MCNAMARA
+S. MARK WILLIAMS
+NEUROSCIENCE THIRD EDITION
+Sinauer Associates, Inc. • Publishers
+Sunderland, Massachusetts U.S.A.
+Purves3/eFM  5/13/04  12:59 PM  Page iii
+NEUROSCIENCE: Third Edition
+Copyright © 2004 by Sinauer Associates, Inc. All rights reserved. 
+This book may not be reproduced in whole or in part without permission.
+Address inquiries and orders to
+Sinauer Associates, ...
+2026-04-19 23:37:16,892 - neuralcore - INFO - ✅ Added 12 clean chunks for tool_outcome_6393774359823841442 | source=tool_outcome
+2026-04-19 23:37:16,892 - neuralcore - INFO - ✅ Recorded full tool outcome: read_pdf (2,604,369 chars)
+2026-04-19 23:37:16,892 - neuralcore - INFO - [ACTION SUCCESS] read_pdf | success=True
+2026-04-19 23:37:16,893 - neuralcore - INFO - [MULTI-STEP] Sub-task 0 complete → advancing
+2026-04-19 23:37:16,893 - neuralcore - DEBUG - AgentState → loop signal added: restart (target=goal_driven_loop)
+2026-04-19 23:37:16,893 - neuralcore - DEBUG - AgentState → soft_restart flag set to True
+2026-04-19 23:37:16,893 - neuralcore - DEBUG - AgentState → FindTool tracking cleared
+2026-04-19 23:37:16,893 - neuralcore - INFO - 🔄 Loop restart requested → [MULTI-STEP] Sub-task 0 complete → advancing (target_loop=goal_driven_loop)
+2026-04-19 23:37:16,893 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:37:16,893 - neuralcore - DEBUG - [UI] PHASE_CHANGED: restarting_loop
+2026-04-19 23:37:16,893 - neuralcore - DEBUG - [goal_driven_loop] iteration 5
+2026-04-19 23:37:16,893 - neuralcore - DEBUG - AgentState → cleared 1 pending loop signal(s)
+2026-04-19 23:37:16,893 - neuralcore - INFO - [LOOP SIGNAL] 'restart' received for loop 'goal_driven_loop' | [MULTI-STEP] Sub-task 0 complete → advancing
+2026-04-19 23:37:16,893 - neuralcore - DEBUG - [UI] Event: loop_restart
+2026-04-19 23:37:16,893 - neuralcore - DEBUG - AgentState → FindTool tracking cleared
+2026-04-19 23:37:16,893 - neuralcore - DEBUG - AgentState → soft_restart flag set to True
+2026-04-19 23:37:16,894 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:37:16,894 - neuralcore - DEBUG - [UI] PHASE_CHANGED: thinking
+2026-04-19 23:37:16,894 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:37:16,894 - neuralcore - DEBUG - [UI] PHASE_CHANGED: searching_tools
+2026-04-19 23:37:16,894 - neuralcore - DEBUG - provide_context called | query='You are executing **ONE SPECIFIC SUB-TASK ONLY**. Ignore everything else.
+
+        ORIGINAL USER REQ...' | chat=False | lightweight_agentic=True | has_state=True
+2026-04-19 23:37:16,894 - neuralcore - DEBUG - → Entering AGENTIC mode
+2026-04-19 23:37:16,894 - neuralcore - DEBUG - → Using IMPROVED LIGHTWEIGHT agentic context (long-running mode)
+2026-04-19 23:37:16,896 - neuralcore - DEBUG - [BROAD] START | query='You are executing **ONE SPECIFIC SUB-TASK ONLY**. Ignore everything else.
+
+        ORIGINAL USER REQ...' | KB_size=12
+2026-04-19 23:37:16,947 - neuralcore - DEBUG - [BROAD] Dense ranked: 12 items
+2026-04-19 23:37:16,955 - neuralcore - DEBUG - Rebuilt TF-IDF: (12, 3581)
+2026-04-19 23:37:16,956 - neuralcore - DEBUG - [BROAD] Sparse ranked: 12 items
+2026-04-19 23:37:16,957 - neuralcore - DEBUG - [BOOST] Detected mentions: ['home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/memory.py', 'home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/consolidator.py', 'home/user/Documents/neuroscience.pdf', 'report.md', 'U.S.A', 'memory.py', 'consolidator.py', 'home/user/Dev/AI/ProjectNexus/NeuralCore/report.md']
+2026-04-19 23:37:16,957 - neuralcore - DEBUG - [BOOST] Applied boosts to 1 tool outcomes
+2026-04-19 23:37:16,957 - neuralcore - DEBUG - [BROAD] END → returning 12 broad candidates (top RRF score: 5.0328)
+2026-04-19 23:37:16,957 - neuralcore - DEBUG - [RANKED_RETRIEVE] Broad candidates: 12
+2026-04-19 23:37:16,957 - neuralcore - DEBUG - [RANKED] No trained reranker yet → using hybrid broad selection
+2026-04-19 23:37:16,967 - neuralcore - DEBUG - → LIGHTWEIGHT MODE: skipping full conversation history
+2026-04-19 23:37:16,970 - neuralcore - DEBUG - Final context before prune → 3201 tokens
+2026-04-19 23:37:16,970 - neuralcore - DEBUG - provide_context finished | messages=3 | lightweight=True | tokens=3201
+2026-04-19 23:37:21,501 - neuralcore - DEBUG - [ACTIONSET RESOLVE] Found executor for 'read_file'
+2026-04-19 23:37:21,502 - neuralcore - INFO - [ACTION START] read_file
+2026-04-19 23:37:21,502 - neuralcore - DEBUG - [ACTION INPUT] read_file kwargs={'file_path': '/home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/memory.py'}
+2026-04-19 23:37:21,502 - neuralcore - DEBUG - [ACTION BOUND] read_file → bound to Agent (agent_id=agent_002)
+2026-04-19 23:37:21,502 - neuralcore - DEBUG - [ACTION AWAITING] read_file
+2026-04-19 23:37:21,502 - neuralcore - INFO - Tool 'read_file' executed → success=True
+2026-04-19 23:37:21,502 - neuralcore - DEBUG - [TOOL CALL LOGGED] read_file with args={'file_path': '/home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/memory.py'}
+2026-04-19 23:37:21,503 - neuralcore - DEBUG - [RECORDING FULL] read_file | original=74,826 chars | after_clean=74,315 chars
+Preview:
+import re
+import os
+import asyncio
+import time
+import numpy as np
+import hashlib
+import json
+from typing import Tuple, List, Dict, Any, Optional
+from neuralcore.utils.logger import Logger
+from neuralcore.utils.prompt_builder import PromptBuilder
+from neuralcore.utils.config import get_loader
+from neuralcore.clients.factory import get_clients
+from neuralcore.utils.text_tokenizer import TextTokenizer
+from neuralcore.utils.search import keyword_score, cosine_sim
+from neuralcore.agents.state import AgentState
+from neuralcore.cognition.items import KnowledgeItem, Topic
+from neuralcore.cognition.con...
+2026-04-19 23:37:21,506 - neuralcore - DEBUG - [KB GUARD] Partially cleaned tool_outcome
+2026-04-19 23:37:22,067 - neuralcore - INFO - ✅ Added 12 clean chunks for tool_outcome_-2203648642161436145 | source=tool_outcome
+2026-04-19 23:37:22,067 - neuralcore - INFO - ✅ Recorded full tool outcome: read_file (74,826 chars)
+2026-04-19 23:37:22,068 - neuralcore - INFO - [ACTION SUCCESS] read_file | success=True
+2026-04-19 23:37:22,068 - neuralcore - INFO - [MULTI-STEP] Sub-task 1 complete → advancing
+2026-04-19 23:37:22,068 - neuralcore - DEBUG - AgentState → loop signal added: restart (target=goal_driven_loop)
+2026-04-19 23:37:22,068 - neuralcore - DEBUG - AgentState → soft_restart flag set to True
+2026-04-19 23:37:22,068 - neuralcore - DEBUG - AgentState → FindTool tracking cleared
+2026-04-19 23:37:22,068 - neuralcore - INFO - 🔄 Loop restart requested → [MULTI-STEP] Sub-task 1 complete → advancing (target_loop=goal_driven_loop)
+2026-04-19 23:37:22,069 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:37:22,069 - neuralcore - DEBUG - [UI] PHASE_CHANGED: restarting_loop
+2026-04-19 23:37:22,069 - neuralcore - DEBUG - [goal_driven_loop] iteration 6
+2026-04-19 23:37:22,069 - neuralcore - DEBUG - AgentState → cleared 1 pending loop signal(s)
+2026-04-19 23:37:22,069 - neuralcore - INFO - [LOOP SIGNAL] 'restart' received for loop 'goal_driven_loop' | [MULTI-STEP] Sub-task 1 complete → advancing
+2026-04-19 23:37:22,069 - neuralcore - DEBUG - [UI] Event: loop_restart
+2026-04-19 23:37:22,069 - neuralcore - DEBUG - AgentState → FindTool tracking cleared
+2026-04-19 23:37:22,069 - neuralcore - DEBUG - AgentState → soft_restart flag set to True
+2026-04-19 23:37:22,069 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:37:22,069 - neuralcore - DEBUG - [UI] PHASE_CHANGED: thinking
+2026-04-19 23:37:22,069 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:37:22,069 - neuralcore - DEBUG - [UI] PHASE_CHANGED: searching_tools
+2026-04-19 23:37:22,069 - neuralcore - DEBUG - provide_context called | query='You are executing **ONE SPECIFIC SUB-TASK ONLY**. Ignore everything else.
+
+        ORIGINAL USER REQ...' | chat=False | lightweight_agentic=True | has_state=True
+2026-04-19 23:37:22,069 - neuralcore - DEBUG - → Entering AGENTIC mode
+2026-04-19 23:37:22,069 - neuralcore - DEBUG - → Using IMPROVED LIGHTWEIGHT agentic context (long-running mode)
+2026-04-19 23:37:22,071 - neuralcore - DEBUG - [BROAD] START | query='You are executing **ONE SPECIFIC SUB-TASK ONLY**. Ignore everything else.
+
+        ORIGINAL USER REQ...' | KB_size=24
+2026-04-19 23:37:22,136 - neuralcore - DEBUG - [BROAD] Dense ranked: 24 items
+2026-04-19 23:37:22,151 - neuralcore - DEBUG - Rebuilt TF-IDF: (24, 5905)
+2026-04-19 23:37:22,152 - neuralcore - DEBUG - [BROAD] Sparse ranked: 24 items
+2026-04-19 23:37:22,153 - neuralcore - DEBUG - [BOOST] Detected mentions: ['home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/memory.py', 'home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/consolidator.py', 'home/user/Documents/neuroscience.pdf', 'report.md', 'U.S.A', 'neuralcore.utils', 'memory.py', 'consolidator.py', 'home/user/Dev/AI/ProjectNexus/NeuralCore/report.md']
+2026-04-19 23:37:22,154 - neuralcore - DEBUG - [BOOST] Applied boosts to 2 tool outcomes
+2026-04-19 23:37:22,154 - neuralcore - DEBUG - [BROAD] END → returning 24 broad candidates (top RRF score: 5.0328)
+2026-04-19 23:37:22,154 - neuralcore - DEBUG - [RANKED_RETRIEVE] Broad candidates: 24
+2026-04-19 23:37:22,154 - neuralcore - DEBUG - [RANKED] No trained reranker yet → using hybrid broad selection
+2026-04-19 23:37:22,163 - neuralcore - DEBUG - → LIGHTWEIGHT MODE: skipping full conversation history
+2026-04-19 23:37:22,167 - neuralcore - DEBUG - Final context before prune → 3282 tokens
+2026-04-19 23:37:22,167 - neuralcore - DEBUG - provide_context finished | messages=3 | lightweight=True | tokens=3282
+2026-04-19 23:37:26,817 - neuralcore - DEBUG - [ACTIONSET RESOLVE] Found executor for 'read_file'
+2026-04-19 23:37:26,817 - neuralcore - INFO - [ACTION START] read_file
+2026-04-19 23:37:26,817 - neuralcore - DEBUG - [ACTION INPUT] read_file kwargs={'file_path': '/home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/consolidator.py'}
+2026-04-19 23:37:26,817 - neuralcore - DEBUG - [ACTION BOUND] read_file → bound to Agent (agent_id=agent_002)
+2026-04-19 23:37:26,817 - neuralcore - DEBUG - [ACTION AWAITING] read_file
+2026-04-19 23:37:26,817 - neuralcore - INFO - Tool 'read_file' executed → success=True
+2026-04-19 23:37:26,818 - neuralcore - DEBUG - [TOOL CALL LOGGED] read_file with args={'file_path': '/home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/consolidator.py'}
+2026-04-19 23:37:26,818 - neuralcore - DEBUG - [RECORDING FULL] read_file | original=19,052 chars | after_clean=19,052 chars
+Preview:
+import re
+import os
+import time
+import asyncio
+import pandas as pd
+import numpy as np
+import lightgbm as lgb
+import json
+from pathlib import Path
+from typing import Any, List, Dict, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor
+from neuralcore.utils.prompt_builder import PromptBuilder
+
+from neuralcore.utils.logger import Logger
+from neuralcore.utils.search import cosine_sim, keyword_score
+from neuralcore.cognition.items import KnowledgeItem
+
+logger = Logger.get_logger()
+
+
+class KnowledgeConsolidator:
+    def __init__(self, agent, max_workers: int = 4):
+        self.agent = ...
+2026-04-19 23:37:27,185 - neuralcore - INFO - ✅ Added 8 clean chunks for tool_outcome_5508899248955804253 | source=tool_outcome
+2026-04-19 23:37:27,185 - neuralcore - INFO - ✅ Recorded full tool outcome: read_file (19,052 chars)
+2026-04-19 23:37:27,185 - neuralcore - INFO - [ACTION SUCCESS] read_file | success=True
+2026-04-19 23:37:27,186 - neuralcore - INFO - [MULTI-STEP] Sub-task 2 complete → advancing
+2026-04-19 23:37:27,186 - neuralcore - DEBUG - AgentState → loop signal added: restart (target=goal_driven_loop)
+2026-04-19 23:37:27,186 - neuralcore - DEBUG - AgentState → soft_restart flag set to True
+2026-04-19 23:37:27,186 - neuralcore - DEBUG - AgentState → FindTool tracking cleared
+2026-04-19 23:37:27,186 - neuralcore - INFO - 🔄 Loop restart requested → [MULTI-STEP] Sub-task 2 complete → advancing (target_loop=goal_driven_loop)
+2026-04-19 23:37:27,186 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:37:27,186 - neuralcore - DEBUG - [UI] PHASE_CHANGED: restarting_loop
+2026-04-19 23:37:27,186 - neuralcore - DEBUG - [goal_driven_loop] iteration 7
+2026-04-19 23:37:27,187 - neuralcore - DEBUG - AgentState → cleared 1 pending loop signal(s)
+2026-04-19 23:37:27,187 - neuralcore - INFO - [LOOP SIGNAL] 'restart' received for loop 'goal_driven_loop' | [MULTI-STEP] Sub-task 2 complete → advancing
+2026-04-19 23:37:27,187 - neuralcore - DEBUG - [UI] Event: loop_restart
+2026-04-19 23:37:27,187 - neuralcore - DEBUG - AgentState → FindTool tracking cleared
+2026-04-19 23:37:27,187 - neuralcore - DEBUG - AgentState → soft_restart flag set to True
+2026-04-19 23:37:27,187 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:37:27,187 - neuralcore - DEBUG - [UI] PHASE_CHANGED: thinking
+2026-04-19 23:37:27,187 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:37:27,187 - neuralcore - DEBUG - [UI] PHASE_CHANGED: searching_tools
+2026-04-19 23:37:27,187 - neuralcore - DEBUG - provide_context called | query='You are executing **ONE SPECIFIC SUB-TASK ONLY**. Ignore everything else.
+
+        ORIGINAL USER REQ...' | chat=False | lightweight_agentic=True | has_state=True
+2026-04-19 23:37:27,187 - neuralcore - DEBUG - → Entering AGENTIC mode
+2026-04-19 23:37:27,187 - neuralcore - DEBUG - → Using IMPROVED LIGHTWEIGHT agentic context (long-running mode)
+2026-04-19 23:37:27,189 - neuralcore - DEBUG - [BROAD] START | query='You are executing **ONE SPECIFIC SUB-TASK ONLY**. Ignore everything else.
+
+        ORIGINAL USER REQ...' | KB_size=32
+2026-04-19 23:37:27,197 - neuralcore - DEBUG - [BROAD] Dense ranked: 32 items
+2026-04-19 23:37:27,224 - neuralcore - DEBUG - Rebuilt TF-IDF: (32, 7035)
+2026-04-19 23:37:27,225 - neuralcore - DEBUG - [BROAD] Sparse ranked: 32 items
+2026-04-19 23:37:27,225 - neuralcore - DEBUG - [BOOST] Detected mentions: ['home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/memory.py', 'home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/consolidator.py', 'home/user/Documents/neuroscience.pdf', 'report.md', 'U.S.A', 'neuralcore.utils', 'home/user/Dev/AI/ProjectNexus/NeuralCore/report.md', 'memory.py', 'consolidator.py']
+2026-04-19 23:37:27,227 - neuralcore - DEBUG - [BOOST] Applied boosts to 3 tool outcomes
+2026-04-19 23:37:27,227 - neuralcore - DEBUG - [BROAD] END → returning 32 broad candidates (top RRF score: 5.0328)
+2026-04-19 23:37:27,227 - neuralcore - DEBUG - [RANKED_RETRIEVE] Broad candidates: 32
+2026-04-19 23:37:27,227 - neuralcore - DEBUG - [RANKED] No trained reranker yet → using hybrid broad selection
+2026-04-19 23:37:27,236 - neuralcore - DEBUG - → LIGHTWEIGHT MODE: skipping full conversation history
+2026-04-19 23:37:27,241 - neuralcore - DEBUG - Final context before prune → 3336 tokens
+2026-04-19 23:37:27,241 - neuralcore - DEBUG - provide_context finished | messages=3 | lightweight=True | tokens=3336
+2026-04-19 23:37:31,880 - neuralcore - DEBUG - [ACTIONSET RESOLVE] Found executor for 'read_file'
+2026-04-19 23:37:31,880 - neuralcore - INFO - [ACTION START] read_file
+2026-04-19 23:37:31,880 - neuralcore - DEBUG - [ACTION INPUT] read_file kwargs={'file_path': '/home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/memory.py'}
+2026-04-19 23:37:31,880 - neuralcore - DEBUG - [ACTION BOUND] read_file → bound to Agent (agent_id=agent_002)
+2026-04-19 23:37:31,880 - neuralcore - DEBUG - [ACTION AWAITING] read_file
+2026-04-19 23:37:31,880 - neuralcore - INFO - Tool 'read_file' executed → success=True
+2026-04-19 23:37:31,880 - neuralcore - DEBUG - [TOOL CALL LOGGED] read_file with args={'file_path': '/home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/memory.py'}
+2026-04-19 23:37:31,880 - neuralcore - INFO - [TOOL DEDUP] Skipping KB recording for duplicate call: read_file with args={'file_path': '/home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/memory.py'}
+2026-04-19 23:37:31,880 - neuralcore - INFO - [ACTION SUCCESS] read_file | success=True
+2026-04-19 23:37:31,917 - neuralcore - INFO - [MULTI-STEP] Sub-task 3 complete → advancing
+2026-04-19 23:37:31,917 - neuralcore - DEBUG - AgentState → loop signal added: restart (target=goal_driven_loop)
+2026-04-19 23:37:31,917 - neuralcore - DEBUG - AgentState → soft_restart flag set to True
+2026-04-19 23:37:31,917 - neuralcore - DEBUG - AgentState → FindTool tracking cleared
+2026-04-19 23:37:31,917 - neuralcore - INFO - 🔄 Loop restart requested → [MULTI-STEP] Sub-task 3 complete → advancing (target_loop=goal_driven_loop)
+2026-04-19 23:37:31,917 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:37:31,917 - neuralcore - DEBUG - [UI] PHASE_CHANGED: restarting_loop
+2026-04-19 23:37:31,917 - neuralcore - DEBUG - [goal_driven_loop] iteration 8
+2026-04-19 23:37:31,917 - neuralcore - DEBUG - AgentState → cleared 1 pending loop signal(s)
+2026-04-19 23:37:31,917 - neuralcore - INFO - [LOOP SIGNAL] 'restart' received for loop 'goal_driven_loop' | [MULTI-STEP] Sub-task 3 complete → advancing
+2026-04-19 23:37:31,917 - neuralcore - DEBUG - [UI] Event: loop_restart
+2026-04-19 23:37:31,917 - neuralcore - DEBUG - AgentState → FindTool tracking cleared
+2026-04-19 23:37:31,917 - neuralcore - DEBUG - AgentState → soft_restart flag set to True
+2026-04-19 23:37:31,917 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:37:31,917 - neuralcore - DEBUG - [UI] PHASE_CHANGED: thinking
+2026-04-19 23:37:31,917 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:37:31,918 - neuralcore - DEBUG - [UI] PHASE_CHANGED: searching_tools
+2026-04-19 23:37:31,918 - neuralcore - DEBUG - provide_context called | query='You are executing **ONE SPECIFIC SUB-TASK ONLY**. Ignore everything else.
+
+        ORIGINAL USER REQ...' | chat=False | lightweight_agentic=True | has_state=True
+2026-04-19 23:37:31,918 - neuralcore - DEBUG - → Entering AGENTIC mode
+2026-04-19 23:37:31,918 - neuralcore - DEBUG - → Using IMPROVED LIGHTWEIGHT agentic context (long-running mode)
+2026-04-19 23:37:31,919 - neuralcore - DEBUG - [BROAD] START | query='You are executing **ONE SPECIFIC SUB-TASK ONLY**. Ignore everything else.
+
+        ORIGINAL USER REQ...' | KB_size=32
+2026-04-19 23:37:31,927 - neuralcore - DEBUG - [BROAD] Dense ranked: 32 items
+2026-04-19 23:37:31,938 - neuralcore - DEBUG - [BROAD] Sparse ranked: 32 items
+2026-04-19 23:37:31,938 - neuralcore - DEBUG - [BOOST] Detected mentions: ['home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/memory.py', 'home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/consolidator.py', 'home/user/Documents/neuroscience.pdf', 'report.md', 'U.S.A', 'neuralcore.utils', 'home/user/Dev/AI/ProjectNexus/NeuralCore/report.md']
+2026-04-19 23:37:31,939 - neuralcore - DEBUG - [BOOST] Applied boosts to 3 tool outcomes
+2026-04-19 23:37:31,939 - neuralcore - DEBUG - [BROAD] END → returning 32 broad candidates (top RRF score: 5.0328)
+2026-04-19 23:37:31,939 - neuralcore - DEBUG - [RANKED_RETRIEVE] Broad candidates: 32
+2026-04-19 23:37:31,939 - neuralcore - DEBUG - [RANKED] No trained reranker yet → using hybrid broad selection
+2026-04-19 23:37:31,950 - neuralcore - DEBUG - → LIGHTWEIGHT MODE: skipping full conversation history
+2026-04-19 23:37:31,954 - neuralcore - DEBUG - Final context before prune → 3397 tokens
+2026-04-19 23:37:31,954 - neuralcore - DEBUG - provide_context finished | messages=3 | lightweight=True | tokens=3397
+2026-04-19 23:37:35,957 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:37:35,957 - neuralcore - DEBUG - [UI] PHASE_CHANGED: handling_findtool
+2026-04-19 23:37:35,957 - neuralcore - DEBUG - AgentState → FindTool recorded (total=1, loop=1)
+2026-04-19 23:37:35,957 - neuralcore - DEBUG - AgentState → loop signal added: restart (target=goal_driven_loop)
+2026-04-19 23:37:35,957 - neuralcore - DEBUG - AgentState → soft_restart flag set to True
+2026-04-19 23:37:35,957 - neuralcore - DEBUG - AgentState → FindTool tracking cleared
+2026-04-19 23:37:35,957 - neuralcore - INFO - 🔄 Loop restart requested → FindTool called (target_loop=goal_driven_loop)
+2026-04-19 23:37:35,957 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:37:35,957 - neuralcore - DEBUG - [UI] PHASE_CHANGED: restarting_loop
+2026-04-19 23:37:35,957 - neuralcore - DEBUG - [goal_driven_loop] iteration 9
+2026-04-19 23:37:35,957 - neuralcore - DEBUG - AgentState → cleared 1 pending loop signal(s)
+2026-04-19 23:37:35,957 - neuralcore - INFO - [LOOP SIGNAL] 'restart' received for loop 'goal_driven_loop' | FindTool called
+2026-04-19 23:37:35,957 - neuralcore - DEBUG - [UI] Event: loop_restart
+2026-04-19 23:37:35,957 - neuralcore - DEBUG - AgentState → FindTool tracking cleared
+2026-04-19 23:37:35,957 - neuralcore - DEBUG - AgentState → soft_restart flag set to True
+2026-04-19 23:37:35,957 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:37:35,957 - neuralcore - DEBUG - [UI] PHASE_CHANGED: thinking
+2026-04-19 23:37:35,957 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:37:35,957 - neuralcore - DEBUG - [UI] PHASE_CHANGED: searching_tools
+2026-04-19 23:37:35,958 - neuralcore - DEBUG - provide_context called | query='You are executing **ONE SPECIFIC SUB-TASK ONLY**. Ignore everything else.
+
+        ORIGINAL USER REQ...' | chat=False | lightweight_agentic=True | has_state=True
+2026-04-19 23:37:35,958 - neuralcore - DEBUG - → Entering AGENTIC mode
+2026-04-19 23:37:35,958 - neuralcore - DEBUG - → Using IMPROVED LIGHTWEIGHT agentic context (long-running mode)
+2026-04-19 23:37:35,960 - neuralcore - DEBUG - [BROAD] START | query='You are executing **ONE SPECIFIC SUB-TASK ONLY**. Ignore everything else.
+
+        ORIGINAL USER REQ...' | KB_size=32
+2026-04-19 23:37:35,968 - neuralcore - DEBUG - [BROAD] Dense ranked: 32 items
+2026-04-19 23:37:35,980 - neuralcore - DEBUG - [BROAD] Sparse ranked: 32 items
+2026-04-19 23:37:35,980 - neuralcore - DEBUG - [BOOST] Detected mentions: ['home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/memory.py', 'home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/consolidator.py', 'home/user/Documents/neuroscience.pdf', 'report.md', 'U.S.A', 'neuralcore.utils', 'home/user/Dev/AI/ProjectNexus/NeuralCore/report.md']
+2026-04-19 23:37:35,981 - neuralcore - DEBUG - [BOOST] Applied boosts to 3 tool outcomes
+2026-04-19 23:37:35,981 - neuralcore - DEBUG - [BROAD] END → returning 32 broad candidates (top RRF score: 5.0328)
+2026-04-19 23:37:35,981 - neuralcore - DEBUG - [RANKED_RETRIEVE] Broad candidates: 32
+2026-04-19 23:37:35,981 - neuralcore - DEBUG - [RANKED] No trained reranker yet → using hybrid broad selection
+2026-04-19 23:37:35,992 - neuralcore - DEBUG - → LIGHTWEIGHT MODE: skipping full conversation history
+2026-04-19 23:37:35,997 - neuralcore - DEBUG - Final context before prune → 3397 tokens
+2026-04-19 23:37:35,997 - neuralcore - DEBUG - provide_context finished | messages=3 | lightweight=True | tokens=3397
+2026-04-19 23:37:40,383 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:37:40,384 - neuralcore - DEBUG - [UI] PHASE_CHANGED: handling_findtool
+2026-04-19 23:37:40,384 - neuralcore - DEBUG - AgentState → FindTool recorded (total=1, loop=1)
+2026-04-19 23:37:40,384 - neuralcore - DEBUG - AgentState → loop signal added: restart (target=goal_driven_loop)
+2026-04-19 23:37:40,384 - neuralcore - DEBUG - AgentState → soft_restart flag set to True
+2026-04-19 23:37:40,384 - neuralcore - DEBUG - AgentState → FindTool tracking cleared
+2026-04-19 23:37:40,384 - neuralcore - INFO - 🔄 Loop restart requested → FindTool called (target_loop=goal_driven_loop)
+2026-04-19 23:37:40,384 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:37:40,384 - neuralcore - DEBUG - [UI] PHASE_CHANGED: restarting_loop
+2026-04-19 23:37:40,384 - neuralcore - DEBUG - [goal_driven_loop] iteration 10
+2026-04-19 23:37:40,384 - neuralcore - DEBUG - AgentState → cleared 1 pending loop signal(s)
+2026-04-19 23:37:40,384 - neuralcore - INFO - [LOOP SIGNAL] 'restart' received for loop 'goal_driven_loop' | FindTool called
+2026-04-19 23:37:40,384 - neuralcore - DEBUG - [UI] Event: loop_restart
+2026-04-19 23:37:40,384 - neuralcore - DEBUG - AgentState → FindTool tracking cleared
+2026-04-19 23:37:40,384 - neuralcore - DEBUG - AgentState → soft_restart flag set to True
+2026-04-19 23:37:40,384 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:37:40,384 - neuralcore - DEBUG - [UI] PHASE_CHANGED: thinking
+2026-04-19 23:37:40,384 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:37:40,384 - neuralcore - DEBUG - [UI] PHASE_CHANGED: searching_tools
+2026-04-19 23:37:40,384 - neuralcore - DEBUG - provide_context called | query='You are executing **ONE SPECIFIC SUB-TASK ONLY**. Ignore everything else.
+
+        ORIGINAL USER REQ...' | chat=False | lightweight_agentic=True | has_state=True
+2026-04-19 23:37:40,384 - neuralcore - DEBUG - → Entering AGENTIC mode
+2026-04-19 23:37:40,384 - neuralcore - DEBUG - → Using IMPROVED LIGHTWEIGHT agentic context (long-running mode)
+2026-04-19 23:37:40,386 - neuralcore - DEBUG - [BROAD] START | query='You are executing **ONE SPECIFIC SUB-TASK ONLY**. Ignore everything else.
+
+        ORIGINAL USER REQ...' | KB_size=32
+2026-04-19 23:37:40,394 - neuralcore - DEBUG - [BROAD] Dense ranked: 32 items
+2026-04-19 23:37:40,407 - neuralcore - DEBUG - [ACTIONSET RESOLVE] Found executor for 'FindTool'
+2026-04-19 23:37:40,407 - neuralcore - INFO - [ACTION START] FindTool
+2026-04-19 23:37:40,407 - neuralcore - DEBUG - [ACTION INPUT] FindTool kwargs={'query': 'write_file or write text to file'}
+2026-04-19 23:37:40,407 - neuralcore - DEBUG - [ACTION BOUND] FindTool → NO AGENT BOUND
+2026-04-19 23:37:40,407 - neuralcore - DEBUG - [ACTION AWAITING] FindTool
+2026-04-19 23:37:40,407 - neuralcore - INFO - ToolBrowser search executed: query='write_file or write text to file'
+2026-04-19 23:37:40,410 - neuralcore - INFO - [ACTIONSET ADD] write_file
+2026-04-19 23:37:40,410 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=5
+2026-04-19 23:37:40,410 - neuralcore - DEBUG - [ACTION BIND] write_file → Agent (agent_id=agent_002)
+2026-04-19 23:37:40,410 - neuralcore - DEBUG - [BIND ON ADD] write_file → agent bound at load time
+2026-04-19 23:37:40,410 - neuralcore - DEBUG - Added tool 'write_file' to DynamicCore (origin: FileEditingTools)
+2026-04-19 23:37:40,410 - neuralcore - INFO - [ACTIONSET ADD] move
+2026-04-19 23:37:40,410 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=6
+2026-04-19 23:37:40,410 - neuralcore - DEBUG - [ACTION BIND] move → Agent (agent_id=agent_002)
+2026-04-19 23:37:40,410 - neuralcore - DEBUG - [BIND ON ADD] move → agent bound at load time
+2026-04-19 23:37:40,410 - neuralcore - DEBUG - Added tool 'move' to DynamicCore (origin: TerminalTools)
+2026-04-19 23:37:40,410 - neuralcore - INFO - Loaded 2 individual tools: write_file, move
+2026-04-19 23:37:40,410 - neuralcore - INFO - ToolBrowser: loaded 3 tools
+2026-04-19 23:37:40,410 - neuralcore - INFO - [ACTION SUCCESS] FindTool | success=True
+2026-04-19 23:37:40,410 - neuralcore - DEBUG - [BROAD] Sparse ranked: 32 items
+2026-04-19 23:37:40,411 - neuralcore - DEBUG - [BOOST] Detected mentions: ['home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/memory.py', 'home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/consolidator.py', 'home/user/Documents/neuroscience.pdf', 'report.md', 'U.S.A', 'neuralcore.utils', 'home/user/Dev/AI/ProjectNexus/NeuralCore/report.md']
+2026-04-19 23:37:40,412 - neuralcore - DEBUG - [BOOST] Applied boosts to 3 tool outcomes
+2026-04-19 23:37:40,412 - neuralcore - DEBUG - [BROAD] END → returning 32 broad candidates (top RRF score: 5.0328)
+2026-04-19 23:37:40,412 - neuralcore - DEBUG - [RANKED_RETRIEVE] Broad candidates: 32
+2026-04-19 23:37:40,412 - neuralcore - DEBUG - [RANKED] No trained reranker yet → using hybrid broad selection
+2026-04-19 23:37:40,421 - neuralcore - DEBUG - → LIGHTWEIGHT MODE: skipping full conversation history
+2026-04-19 23:37:40,425 - neuralcore - DEBUG - Final context before prune → 3397 tokens
+2026-04-19 23:37:40,425 - neuralcore - DEBUG - provide_context finished | messages=3 | lightweight=True | tokens=3397
+2026-04-19 23:37:45,136 - neuralcore - DEBUG - [ACTIONSET RESOLVE] Found executor for 'FindTool'
+2026-04-19 23:37:45,136 - neuralcore - INFO - [ACTION START] FindTool
+2026-04-19 23:37:45,136 - neuralcore - DEBUG - [ACTION INPUT] FindTool kwargs={'query': 'write file markdown report'}
+2026-04-19 23:37:45,136 - neuralcore - DEBUG - [ACTION BOUND] FindTool → NO AGENT BOUND
+2026-04-19 23:37:45,136 - neuralcore - DEBUG - [ACTION AWAITING] FindTool
+2026-04-19 23:37:45,136 - neuralcore - INFO - ToolBrowser search executed: query='write file markdown report'
+2026-04-19 23:37:45,138 - neuralcore - INFO - [ACTIONSET ADD] find_and_read_file_internal
+2026-04-19 23:37:45,139 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=7
+2026-04-19 23:37:45,139 - neuralcore - DEBUG - [ACTION BIND] find_and_read_file_internal → Agent (agent_id=agent_002)
+2026-04-19 23:37:45,139 - neuralcore - DEBUG - [SEQUENCE BIND] Agent bound to sequence 'find_and_read_file_internal'
+2026-04-19 23:37:45,139 - neuralcore - DEBUG - [BIND ON ADD] find_and_read_file_internal → agent bound at load time
+2026-04-19 23:37:45,139 - neuralcore - DEBUG - Added tool 'find_and_read_file_internal' to DynamicCore (origin: FileEditingTools)
+2026-04-19 23:37:45,139 - neuralcore - INFO - Loaded 1 individual tools: find_and_read_file_internal
+2026-04-19 23:37:45,139 - neuralcore - INFO - ToolBrowser: loaded 3 tools
+2026-04-19 23:37:45,139 - neuralcore - INFO - [ACTION SUCCESS] FindTool | success=True
+2026-04-19 23:38:16,246 - neuralcore - DEBUG - [ACTIONSET RESOLVE] Found executor for 'write_file'
+2026-04-19 23:38:16,246 - neuralcore - INFO - [ACTION START] write_file
+2026-04-19 23:38:16,246 - neuralcore - DEBUG - [ACTION INPUT] write_file kwargs={'file_path': '/home/user/Dev/AI/ProjectNexus/NeuralCore/report.md', 'content': '# Comparative Analysis: Neuroscience Concepts vs. NeuralCore Implementation\n\n## Executive Summary\n\nThis report provides a detailed comparative analysis between foundational neuroscience concepts from Purves et al.\'s *Neuroscience* (3rd Edition) and the implementation details found in `memory.py` and `consolidator.py` within the NeuralCore project. The analysis bridges theoretical frameworks of memory consolidation, synaptic plasticity, and network dynamics with practical software architecture, highlighting alignments, abstractions, and emergent computational properties.\n\n---\n\n## 1. Memory Consolidation Frameworks\n\n### 1.1 Neuroscience Perspective\nPurves et al. describe **memory consolidation** as a multi-phase process involving:\n- **Synaptic consolidation**: Rapid, short-term stabilization of memory traces via protein synthesis and synaptic strengthening.\n- **Systems consolidation**: A longer-term process where memories transition from the hippocampus to neocortical storage.\n\n> *"Memory is not a single entity but a distributed representation that undergoes transformation over time."* — Purves et al., Ch. 12\n\n### 1.2 Implementation in `consolidator.py`\nThe `KnowledgeConsolidator` class models this process through:\n- **Temporal decay and reinforcement**: Implements a learning rate schedule (`lr`) with exponential decay, mimicking synaptic weakening over time.\n- **Batch consolidation**: Uses batched processing of knowledge items, reflecting the idea that consolidation occurs in discrete but overlapping phases.\n\n**Comparison**: The code\'s use of decay and batch updates closely mirrors the biological concept of systems-level stabilization. The `consolidator` effectively models the transition from rapid, transient storage (like hippocampal binding) to more durable representations.\n\n---\n\n## 2. Synaptic Plasticity and Learning Rules\n\n### 2.1 Neuroscience Perspective\nKey mechanisms:\n- **Long-Term Potentiation (LTP)**: Strengthening of synapses through high-frequency stimulation.\n- **Hebbian Learning**: "Cells that fire together, wire together."\n- **Homeostatic Plasticity**: Global scaling to prevent runaway excitation.\n\n### 2.2 Implementation in `memory.py`\nThe `MemoryManager` implements:\n- **Reinforcement learning via reward signals**: The `_apply_reward` method updates knowledge weights based on external feedback, mimicking LTP-like strengthening.\n- **Decay and forgetting**: A `forget_factor` parameter modulates weight decay, modeling homeostatic mechanisms.\n\n**Comparison**: While not a direct implementation of Hebbian rules, the reward-based updates approximate Hebbian learning by reinforcing associations that yield positive outcomes. The decay mechanism captures the dynamic balance between strengthening and weakening connections.\n\n---\n\n## 3. Distributed Representation and Network Dynamics\n\n### 3.1 Neuroscience Perspective\n- **Distributed coding**: Information is encoded across populations of neurons rather than single units.\n- **Attractor dynamics**: Networks settle into stable states (attractors) that represent memory patterns.\n- **Resonance and oscillations**: Neural oscillations coordinate activity across regions, aiding in memory binding and retrieval.\n\n### 3.2 Implementation in `memory.py` & `consolidator.py`\n- **Distributed embeddings**: The use of vector representations (`TextEmbedding`, TF-IDF) reflects distributed coding principles.\n- **State-based storage**: `AgentState` and `ContextManager` maintain persistent memory states, akin to attractor basins.\n- **Temporal attention mechanisms**: Time-aware context windows (`SLICE_SIZE`, `NUM_MSG`) emulate the role of oscillatory timing in binding information.\n\n**Comparison**: The software architecture mirrors distributed, state-based neural dynamics, where memory is not stored in a single "slot" but emerges from interactions across representations and contexts.\n\n---\n\n## 4. Hierarchical Processing and Systems Consolidation\n\n### 4.1 Neuroscience Perspective\n- **Hierarchical processing**: Information flows through multiple levels (e.g., sensory → association → prefrontal).\n- **Systems consolidation**: Shifts memory storage from transient to permanent systems over time.\n\n### 4.2 Implementation in `consolidator.py`\n- **Multi-level knowledge abstraction**: The `KnowledgeConsolidator` operates on a hierarchy: raw text → embeddings → consolidated summaries.\n- **Iterative refinement**: Repeated passes over data refine representations, akin to systems consolidation.\n\n**Comparison**: This mirrors the biological shift from rapid encoding (hippocampal) to stable storage (neocortical), implemented through iterative vector transformations and summarization.\n\n---\n\n## 5. Temporal Dynamics and Replay Mechanisms\n\n### 5.1 Neuroscience Perspective\n- **Sleep-dependent replay**: Neural activity replays during sleep, strengthening memories.\n- **Temporal binding**: Precise timing coordinates across brain regions to bind events into coherent sequences.\n\n### 5.2 Implementation in `memory.py`\n- **Time-aware context windows**: The `ContextManager` tracks message timestamps and attention spans.\n- **Replay-like reprocessing**: `reprocess` method iterates over old data, mimicking replay mechanisms during "offline" states.\n\n**Comparison**: The temporal indexing and reprocessing logic in the code approximate biological replay systems, allowing the model to strengthen previously encoded representations when external stimuli are sparse.\n\n---\n\n## 6. Resource Constraints and Efficient Coding\n\n### 6.1 Neuroscience Perspective\n- **Metabolic efficiency**: The brain optimizes energy use; redundant circuits are pruned.\n- **Sparse coding**: Only a small fraction of neurons fire at any given time to represent stimuli.\n\n### 6.2 Implementation in `consolidator.py`\n- **Chunked processing**: Data is split into manageable chunks (`CHUNK_SIZE_TOKENS = 768`) with overlap, reducing memory overhead.\n- **Vector sparsity**: TF-IDF and embedding layers produce sparse or low-dimensional vectors, reflecting efficient coding.\n\n**Comparison**: The chunking strategy and vector representations emulate the brain\'s sparse, energy-efficient coding, enabling scalable learning within limited computational resources.\n\n---\n\n## 7. Summary of Key Alignments and Abstractions\n\n| Neuroscience Concept | Software Implementation | Notes |\n|---------------------|------------------------|-------|\n| Synaptic Plasticity | Reward-based weight updates | Approximate Hebbian/LTP rules |\n| Distributed Coding | Vector embeddings & TF-IDF | Population-like coding |\n| Attractor Dynamics | Persistent `AgentState` / Context windows | Stateful, stable representations |\n| Systems Consolidation | Iterative refinement & batching | Mimics hippocampal → neocortical shift |\n| Temporal Replay | Time-aware reprocessing (`reprocess`) | Sleep-like offline consolidation |\n| Sparse/Efficient Coding | Chunked processing & vector sparsity | Resource-optimized learning |\n\n---\n\n## 8. Conclusion\n\nThe `memory.py` and `consolidator.py` modules embody a **computational neuroscience-inspired architecture**, where software structures mirror biological principles of plasticity, distributed representation, temporal dynamics, and hierarchical processing. While not a literal emulation of the brain, the implementations capture the *functional essence* of memory systems as described in Purves et al., translating abstract concepts into practical, scalable code.\n\nFuture enhancements could further align with neuroscience by:\n- Implementing explicit **Hebbian learning rules**.\n- Adding **oscillatory timing mechanisms** (e.g., theta-gamma coupling).\n- Exploring **predictive coding** frameworks for memory anticipation and error-driven learning.\n\n---\n\n*Report generated as part of the NeuralCore Project.*  \n*Based on Purves et al., "Neuroscience" (3rd Edition).*\n', 'append': False}
+2026-04-19 23:38:16,246 - neuralcore - DEBUG - [ACTION BOUND] write_file → bound to Agent (agent_id=agent_002)
+2026-04-19 23:38:16,246 - neuralcore - DEBUG - [ACTION AWAITING] write_file
+2026-04-19 23:38:16,247 - neuralcore - INFO - Tool 'write_file' executed → success=True
+2026-04-19 23:38:16,247 - neuralcore - DEBUG - [TOOL CALL LOGGED] write_file with args={'file_path': '/home/user/Dev/AI/ProjectNexus/NeuralCore/report.md', 'content': '# Comparative Analysis: Neuroscience Concepts vs. NeuralCore Implementation\n\n## Executive Summary\n\nThis report provides a detailed comparative analysis between foundational neuroscience concepts from Purves et al.\'s *Neuroscience* (3rd Edition) and the implementation details found in `memory.py` and `consolidator.py` within the NeuralCore project. The analysis bridges theoretical frameworks of memory consolidation, synaptic plasticity, and network dynamics with practical software architecture, highlighting alignments, abstractions, and emergent computational properties.\n\n---\n\n## 1. Memory Consolidation Frameworks\n\n### 1.1 Neuroscience Perspective\nPurves et al. describe **memory consolidation** as a multi-phase process involving:\n- **Synaptic consolidation**: Rapid, short-term stabilization of memory traces via protein synthesis and synaptic strengthening.\n- **Systems consolidation**: A longer-term process where memories transition from the hippocampus to neocortical storage.\n\n> *"Memory is not a single entity but a distributed representation that undergoes transformation over time."* — Purves et al., Ch. 12\n\n### 1.2 Implementation in `consolidator.py`\nThe `KnowledgeConsolidator` class models this process through:\n- **Temporal decay and reinforcement**: Implements a learning rate schedule (`lr`) with exponential decay, mimicking synaptic weakening over time.\n- **Batch consolidation**: Uses batched processing of knowledge items, reflecting the idea that consolidation occurs in discrete but overlapping phases.\n\n**Comparison**: The code\'s use of decay and batch updates closely mirrors the biological concept of systems-level stabilization. The `consolidator` effectively models the transition from rapid, transient storage (like hippocampal binding) to more durable representations.\n\n---\n\n## 2. Synaptic Plasticity and Learning Rules\n\n### 2.1 Neuroscience Perspective\nKey mechanisms:\n- **Long-Term Potentiation (LTP)**: Strengthening of synapses through high-frequency stimulation.\n- **Hebbian Learning**: "Cells that fire together, wire together."\n- **Homeostatic Plasticity**: Global scaling to prevent runaway excitation.\n\n### 2.2 Implementation in `memory.py`\nThe `MemoryManager` implements:\n- **Reinforcement learning via reward signals**: The `_apply_reward` method updates knowledge weights based on external feedback, mimicking LTP-like strengthening.\n- **Decay and forgetting**: A `forget_factor` parameter modulates weight decay, modeling homeostatic mechanisms.\n\n**Comparison**: While not a direct implementation of Hebbian rules, the reward-based updates approximate Hebbian learning by reinforcing associations that yield positive outcomes. The decay mechanism captures the dynamic balance between strengthening and weakening connections.\n\n---\n\n## 3. Distributed Representation and Network Dynamics\n\n### 3.1 Neuroscience Perspective\n- **Distributed coding**: Information is encoded across populations of neurons rather than single units.\n- **Attractor dynamics**: Networks settle into stable states (attractors) that represent memory patterns.\n- **Resonance and oscillations**: Neural oscillations coordinate activity across regions, aiding in memory binding and retrieval.\n\n### 3.2 Implementation in `memory.py` & `consolidator.py`\n- **Distributed embeddings**: The use of vector representations (`TextEmbedding`, TF-IDF) reflects distributed coding principles.\n- **State-based storage**: `AgentState` and `ContextManager` maintain persistent memory states, akin to attractor basins.\n- **Temporal attention mechanisms**: Time-aware context windows (`SLICE_SIZE`, `NUM_MSG`) emulate the role of oscillatory timing in binding information.\n\n**Comparison**: The software architecture mirrors distributed, state-based neural dynamics, where memory is not stored in a single "slot" but emerges from interactions across representations and contexts.\n\n---\n\n## 4. Hierarchical Processing and Systems Consolidation\n\n### 4.1 Neuroscience Perspective\n- **Hierarchical processing**: Information flows through multiple levels (e.g., sensory → association → prefrontal).\n- **Systems consolidation**: Shifts memory storage from transient to permanent systems over time.\n\n### 4.2 Implementation in `consolidator.py`\n- **Multi-level knowledge abstraction**: The `KnowledgeConsolidator` operates on a hierarchy: raw text → embeddings → consolidated summaries.\n- **Iterative refinement**: Repeated passes over data refine representations, akin to systems consolidation.\n\n**Comparison**: This mirrors the biological shift from rapid encoding (hippocampal) to stable storage (neocortical), implemented through iterative vector transformations and summarization.\n\n---\n\n## 5. Temporal Dynamics and Replay Mechanisms\n\n### 5.1 Neuroscience Perspective\n- **Sleep-dependent replay**: Neural activity replays during sleep, strengthening memories.\n- **Temporal binding**: Precise timing coordinates across brain regions to bind events into coherent sequences.\n\n### 5.2 Implementation in `memory.py`\n- **Time-aware context windows**: The `ContextManager` tracks message timestamps and attention spans.\n- **Replay-like reprocessing**: `reprocess` method iterates over old data, mimicking replay mechanisms during "offline" states.\n\n**Comparison**: The temporal indexing and reprocessing logic in the code approximate biological replay systems, allowing the model to strengthen previously encoded representations when external stimuli are sparse.\n\n---\n\n## 6. Resource Constraints and Efficient Coding\n\n### 6.1 Neuroscience Perspective\n- **Metabolic efficiency**: The brain optimizes energy use; redundant circuits are pruned.\n- **Sparse coding**: Only a small fraction of neurons fire at any given time to represent stimuli.\n\n### 6.2 Implementation in `consolidator.py`\n- **Chunked processing**: Data is split into manageable chunks (`CHUNK_SIZE_TOKENS = 768`) with overlap, reducing memory overhead.\n- **Vector sparsity**: TF-IDF and embedding layers produce sparse or low-dimensional vectors, reflecting efficient coding.\n\n**Comparison**: The chunking strategy and vector representations emulate the brain\'s sparse, energy-efficient coding, enabling scalable learning within limited computational resources.\n\n---\n\n## 7. Summary of Key Alignments and Abstractions\n\n| Neuroscience Concept | Software Implementation | Notes |\n|---------------------|------------------------|-------|\n| Synaptic Plasticity | Reward-based weight updates | Approximate Hebbian/LTP rules |\n| Distributed Coding | Vector embeddings & TF-IDF | Population-like coding |\n| Attractor Dynamics | Persistent `AgentState` / Context windows | Stateful, stable representations |\n| Systems Consolidation | Iterative refinement & batching | Mimics hippocampal → neocortical shift |\n| Temporal Replay | Time-aware reprocessing (`reprocess`) | Sleep-like offline consolidation |\n| Sparse/Efficient Coding | Chunked processing & vector sparsity | Resource-optimized learning |\n\n---\n\n## 8. Conclusion\n\nThe `memory.py` and `consolidator.py` modules embody a **computational neuroscience-inspired architecture**, where software structures mirror biological principles of plasticity, distributed representation, temporal dynamics, and hierarchical processing. While not a literal emulation of the brain, the implementations capture the *functional essence* of memory systems as described in Purves et al., translating abstract concepts into practical, scalable code.\n\nFuture enhancements could further align with neuroscience by:\n- Implementing explicit **Hebbian learning rules**.\n- Adding **oscillatory timing mechanisms** (e.g., theta-gamma coupling).\n- Exploring **predictive coding** frameworks for memory anticipation and error-driven learning.\n\n---\n\n*Report generated as part of the NeuralCore Project.*  \n*Based on Purves et al., "Neuroscience" (3rd Edition).*\n', 'append': False}
+2026-04-19 23:38:16,247 - neuralcore - DEBUG - [RECORDING FULL] write_file | original=76 chars | after_clean=76 chars
+Preview:
+Wrote '/home/user/Dev/AI/ProjectNexus/NeuralCore/report.md' (7832 chars)
+2026-04-19 23:38:16,255 - neuralcore - INFO - ✅ Added 1 clean chunks for tool_outcome_9136118471513858244 | source=tool_outcome
+2026-04-19 23:38:16,255 - neuralcore - INFO - ✅ Recorded full tool outcome: write_file (76 chars)
+2026-04-19 23:38:16,255 - neuralcore - INFO - [ACTION SUCCESS] write_file | success=True
+2026-04-19 23:38:16,284 - neuralcore - INFO - ✅ Goal achieved: Marker or strong completion detected + all sub-tasks done
+2026-04-19 23:38:16,284 - neuralcore - DEBUG - AgentState → loop signal added: stop (target=goal_driven_loop)
+2026-04-19 23:38:16,284 - neuralcore - INFO - ⛔ Loop stop requested → Marker or strong completion detected + all sub-tasks done (target=goal_driven_loop)
+2026-04-19 23:38:16,284 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:38:16,284 - neuralcore - DEBUG - [UI] PHASE_CHANGED: generating_final_answer
+2026-04-19 23:38:16,284 - neuralcore - DEBUG - provide_context called | query='USER ORIGINAL REQUEST: analyze /home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognitio...' | chat=False | lightweight_agentic=False | has_state=True
+2026-04-19 23:38:16,284 - neuralcore - DEBUG - → Entering AGENTIC mode
+2026-04-19 23:38:16,293 - neuralcore - DEBUG - [BROAD] START | query='USER ORIGINAL REQUEST: analyze /home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognitio...' | KB_size=33
+2026-04-19 23:38:16,354 - neuralcore - DEBUG - [BROAD] Dense ranked: 33 items
+2026-04-19 23:38:16,366 - neuralcore - DEBUG - Rebuilt TF-IDF: (33, 7062)
+2026-04-19 23:38:16,367 - neuralcore - DEBUG - [BROAD] Sparse ranked: 33 items
+2026-04-19 23:38:16,367 - neuralcore - DEBUG - [BOOST] Detected mentions: ['/home/user/Dev/AI/ProjectNexus/NeuralCore/report.md', 'home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/memory.py', 'home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/consolidator.py', 'home/user/Documents/neuroscience.pdf', 'report.md', 'neuralcore.utils', 'neuralcore.cognition.items', 'neuralcore.agents.state', 'home/user/Dev/AI/ProjectNexus/NeuralCore/report.md']
+2026-04-19 23:38:16,368 - neuralcore - DEBUG - [BOOST] Applied boosts to 3 tool outcomes
+2026-04-19 23:38:16,368 - neuralcore - DEBUG - [BROAD] END → returning 33 broad candidates (top RRF score: 15.0274)
+2026-04-19 23:38:16,369 - neuralcore - DEBUG - [RANKED_RETRIEVE] Broad candidates: 33
+2026-04-19 23:38:16,369 - neuralcore - DEBUG - [RANKED] No trained reranker yet → using hybrid broad selection
+2026-04-19 23:38:16,398 - neuralcore - DEBUG - Final context before prune → 7252 tokens
+2026-04-19 23:38:16,398 - neuralcore - DEBUG - provide_context finished | messages=4 | lightweight=False | tokens=7252
+2026-04-19 23:38:25,896 - neuralcore - DEBUG - ContextManager → AgentState synced | messages=3 | tools=5 | tasks=0
+2026-04-19 23:38:25,897 - neuralcore - DEBUG - [CONSOLIDATE] KB stats | total_tokens≈91,116 | concepts=0 | tool_outcomes=33 | large_item=True
+2026-04-19 23:38:25,897 - neuralcore - INFO - [CONSOLIDATE] Strong knowledge growth detected → tokens≈91,116 | concepts=0 | large_item=True
+2026-04-19 23:38:25,897 - neuralcore - INFO - [CONSOLIDATE] Starting extraction | goal: general task... | trace len=17
+2026-04-19 23:38:25,897 - neuralcore - DEBUG - [CONSOLIDATE] Reranking 33 candidates for concept distillation
+2026-04-19 23:38:25,897 - neuralcore - DEBUG - stop_stream() called on model=qwen3.5-9b | event_set=True
+2026-04-19 23:38:25,898 - neuralcore - DEBUG - [UI] Event: llm_response
+2026-04-19 23:38:25,900 - neuralcore - INFO - Multi-step task completed successfully → full reset
+2026-04-19 23:38:25,900 - neuralcore - DEBUG - AgentState → loaded_tools cleared
+2026-04-19 23:38:25,900 - neuralcore - DEBUG - AgentState → FindTool tracking cleared
+2026-04-19 23:38:25,900 - neuralcore - DEBUG - AgentState → soft_restart flag cleared
+2026-04-19 23:38:25,900 - neuralcore - DEBUG - AgentState → cleared 1 pending loop signal(s)
+2026-04-19 23:38:25,900 - neuralcore - DEBUG - AgentState reset complete. Goal: ''
+2026-04-19 23:38:25,900 - neuralcore - DEBUG - [goal_driven_loop] iteration 11
+2026-04-19 23:38:25,900 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:38:25,900 - neuralcore - INFO - Unloaded dynamic tools. Persistent protected. keep_discovered=False → 0 kept
+2026-04-19 23:38:28,691 - neuralcore - INFO - [MULTI-STEP] LLM decided → SIMPLE | Query: ...
+2026-04-19 23:38:28,691 - neuralcore - DEBUG - [UI] Event: phase_changed
+2026-04-19 23:38:28,691 - neuralcore - DEBUG - AgentState → loop signal added: stop (target=goal_driven_loop)
+2026-04-19 23:38:28,691 - neuralcore - INFO - ⛔ Loop stop requested → No query detected (target=goal_driven_loop)
+2026-04-19 23:38:28,691 - neuralcore - DEBUG - [goal_driven_loop] iteration 12
+2026-04-19 23:38:28,691 - neuralcore - DEBUG - AgentState → cleared 1 pending loop signal(s)
+2026-04-19 23:38:28,691 - neuralcore - INFO - [LOOP SIGNAL] 'stop' received for loop 'goal_driven_loop' | No query detected
+2026-04-19 23:38:28,691 - neuralcore - DEBUG - [UI] Event: loop_stopped
+2026-04-19 23:38:28,692 - neuralcore - DEBUG - AgentState → loop signal added: stop (target=chat_tool_loop)
+2026-04-19 23:38:28,692 - neuralcore - INFO - ⛔ Loop stop requested → Inner loop signaled loop_stopped (target=chat_tool_loop)
+2026-04-19 23:38:28,692 - neuralcore - DEBUG - [chat_tool_loop] iteration 2
+2026-04-19 23:38:28,692 - neuralcore - DEBUG - AgentState → cleared 1 pending loop signal(s)
+2026-04-19 23:38:28,692 - neuralcore - INFO - [LOOP SIGNAL] 'stop' received for loop 'chat_tool_loop' | Inner loop signaled loop_stopped
+2026-04-19 23:38:28,692 - neuralcore - DEBUG - [UI] Event: loop_stopped
+2026-04-19 23:38:28,692 - neuralcore - INFO - [CHAT TOOL LOOP] Outer loop started — persistent mode active
+2026-04-19 23:38:41,769 - neuralcore - INFO - [DISTILL] Successfully extracted 7 abstract concepts
+2026-04-19 23:38:41,826 - neuralcore - INFO - ✅ Stored 7 new abstract concepts (large item: True)
+2026-04-19 23:38:41,826 - neuralcore - INFO - [TRAINING TRIGGER] Meaningful growth detected → scheduling retrain (added=7, tokens≈91,116, concepts=0, large=True)
+2026-04-19 23:38:41,826 - neuralcore - DEBUG - [TRAINING] Only 0/20 samples — waiting
