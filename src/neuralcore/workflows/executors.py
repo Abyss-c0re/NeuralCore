@@ -218,7 +218,7 @@ async def goal_driven_task_loop(
     prev_tool_result_count = len(state.tool_results)
 
     if not current_query:
-        state.request_loop_stop(reason="No query detected", target_loop=target_loop)
+        state.request_loop_restart(reason="No query detected", target_loop=target_loop)
         return
 
     messages = await agent.context_manager.provide_context(
