@@ -368,7 +368,7 @@ class AgentState:
         self.current_workflow = "default"
         self.planned_tasks = []
 
-        logger.debug(f"AgentState reset complete. Goal: '{self.task[:80]}...'")
+        logger.debug(f"AgentState reset complete. Goal: '{self.task}'")
 
     def add_tool_result(
         self, tool_name: str, result: Any, success: bool = True
