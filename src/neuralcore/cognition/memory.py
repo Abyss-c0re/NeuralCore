@@ -1750,7 +1750,7 @@ class ContextManager:
 
         # 3. Investigation / Planning state sync (bidirectional safe)
         inv = self.investigation_state
-        state.goal = inv.get("goal", state.goal or "")
+        state.task = inv.get("goal", state.task or "")
 
         # Planned tasks from investigation + task contexts
         if hasattr(self, "_task_contexts") and self._task_contexts:
