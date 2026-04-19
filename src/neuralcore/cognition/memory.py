@@ -14,6 +14,7 @@ from neuralcore.utils.text_tokenizer import TextTokenizer
 from neuralcore.utils.search import keyword_score, cosine_sim
 from neuralcore.agents.state import AgentState
 from neuralcore.cognition.items import KnowledgeItem, Topic
+from neuralcore.cognition.consolidator import KnowledgeConsolidator
 
 # scikit-learn for sparse vectors
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -53,8 +54,8 @@ logger = Logger.get_logger()
 # CONTEXT MANAGER
 # ─────────────────────────────────────────────────────────────
 class ContextManager:
-    def __init__(self, max_tokens: int = 28000) -> None:
-        self.max_tokens = max_tokens
+    def __init__(self, agent) -> None:
+        self.max_tokens = agent.max_tokens
         clients = get_clients()
         self.client = clients.get("main")
         self.embeddings = clients.get("embeddings")
@@ -128,6 +129,7 @@ class ContextManager:
         self._last_analysis_ts = 0.0
         self.tools_executed: List[str] = []
         self.tool_call_history: List[Dict[str, Any]] = []
+        self.consolidator = KnowledgeConsolidator(self)
 
     def _init_fastembed(self, embed_config: dict):
         """Helper method to initialize FastEmbed with full path handling."""

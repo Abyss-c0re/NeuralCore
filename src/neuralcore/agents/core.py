@@ -274,7 +274,7 @@ class Agent:
 
         # ====================== INFRASTRUCTURE (never goes into state) ======================
         self.manager = DynamicActionManager(self.registry, self)
-        self.context_manager = ContextManager(self.max_tokens)
+        self.context_manager = ContextManager(self)
         self._last_sync_ts = 0.0
         # self.agent_tools = AgentActionHelper(self)
         self.workflow = WorkflowEngine(self, workflow)
