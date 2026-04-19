@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import List, Dict
+from typing import Any, Dict, List
 
 from neuralcore.utils.os_info import get_os_info
 from neuralcore.utils.logger import Logger
@@ -95,7 +95,7 @@ class PromptBuilder:
 
     Answer with **exactly one word** on its own line: CASUAL or TASK
     Do not explain. Do not add any other text."""
-    
+
     @staticmethod
     def casual_system_prompt() -> str:
         """System prompt for casual chat mode."""
@@ -655,3 +655,37 @@ class PromptBuilder:
         - Highlight any important outcomes or warnings
         - Use natural language and light emojis if appropriate
         - Keep it easy to read"""
+
+    @staticmethod
+    def abstract_concept_extraction(
+        goal: str, hypotheses: List[str], findings: List[str], relevant_items: List[Any]
+    ) -> str:
+        """Centralized prompt for higher-dimensional concept extraction.
+        Used by KnowledgeConsolidator._distill_concepts.
+        """
+        context_snippets = []
+        for item in relevant_items[:8]:
+            src = getattr(item, "source_type", "unknown")
+            content = getattr(item, "content", "")[:850]
+            if len(getattr(item, "content", "")) > 850:
+                content += "..."
+            context_snippets.append(f"[{src}] {content}")
+
+        return f"""You are an expert knowledge consolidator for a self-improving agent.
+
+        Goal: {goal}
+
+        Hypotheses: {hypotheses[-10:]}
+        Findings: {findings[-10:]}
+
+        Recent relevant observations (may include large files or tool outcomes):
+        {"\n\n".join(context_snippets)}
+
+        Extract 3-7 high-level **abstract concepts, strategies, patterns, heuristics or insights**.
+        Focus on reusable principles, causal patterns, and generalizable knowledge — not raw facts or full outputs.
+
+        Return ONLY a valid JSON array:
+        [
+        {{"name": "short name", "type": "strategy|pattern|heuristic|insight|anti_pattern", "description": "clear 2-4 sentence explanation", "score": 0.85}}
+        ]
+        """.strip()

@@ -627,12 +627,16 @@ class Agent:
             return None
 
     async def _auto_sync_state(self) -> None:
-        """Lightweight auto-sync with rate limiting (prevent spam in tight loops)."""
+        """Lightweight auto-sync with rate limiting + learning trigger."""
         now = time.time()
         if now - self._last_sync_ts < 0.3:
             return
         self._last_sync_ts = now
+
         await self.context_manager.sync_to_agent_state(self.state)
+
+        # Direct call — no wrapper needed
+        asyncio.create_task(self.context_manager.consolidator.extract_and_consolidate())
 
     async def on_background_event(self, event: str, payload: Any) -> None:
         """Generic hook for background/headless events.
@@ -896,6 +900,7 @@ class Agent:
 
         async def _background_consumer():
             await self.start_background_queue_listener()
+            await self.context_manager.consolidator.load_reranker()
             try:
                 async for event, payload in self.run(
                     user_prompt=user_prompt,
@@ -940,6 +945,7 @@ class Agent:
     ) -> AsyncIterator[Tuple[str, Any]]:
         """Delegate loop execution to the WorkflowEngine and yield events"""
         await self.start_background_queue_listener()
+        await self.context_manager.consolidator.load_reranker()
         async for event, payload in self.workflow.execute_loop(
             loop_name, initial_state, **kwargs
         ):
@@ -1148,6 +1154,7 @@ class Agent:
     ) -> AsyncIterator[Tuple[str, Any]]:
         """Main agent execution loop with full built-in confirmation support."""
         stop_event = stop_event or asyncio.Event()
+        await self.context_manager.consolidator.load_reranker()
         await self.start_background_queue_listener()
 
         system_prompt = system_prompt or self.system_prompt

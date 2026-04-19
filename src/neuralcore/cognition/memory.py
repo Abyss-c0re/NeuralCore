@@ -48,8 +48,6 @@ TOOL_OUTCOME_NO_CHUNK_THRESHOLD = 1500  # Only chunk very large tool outputs
 logger = Logger.get_logger()
 
 
-
-
 # ─────────────────────────────────────────────────────────────
 # CONTEXT MANAGER
 # ─────────────────────────────────────────────────────────────
@@ -129,7 +127,7 @@ class ContextManager:
         self._last_analysis_ts = 0.0
         self.tools_executed: List[str] = []
         self.tool_call_history: List[Dict[str, Any]] = []
-        self.consolidator = KnowledgeConsolidator(self)
+        self.consolidator = KnowledgeConsolidator(agent)
 
     def _init_fastembed(self, embed_config: dict):
         """Helper method to initialize FastEmbed with full path handling."""
@@ -715,6 +713,13 @@ class ContextManager:
         await self._rebuild_sparse_index()
         self._sparse_index_dirty = False
 
+    def _get_consolidator(self):
+        """Lazy access to consolidator (safe even if not fully initialized yet)."""
+        if self.consolidator is None:
+            logger.debug("Consolidator not yet initialized")
+            return None
+        return self.consolidator
+
     # ─────────────────────────────────────────────────────────────
     # SPARSE RETRIEVAL - FIXED TF-IDF CRASH
     # ─────────────────────────────────────────────────────────────
@@ -781,8 +786,8 @@ class ContextManager:
             return ""
 
         logger.debug(
-            f"retrieve_relevant_knowledge START | query='{query[:100]}...' | "
-            f"KB_size={len(self.knowledge_base)} | max_kb_tokens={max_kb_tokens}"
+            f"[RETRIEVE] START (legacy path) | query='{query[:100]}...' | "
+            f"KB_size={len(self.knowledge_base)} | max_tokens={max_kb_tokens}"
         )
 
         # Use centralized prompt for embedding query
@@ -795,7 +800,10 @@ class ContextManager:
         dense_ranked = []
         if query_emb.size > 0:
             for key, item in self.knowledge_base.items():
-                if item.embedding.size > 0:
+                if (
+                    getattr(item, "embedding", None) is not None
+                    and item.embedding.size > 0
+                ):
                     sim = cosine_sim(query_emb, item.embedding)
                     dense_ranked.append((sim, key))
             dense_ranked.sort(reverse=True)
@@ -807,6 +815,10 @@ class ContextManager:
             reverse=True,
         )[:50]
 
+        logger.debug(
+            f"[RETRIEVE] Dense candidates: {len(dense_ranked)} | Sparse candidates: {len(sparse_ranked)}"
+        )
+
         # RRF fusion
         rrf_scores: Dict[str, float] = {}
         k = 60
@@ -815,10 +827,11 @@ class ContextManager:
         for rank, (_, key) in enumerate(sparse_ranked, start=1):
             rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (rank + k)
 
-        # ── PARAMETER/FILE BOOST: If query mentions a file/param from any tool call ──
+        # ── PARAMETER/FILE BOOST ──
         file_mentions = self._extract_potential_file_or_param_mentions(query)
         if file_mentions:
-            logger.debug(f"Detected potential file/param mentions: {file_mentions}")
+            logger.debug(f"[BOOST] Detected file/param mentions: {file_mentions}")
+            boosted = 0
             for key, item in self.knowledge_base.items():
                 if item.source_type != "tool_outcome":
                     continue
@@ -836,20 +849,22 @@ class ContextManager:
                         or m_lower in args_str
                         or m_lower in content_lower
                     ):
-                        boost += 5.0  # strong exact match in args/metadata
+                        boost += 5.0
                     elif any(
                         word in content_lower
                         for word in m_lower.split()
                         if len(word) > 2
                     ):
-                        boost += 2.0  # softer keyword overlap
+                        boost += 2.0
 
                 if boost > 0:
                     current = rrf_scores.get(key, 0.0)
                     rrf_scores[key] = current + boost
-                    logger.debug(
-                        f"Boosted tool outcome {key} by {boost:.1f} for mentions {file_mentions}"
-                    )
+                    boosted += 1
+                    logger.debug(f"[BOOST] +{boost:.1f} to {key} (tool_outcome)")
+
+            if boosted > 0:
+                logger.debug(f"[BOOST] Applied boosts to {boosted} tool outcomes")
 
         # Final scored list
         scored = sorted(
@@ -860,6 +875,8 @@ class ContextManager:
             reverse=True,
         )
 
+        logger.debug(f"[RETRIEVE] Final scored items before formatting: {len(scored)}")
+
         parts: List[str] = []
         used = 0
         tool_outcome_count = 0
@@ -868,7 +885,6 @@ class ContextManager:
         forbidden_phrases = PromptBuilder.contamination_forbidden_phrases()
 
         for score, key, item in scored[:40]:
-            # Contamination guard
             if any(forbidden in item.content for forbidden in forbidden_phrases):
                 blocked_count += 1
                 continue
@@ -894,7 +910,7 @@ class ContextManager:
 
             if used + block_tokens > max_kb_tokens:
                 logger.debug(
-                    f"Token budget reached ({used}/{max_kb_tokens}) — stopping"
+                    f"[TOKEN] Budget reached ({used}/{max_kb_tokens}) — stopping at item {key}"
                 )
                 break
 
@@ -911,7 +927,148 @@ class ContextManager:
                 total_scored=len(scored),
             )
         )
+        logger.debug(
+            f"[RETRIEVE] END — returned {len(result)} chars, {tool_outcome_count} tool outcomes"
+        )
 
+        return result
+
+    async def _get_broad_candidates(self, query: str) -> List[KnowledgeItem]:
+        """Returns broad candidates using RRF fusion + file/param boosting.
+        Always returns pure List[KnowledgeItem]."""
+        if not self.knowledge_base:
+            logger.debug("[BROAD] KB empty → returning []")
+            return []
+
+        logger.debug(
+            f"[BROAD] START | query='{query[:100]}...' | KB_size={len(self.knowledge_base)}"
+        )
+
+        # Dense ranking
+        query_emb = await self.fetch_embedding(
+            PromptBuilder.knowledge_retrieval_embedding_query(query), prefix="query"
+        )
+
+        dense_ranked = []
+        if query_emb.size > 0:
+            for key, item in self.knowledge_base.items():
+                emb = getattr(item, "embedding", None)
+                if emb is not None and emb.size > 0:
+                    sim = cosine_sim(query_emb, emb)
+                    dense_ranked.append((sim, key, item))
+
+        logger.debug(f"[BROAD] Dense ranked: {len(dense_ranked)} items")
+
+        # Sparse ranking
+        sparse_scores = await self._sparse_retrieve(query)
+        sparse_ranked = []
+        for key, score in sparse_scores.items():
+            if score > 0 and key in self.knowledge_base:
+                sparse_ranked.append((score, key, self.knowledge_base[key]))
+
+        logger.debug(f"[BROAD] Sparse ranked: {len(sparse_ranked)} items")
+
+        # RRF fusion
+        rrf_scores: Dict[str, float] = {}
+        k = 60
+        for rank, (_, key, _) in enumerate(dense_ranked[:50], start=1):
+            rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (rank + k)
+        for rank, (_, key, _) in enumerate(sparse_ranked[:50], start=1):
+            rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (rank + k)
+
+        # File/param boosting
+        file_mentions = self._extract_potential_file_or_param_mentions(query)
+        if file_mentions:
+            logger.debug(f"[BOOST] Detected mentions: {file_mentions}")
+            boosted = 0
+            for key, item in self.knowledge_base.items():
+                if item.source_type != "tool_outcome":
+                    continue
+                boost = 0.0
+                meta_str = json.dumps(item.metadata, ensure_ascii=False).lower()
+                args_str = json.dumps(
+                    item.metadata.get("args", {}), ensure_ascii=False
+                ).lower()
+                content_lower = item.content.lower()
+
+                for mention in file_mentions:
+                    m_lower = mention.lower()
+                    if (
+                        m_lower in meta_str
+                        or m_lower in args_str
+                        or m_lower in content_lower
+                    ):
+                        boost += 5.0
+                    elif any(
+                        word in content_lower
+                        for word in m_lower.split()
+                        if len(word) > 2
+                    ):
+                        boost += 2.0
+
+                if boost > 0:
+                    current = rrf_scores.get(key, 0.0)
+                    rrf_scores[key] = current + boost
+                    boosted += 1
+
+            if boosted > 0:
+                logger.debug(f"[BOOST] Applied boosts to {boosted} tool outcomes")
+
+        # Final candidates - always (score, item) for safe sorting
+        scored = [
+            (rrf_scores.get(key, 0.0), item)
+            for key, item in self.knowledge_base.items()
+            if key in rrf_scores
+        ]
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        candidates = [item for score, item in scored[:100]]
+
+        logger.debug(
+            f"[BROAD] END → returning {len(candidates)} broad candidates (top RRF score: {scored[0][0] if scored else 0:.4f})"
+        )
+        return candidates
+
+    async def ranked_retrieve(
+        self, query: str, max_kb_tokens: int = 5000, k: int = 10
+    ) -> str:
+        """Main retrieval used by provide_context.
+        Always routes through consolidator.rerank() when available (so training data is collected)."""
+        if not self.knowledge_base or not query.strip():
+            return ""
+
+        consolidator = getattr(self, "consolidator", None)
+
+        logger.debug(
+            f"[RANKED_RETRIEVE] START | query='{query[:100]}...' | KB_size={len(self.knowledge_base)} | "
+            f"consolidator_present={consolidator is not None}"
+        )
+
+        # 1. Broad candidates (RRF + boost)
+        candidates = await self._get_broad_candidates(query)
+        logger.debug(f"[RANKED_RETRIEVE] Broad candidates: {len(candidates)}")
+
+        # 2. Rerank (this is the critical point for sample collection)
+        if consolidator:
+            logger.debug(
+                f"[RANKED_RETRIEVE] → Calling KnowledgeConsolidator.rerank() with {len(candidates)} candidates"
+            )
+            reranked_items = await consolidator.rerank(query, candidates, k=k)
+            logger.debug(
+                f"[RANKED_RETRIEVE] Reranker returned {len(reranked_items)} items"
+            )
+        else:
+            logger.debug(
+                "[RANKED_RETRIEVE] No consolidator → fallback to top broad candidates"
+            )
+            reranked_items = candidates[:k]
+
+        # 3. Format
+        result = await self._format_knowledge_blocks(reranked_items, max_kb_tokens)
+
+        logger.debug(
+            f"[RANKED_RETRIEVE] END → formatted {len(result)} chars from {len(reranked_items)} items"
+        )
         return result
 
     def _is_duplicate_tool_call(
@@ -945,6 +1102,38 @@ class ContextManager:
                 return True
 
         return False
+
+    async def _format_knowledge_blocks(
+        self, items: List[KnowledgeItem], max_tokens: int
+    ) -> str:
+        """Format reranked KnowledgeItems into final context string."""
+        parts: List[str] = []
+        used = 0
+
+        for item in items:
+            meta_str = ", ".join(f"{k}={v}" for k, v in item.metadata.items() if v)
+            header = PromptBuilder.knowledge_block_header(
+                source_type=item.source_type,
+                key=item.key,
+                meta_str=meta_str,
+            )
+            block = (
+                f"{header}{item.content}\n{PromptBuilder.knowledge_block_separator()}"
+            )
+
+            block_tokens = (
+                self.tokenizer.count_tokens(block)
+                if self.tokenizer
+                else len(block) // 4
+            )
+
+            if used + block_tokens > max_tokens:
+                break
+
+            parts.append(block)
+            used += block_tokens
+
+        return "".join(parts)
 
     async def add_message(
         self, role: str, message: str, embedding: np.ndarray | None = None
@@ -1154,9 +1343,7 @@ class ContextManager:
                     messages.append({"role": msg["role"], "content": msg["content"]})
 
             if query.strip() and self.knowledge_base:
-                kb_text = await self._retrieve_relevant_knowledge(
-                    query, max_kb_tokens // 2
-                )
+                kb_text = await self.ranked_retrieve(query, max_kb_tokens // 2)
                 if kb_text:
                     messages.append(
                         {
@@ -1277,7 +1464,7 @@ class ContextManager:
 
             # Smart KB retrieval
             if query.strip():
-                kb_text = await self._retrieve_relevant_knowledge(query, 1800)
+                kb_text = await self.ranked_retrieve(query, 1800)
                 if kb_text:
                     messages.append(
                         {
@@ -1340,7 +1527,7 @@ class ContextManager:
 
         # Extra KB only for rich mode
         if query.strip() and kb_tokens > 600 and not lightweight_agentic:
-            kb_text = await self._retrieve_relevant_knowledge(query, kb_tokens)
+            kb_text = await self.ranked_retrieve(query, kb_tokens)
             if kb_text:
                 messages.append(
                     {
