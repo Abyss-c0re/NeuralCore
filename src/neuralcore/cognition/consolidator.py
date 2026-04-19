@@ -374,7 +374,6 @@ class KnowledgeConsolidator:
 
     # ====================== TRAINING ======================
     async def _schedule_training(self):
-        """Accumulates data across runs (no full clear) — this is what allows the model to grow richer over time."""
         current_samples = len(self.training_data)
         if current_samples < self.min_samples_for_training:
             logger.debug(
@@ -395,9 +394,10 @@ class KnowledgeConsolidator:
 
             await self.train_reranker(X, y, groups)
 
-            # Keep recent history for diversity
-            if len(self.training_data) > 500:
-                self.training_data = self.training_data[-500:]
+            # Keep recent history for diversity (but never drop everything)
+            if len(self.training_data) > 800:
+                self.training_data = self.training_data[-600:]  # keep more history
+
             logger.info(
                 f"[TRAINING] Kept last {len(self.training_data)} samples for future runs"
             )
@@ -414,40 +414,55 @@ class KnowledgeConsolidator:
         return str(path / f"{agent_id}_knowledge_consolidator_ltr.txt")
 
     async def train_reranker(self, X: pd.DataFrame, y: np.ndarray, groups: List[int]):
-        """Train LambdaMART with stronger condensation + semantic bias."""
+        """Train LambdaMART incrementally.
+        Continues from the existing saved model when possible (prevents shrinking)."""
         if len(X) < 10:
             logger.warning("Too few samples to train reranker")
             return
 
         model_path = self._get_model_path()
-        logger.info(f"Training LambdaMART on {len(X)} samples → {model_path}")
+        logger.info(
+            f"Training LambdaMART on {len(X)} samples → {model_path} (incremental)"
+        )
 
         try:
+            # Load existing model for continuation if it exists
+            init_model = None
+            if os.path.exists(model_path):
+                try:
+                    init_model = lgb.Booster(model_file=model_path)
+                    logger.debug("Loaded existing model for incremental training")
+                except Exception as e:
+                    logger.warning(
+                        f"Could not load existing model for continuation: {e}. Starting fresh."
+                    )
+
             train_set = lgb.Dataset(X, label=y, group=groups)
 
             params = {
                 "objective": "lambdarank",
                 "metric": "ndcg",
                 "ndcg_eval_at": [5, 10],
-                "learning_rate": 0.06,
-                "num_leaves": 32,
-                "min_data_in_leaf": 6,
+                "learning_rate": 0.05,
+                "num_leaves": 31,
+                "min_data_in_leaf": 5,
                 "boosting_type": "gbdt",
-                "feature_fraction": 0.80,
-                "bagging_fraction": 0.80,
-                "bagging_freq": 5,
+                "feature_fraction": 0.90,
+                "bagging_fraction": 0.85,
+                "bagging_freq": 3,
                 "verbose": -1,
-                "lambda_l1": 0.6,  # new: light L1 regularization
-                "lambda_l2": 0.8,  # new: light L2
+                "lambda_l1": 0.1,
+                "lambda_l2": 0.2,
             }
 
             self.reranker_model = lgb.train(
                 params,
                 train_set,
-                num_boost_round=500,
+                num_boost_round=300,
                 valid_sets=[train_set],
+                init_model=init_model,
                 callbacks=[
-                    lgb.early_stopping(80, verbose=False),  # stronger stopping
+                    lgb.early_stopping(40, verbose=False),
                     lgb.log_evaluation(0),
                 ],
             )
@@ -464,11 +479,10 @@ class KnowledgeConsolidator:
                 zip(self.feature_names, self.reranker_model.feature_importance())
             )
 
-            # Extra condensation: if too many trees, we can log and optionally re-train stricter next time
-            if num_trees > 180:
-                logger.warning(
-                    f"Model reached {num_trees} trees — condensation working but monitor growth. "
-                    f"Consider increasing min_data_in_leaf or lambda_l1/l2 if dense_cosine stays low."
+            if num_trees > 250:
+                logger.info(
+                    f"Model has {num_trees} trees — still growing naturally. "
+                    f"Monitor dense_cosine / investigation_align rising."
                 )
 
             self.reranker_model.save_model(model_path)
