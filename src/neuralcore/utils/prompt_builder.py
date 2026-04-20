@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+from neuralcore.agents.task import Task
 
 from neuralcore.utils.os_info import get_os_info
 from neuralcore.utils.logger import Logger
@@ -124,26 +125,37 @@ class PromptBuilder:
 
     @staticmethod
     def task_decomposition(original_query: str) -> str:
-        return f"""You are a task decomposition expert. Break the following user request into the minimal number of clear, sequential sub-tasks.
+        """Pragmatic task decomposition.
+        Keeps planning minimal and realistic. Does not assume complex outcomes for simple tool calls."""
+        return f"""You are a pragmatic task decomposition expert.
 
         USER REQUEST: {original_query}
 
-        Rules (strict):
-        - Each sub-task must be atomic and actionable.
-        - Include explicit dependencies (previous step indices, 0-based).
-        - For each step, define what SUCCESS looks like (expected_outcome).
-        - If a step needs a tool that may not be loaded, note "may_require_FindTool".
-        - Output ONLY valid JSON:
+        Break this request into the **minimal number of clear, actionable steps** required to complete the goal.
+
+        Core Rules (strict):
+        - Use as few steps as possible. If one tool call can fulfill the request, return exactly 1 step.
+        - Only create multiple steps when there are real dependencies or different capabilities needed.
+        - Each step should correspond to what a single tool execution can realistically achieve.
+        - For "expected_outcome", describe success in simple, practical terms. 
+        Most tool-based steps should have outcomes like:
+        - "Tool executed successfully and returned the requested data"
+        - "File was successfully read/loaded/parsed"
+        - "Content was written to the target file"
+        - "Analysis completed and results produced"
+        - Do NOT invent complex structured objects or deep theoretical results unless the user request explicitly requires them.
+        - If a step likely needs a tool that may not be loaded, use "suggested_tool_category" with a short hint.
+
+        Output ONLY valid JSON:
 
         {{
         "steps": [
             {{
             "description": "exact sub-task description",
             "dependencies": [list of previous step indices or empty list],
-            "suggested_tool_category": "optional short hint",
-            "expected_outcome": "short description of what must be true when this step is done (e.g. 'file terminal_set.py now contains new async execute_command tool')"
-            }},
-            ...
+            "suggested_tool_category": "optional short hint or empty string",
+            "expected_outcome": "short, realistic success description (usually 'Tool executed successfully' or similar)"
+            }}
         ]
         }}
 
@@ -160,37 +172,58 @@ class PromptBuilder:
         remaining_context: str,
         marker: str,
         loop_count: int,
+        expected_outcome: str = "",
     ) -> str:
-        """State-aware prompt for executing one specific sub-task in multi-step flow."""
+        is_final_step = current_index == total_tasks - 1
+
+        final_step_block = ""
+        if is_final_step:
+            final_step_block = """
+        THIS IS THE FINAL SUB-TASK.
+        The user goal is only complete when the output artifact (file, report, etc.) has been successfully written/created.
+        You MUST use the appropriate write/save/create tool with correct parameters.
+        After the write tool succeeds and the expected_outcome is fully met, output the marker.
+        Do NOT end with a read/analysis step."""
+
+        expected_block = ""
+        if expected_outcome and expected_outcome.strip():
+            expected_block = f"""
+        EXPECTED OUTCOME THAT MUST BE VERIFIED BEFORE EMITTING MARKER:
+        {expected_outcome.strip()}
+
+        After the tool result arrives, you MUST mentally verify:
+        - Did the tool produce exactly what the expected_outcome describes?
+        - Are arguments correct and the result meaningful?
+        Only if YES → output exactly the marker below. Otherwise continue working on this sub-task."""
+
         return f"""You are executing **ONE SPECIFIC SUB-TASK ONLY**. Ignore everything else.
 
         ORIGINAL USER REQUEST (background only): {original_query}
 
-        ALREADY COMPLETED STEPS (do NOT repeat any of these actions or tools):
+        ALREADY COMPLETED STEPS (do NOT repeat):
         {completed_context}
 
-        TOOLS ALREADY USED IN THIS SESSION (NEVER call these again on any future turn):
+        TOOLS ALREADY USED (avoid exact repeats unless necessary):
         {used_tools_str}
 
-        === IMPORTANT: TOOL AVAILABILITY ===
-        - If FindTool was called on the previous turn, the required tool(s) have now been successfully loaded.
-        - DO NOT call FindTool again in this turn.
-        - Use the newly loaded tool(s) directly to complete the CURRENT SUB-TASK.
-        - You have access to write_file, read_file, search_code, etc. when they appear in the loaded tools.
+        TOOL RULE: If FindTool succeeded last turn, the tool is loaded — use it directly. Do not call FindTool again.
 
-        REMAINING STEPS (after you finish the current one):
+        REMAINING STEPS:
         {remaining_context}
 
         CURRENT SUB-TASK ({current_index + 1}/{total_tasks}): {task_desc}
+        {expected_block}
+        {final_step_block}
 
-        STRICT EXECUTION PROTOCOL FOR THIS TURN ONLY:
-        1. Focus EXCLUSIVELY on the CURRENT SUB-TASK above.
-        2. If the required tool for this sub-task is already loaded, call it directly with correct parameters.
-        3. After the tool for this sub-task succeeds and you have the result, you MUST immediately output EXACTLY this marker and nothing else:
+        STRICT PROTOCOL:
+        1. Focus only on the current sub-task.
+        2. Call the correct tool with accurate parameters.
+        3. After tool result: verify it matches the expected_outcome above.
+        4. When verification passes → output EXACTLY:
         {marker}
-        Do not add any commentary, do not say you are ready for the next step, do not continue thinking, do not summarize.
+        Nothing else. No commentary.
 
-        You are now on turn {loop_count}. Stay on protocol. No deviations."""
+        Turn: {loop_count}"""
 
     @staticmethod
     def objective_reminder(reminder_body: str) -> str:
@@ -722,3 +755,58 @@ class PromptBuilder:
     @staticmethod
     def context_summary_recent_tools_header() -> str:
         return "Recent Tool Outcomes (last 4):"
+
+    @staticmethod
+    def step_validation_prompt(
+        current_task: "Task",
+        last_result_str: str,
+        total_tasks: int,
+        current_idx: int,
+    ) -> str:
+        """Strict LLM-based step outcome validation prompt."""
+        return f"""You are a strict validation agent for multi-step task execution.
+
+        CURRENT SUB-TASK ({current_idx + 1}/{total_tasks}):
+        {current_task.description}
+
+        EXPECTED OUTCOME THAT MUST BE VERIFIED:
+        {current_task.expected_outcome or "Step completed successfully"}
+
+        MOST RECENT TOOL RESULT:
+        {last_result_str[:2500] or "No tool results available yet."}
+
+        QUESTION:
+        Has the expected outcome been FULLY achieved based on the tool result above?
+        Be conservative. Only answer YES if the outcome is clearly and completely met.
+
+        Answer with **exactly one word** on its own line:
+        YES
+        or
+        NO
+
+        No explanations. No extra text."""
+
+    @staticmethod
+    def sub_task_execution_system_prompt() -> str:
+        """System prompt used when building context for sub-task execution."""
+        return """You are executing ONE specific sub-task in a larger plan.
+    Focus only on the current sub-task description provided.
+    Use tools when needed.
+    When the current sub-task is complete and the expected outcome is achieved, output exactly the marker."""
+
+    @staticmethod
+    def final_synthesis_system_prompt() -> str:
+        """Clean system prompt for final answer synthesis."""
+        return """FINAL ANSWER MODE
+    Provide a clear, complete, and concise summary of what was accomplished in the entire task.
+    Use only verified information from tool results.
+    Be natural and professional."""
+
+    @staticmethod
+    def validation_system_prompt() -> str:
+        """System prompt specifically for step validation."""
+        return """You are a strict validation agent.
+    Evaluate whether the expected outcome for the current sub-task has been achieved.
+    Be precise, conservative, and objective.
+    Use ONLY the information provided in the query.
+    Answer with exactly one word: YES or NO."""

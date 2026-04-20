@@ -1,7 +1,8 @@
 from dataclasses import dataclass, field
-from typing import Any, List, Dict, Optional
+from typing import Any, List, Dict, Optional, Set
 import time
 from neuralcore.utils.formatting import prepare_chat_messages
+from neuralcore.agents.task import Task
 from neuralcore.utils.prompt_builder import PromptBuilder
 from neuralcore.utils.logger import Logger
 
@@ -33,9 +34,14 @@ class AgentState:
     # ==================== Loaded Tools Tracking ====================
     loaded_tools: List[str] = field(default_factory=list)
 
-    # ==================== NEW: FindTool Tracking ====================
+    # ==================== FindTool Tracking ====================
     findtool_call_count: int = 0
     last_findtool_loop: int = -1
+
+    # ==================== Task Management ====================
+    root_task: Optional[Task] = None
+    tasks: List[Task] = field(default_factory=list)
+    completed_task_ids: Set[str] = field(default_factory=set)
 
     # ==================== Planning & Orchestration ====================
     planned_tasks: List[str] = field(default_factory=list)
@@ -615,3 +621,97 @@ class AgentState:
             }
 
         return data
+
+    # ==================== Task Management Helpers ====================
+    def build_tasks_from_plan(self, steps: List[Dict[str, Any]]) -> None:
+        """Convert LLM plan into Task objects while keeping flat list references."""
+        self.tasks.clear()
+        self.completed_task_ids.clear()
+        self.planned_tasks.clear()
+        self.task_expected_outcomes.clear()
+        self.task_tool_assignments.clear()
+        self.task_dependencies.clear()
+
+        task_map: Dict[int, Task] = {}
+
+        for i, step in enumerate(steps):
+            t = Task(
+                description=step.get("description", f"Step {i + 1}"),
+                expected_outcome=step.get("expected_outcome", ""),
+                dependencies=[],  # will be set via indices below
+                metadata={
+                    "original_index": i,
+                    "suggested_tool_category": step.get("suggested_tool_category"),
+                },
+            )
+            self.tasks.append(t)
+            self.planned_tasks.append(t.description)
+            self.task_expected_outcomes.append(
+                t.expected_outcome or "Step completed successfully"
+            )
+            task_map[i] = t
+
+        # Resolve dependencies (indices → task_ids)
+        for i, step in enumerate(steps):
+            deps_indices = step.get("dependencies", [])
+            dep_ids = []
+            for d in deps_indices:
+                if isinstance(d, (int, str)) and str(d).isdigit():
+                    idx = int(d)
+                    if idx in task_map:
+                        dep_ids.append(task_map[idx].task_id)
+            self.tasks[i].dependencies = dep_ids
+            self.tasks[i]._dependency_set = set(dep_ids)
+            self.task_dependencies[i] = (
+                deps_indices  # keep original index-based for compatibility
+            )
+
+        if self.tasks:
+            self.root_task = Task(description=self.task or "Root task")
+            for t in self.tasks:
+                self.root_task.add_subtask(t)
+
+        logger.info(f"[TASK BUILD] Created {len(self.tasks)} tasks from plan")
+
+    def get_current_task(self) -> Optional[Task]:
+        """Return current Task object (preferred over index)."""
+        if 0 <= self.current_task_index < len(self.tasks):
+            return self.tasks[self.current_task_index]
+        return None
+
+    def mark_current_task_complete(
+        self, result: Any = None, error: Optional[str] = None
+    ) -> None:
+        """Update current task + sync state."""
+        current = self.get_current_task()
+        if current:
+            current.complete(result=result, error=error)
+            if current.status == "completed":
+                self.completed_task_ids.add(current.task_id)
+
+        # Sync legacy fields
+        if error:
+            self.last_error = error
+            self.error_count += 1
+        else:
+            self.goal_achieved = self.current_task_index >= len(self.tasks) - 1
+
+    def advance_to_next_ready_task(self) -> bool:
+        """Move to next task whose dependencies are satisfied."""
+        for i in range(self.current_task_index, len(self.tasks)):
+            task = self.tasks[i]
+            if task.is_ready(self.completed_task_ids):
+                self.current_task_index = i
+                return True
+        return False
+
+    def validate_task_integrity(self) -> List[str]:
+        """Extended validation including new Task objects."""
+        warnings = self.validate_state_integrity()  # keep old one
+
+        if len(self.tasks) != len(self.planned_tasks):
+            warnings.append(
+                f"tasks list ({len(self.tasks)}) out of sync with planned_tasks ({len(self.planned_tasks)})"
+            )
+
+        return warnings

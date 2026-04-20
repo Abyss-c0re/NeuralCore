@@ -2,6 +2,7 @@ import json
 from typing import AsyncIterator, Any, Tuple
 
 from neuralcore.agents.state import AgentState
+from neuralcore.agents.task import Task
 
 from neuralcore.utils.logger import Logger
 from neuralcore.utils.prompt_builder import PromptBuilder
@@ -29,8 +30,7 @@ async def ensure_subtasks_planned(
     agent,
     state: AgentState,
 ) -> AsyncIterator[Tuple[str, Any]]:
-    """Generic, LLM-driven structured planning.
-    Robust expected_outcome population with FULL (non-truncated) debug logging."""
+    """Generic, LLM-driven structured planning using proper Task objects."""
     logger.info("[PLANNING START] _ensure_subtasks_planned called")
     yield ("phase_changed", {"phase": "planning"})
 
@@ -48,24 +48,43 @@ async def ensure_subtasks_planned(
 
         plan = json.loads(plan_text.strip())
 
+        # Clear previous state
         state.planned_tasks.clear()
         state.task_expected_outcomes.clear()
         state.task_dependencies.clear()
         state.task_tool_assignments.clear()
+        state.tasks.clear()
+        state.completed_task_ids.clear()
 
         steps = plan.get("steps", [])
         logger.info(f"[PLANNING] Parsed {len(steps)} steps from JSON")
 
+        task_map: dict[int, Task] = {}
+
         for i, step in enumerate(steps):
             description = step.get("description", f"Step {i + 1}").strip()
 
+            # Ensure expected_outcome is always a non-empty string (fix for type error)
             expected = step.get("expected_outcome", "")
             if not expected or not str(expected).strip():
                 expected = f"Step {i + 1} completed successfully (file located/analyzed/tool added)"
 
-            state.planned_tasks.append(description)
-            state.task_expected_outcomes.append(str(expected).strip())
+            expected_str: str = str(expected).strip()
 
+            task = Task(
+                description=description,
+                expected_outcome=expected_str,  # now guaranteed str
+                metadata={
+                    "original_index": i,
+                    "suggested_tool_category": step.get("suggested_tool_category"),
+                },
+            )
+
+            state.tasks.append(task)
+            state.planned_tasks.append(description)
+            state.task_expected_outcomes.append(expected_str)  # safe str
+
+            # Dependencies (index-based for backward compatibility)
             deps = step.get("dependencies", [])
             state.task_dependencies[i] = [
                 int(d) for d in deps if isinstance(d, (int, str)) and str(d).isdigit()
@@ -74,42 +93,66 @@ async def ensure_subtasks_planned(
             if step.get("suggested_tool_category"):
                 state.task_tool_assignments[i] = [step["suggested_tool_category"]]
 
+            task_map[i] = task
+
             logger.debug(
-                f"  → Appended Step {i}: '{description}' | expected='{expected}'"
+                f"  → Created Task {i}: '{description[:100]}...' | expected='{expected_str}'"
             )
 
-        # Safety alignment
-        while len(state.task_expected_outcomes) < len(state.planned_tasks):
-            state.task_expected_outcomes.append("Task step completed successfully")
+        # Resolve dependencies to real task_ids
+        for i, task in enumerate(state.tasks):
+            dep_indices = state.task_dependencies.get(i, [])
+            dep_ids = [task_map[d].task_id for d in dep_indices if d in task_map]
+            task.dependencies = dep_ids
+            task._dependency_set = set(dep_ids)
+
+        # Build root task for hierarchy
+        if state.tasks:
+            state.root_task = Task(description=state.task or "Root user task")
+            for t in state.tasks:
+                state.root_task.add_subtask(t)
 
         warnings = state.validate_state_integrity()
         if warnings:
             logger.warning(f"[PLANNING] State integrity warnings: {warnings}")
         else:
-            logger.info(
-                "[PLANNING] State integrity check PASSED — expected_outcomes populated correctly"
-            )
+            logger.info("[PLANNING] State integrity check PASSED")
 
         logger.info(
-            f"[PLANNING] Final count: {len(state.planned_tasks)} tasks, {len(state.task_expected_outcomes)} expected outcomes"
+            f"[PLANNING] Created {len(state.tasks)} Task objects "
+            f"({len(state.planned_tasks)} backward-compatible entries)"
         )
 
-        # FULL non-castrated debug (no [:80] truncation)
-        for i, t in enumerate(state.planned_tasks):
-            expected = state.task_expected_outcomes[i]
-            deps = state.task_dependencies.get(i, [])
-            logger.debug(f"  Step {i}: {t} | expected='{expected}' | deps={deps}")
+        # Full debug logging
+        for i, task in enumerate(state.tasks):
+            logger.debug(
+                f"  Task {i}: {task.description[:100]}... | "
+                f"expected='{task.expected_outcome}' | deps={task.dependencies}"
+            )
 
         yield ("planning_complete", {"planned_tasks": state.planned_tasks})
         logger.info("[PLANNING END] Planning completed successfully")
 
     except json.JSONDecodeError as e:
         logger.error(f"Planning JSON parse failed: {e}\nRaw: {plan_text[:400]}...")
+        fallback_task = Task(
+            description=state.task, expected_outcome="Task completed successfully"
+        )
+        state.tasks = [fallback_task]
+        state.root_task = Task(description=state.task)
+        state.root_task.add_subtask(fallback_task)
         state.planned_tasks = [state.task]
         state.task_expected_outcomes = ["Task completed successfully"]
         yield ("planning_fallback", {"reason": "JSON parse error"})
+
     except Exception as e:
         logger.error(f"Planning failed: {e}", exc_info=True)
+        fallback_task = Task(
+            description=state.task, expected_outcome="Task completed successfully"
+        )
+        state.tasks = [fallback_task]
+        state.root_task = Task(description=state.task)
+        state.root_task.add_subtask(fallback_task)
         state.planned_tasks = [state.task]
         state.task_expected_outcomes = ["Task completed successfully"]
         yield ("planning_fallback", {"reason": str(e)})
@@ -161,10 +204,10 @@ async def classify_intent(agent, query: str) -> str:
 async def goal_driven_task_loop(
     agent, state: AgentState, target_loop: str
 ) -> AsyncIterator[Tuple[str, Any]]:
-    """FINAL STATE-DRIVEN goal loop – uses generic success indicator from Action + expected outcomes.
-    Requires real completion signals before advancing or finishing. Keeps NeuralCore abstract."""
+    """Robust multi-step loop using Task objects.
+    All prompts are now centralized in PromptBuilder."""
 
-    is_multi_step = len(state.planned_tasks) > 1
+    is_multi_step = len(state.tasks) > 1
     marker = PromptBuilder.FINAL_ANSWER_MARKER
     state.increment_loop()
 
@@ -172,8 +215,9 @@ async def goal_driven_task_loop(
     tools_called_this_turn = False
 
     # ====================== STATE-AWARE PROMPT ======================
-    if is_multi_step and 0 <= state.current_task_index < len(state.planned_tasks):
-        task_desc = state.planned_tasks[state.current_task_index]
+    if is_multi_step and 0 <= state.current_task_index < len(state.tasks):
+        current_task: Task = state.tasks[state.current_task_index]
+        task_desc = current_task.description
 
         used_tools = [r.get("name", "unknown") for r in state.tool_results]
         used_tools_str = ", ".join(set(used_tools)) if used_tools else "none"
@@ -183,28 +227,33 @@ async def goal_driven_task_loop(
             if i < len(state.tool_results):
                 tool_name = state.tool_results[i].get("name", "unknown")
                 preview = str(state.tool_results[i].get("result", ""))[:400]
-                completed.append(f"Step {i} ({tool_name}) already done: {preview}...")
+                completed.append(f"Step {i} ({tool_name}) done: {preview}...")
 
         completed_context = (
             "\n".join(completed) if completed else "No steps completed yet."
         )
 
-        remaining = []
-        for i in range(state.current_task_index + 1, len(state.planned_tasks)):
-            remaining.append(f"Step {i}: {state.planned_tasks[i]}")
-
+        remaining = [
+            f"Step {i}: {state.tasks[i].description}"
+            for i in range(state.current_task_index + 1, len(state.tasks))
+        ]
         remaining_context = "\n".join(remaining) if remaining else "No more steps."
+
+        expected_outcome: str = (
+            current_task.expected_outcome or "Step completed successfully"
+        )
 
         current_query = PromptBuilder.sub_task_execution(
             original_query=state.task,
             task_desc=task_desc,
             current_index=state.current_task_index,
-            total_tasks=len(state.planned_tasks),
+            total_tasks=len(state.tasks),
             completed_context=completed_context,
             used_tools_str=used_tools_str,
             remaining_context=remaining_context,
             marker=marker,
             loop_count=state.loop_count,
+            expected_outcome=expected_outcome,
         )
     else:
         current_query = (
@@ -215,8 +264,6 @@ async def goal_driven_task_loop(
 
     yield ("phase_changed", {"phase": "searching_tools"})
 
-    prev_tool_result_count = len(state.tool_results)
-
     if not current_query:
         current_query = await agent.wait_for_incoming_message(
             role="user", return_content_only=True
@@ -225,12 +272,15 @@ async def goal_driven_task_loop(
         state.request_loop_restart(reason="No query detected", target_loop=target_loop)
         return
 
+    # Use centralized system prompt
     messages = await agent.context_manager.provide_context(
         query=current_query,
         max_input_tokens=agent.max_tokens,
         reserved_for_output=12000,
-        system_prompt=PromptBuilder.agent_objective_reminder(agent.state)
-        + f"\n\nWhen you finish the current sub-task, you MUST output exactly: {marker}",
+        system_prompt=PromptBuilder.agent_objective_reminder(state)
+        + "\n\n"
+        + PromptBuilder.sub_task_execution_system_prompt()
+        + f"\n\nWhen you finish the current sub-task and expected_outcome is verified, output exactly: {marker}",
         include_logs=True,
         chat=False,
         lightweight_agentic=True,
@@ -260,21 +310,18 @@ async def goal_driven_task_loop(
                         payload.get("tool_name") or payload.get("name") or "unknown"
                     )
                     if "FindTool" in tool_name:
-                        yield ("phase_changed", {"phase": "handling_findtool"})
                         state.record_findtool_call()
                         state.request_loop_restart(
-                            reason="FindTool called",
-                            target_loop=target_loop,
+                            reason="FindTool called", target_loop=target_loop
                         )
                         yield ("phase_changed", {"phase": "restarting_loop"})
-                        return  # ← FindTool: early exit + restart
+                        return
 
             elif kind == "finish":
                 break
             elif kind in ("error", "cancelled"):
                 yield kind, payload
                 return
-
     except Exception as e:
         logger.error(f"Stream error: {e}", exc_info=True)
         yield "error", str(e)
@@ -285,38 +332,108 @@ async def goal_driven_task_loop(
     if has_marker:
         final_reply = final_reply.replace(marker, "").strip()
 
-    # ====================== TOOL RESULT + GENERIC SUCCESS CHECK ======================
-    new_tool_result = len(state.tool_results) > prev_tool_result_count
     last_success = getattr(state, "last_tool_success", None)
     tool_reported_success = bool(last_success and last_success.get("success"))
     strong_completion = has_marker or tool_reported_success
 
-    if has_marker or (new_tool_result and strong_completion):
-        if (
-            not is_multi_step
-            or state.current_task_index >= len(state.planned_tasks) - 1
-        ):
-            msg = "Marker or strong completion detected + all sub-tasks done"
-            state.mark_goal_achieved(msg)
-            state.request_loop_stop(reason=msg, target_loop=target_loop)
-            # fall through to synthesis below
-        else:
-            reason = (
-                f"[MULTI-STEP] Sub-task {state.current_task_index} complete → advancing"
+    # ====================== LLM-BASED VALIDATION (using PromptBuilder) ======================
+    if is_multi_step and strong_completion:
+        current_idx = state.current_task_index
+        current_task: Task = state.tasks[current_idx]
+
+        logger.info(
+            f"[STEP VALIDATION] Starting LLM-based validation for step {current_idx + 1}"
+        )
+
+        last_result_str = (
+            str(state.tool_results[-1].get("result", ""))
+            if state.tool_results
+            else "No tool results yet."
+        )
+
+        validation_query = PromptBuilder.step_validation_prompt(
+            current_task=current_task,
+            last_result_str=last_result_str,
+            total_tasks=len(state.tasks),
+            current_idx=current_idx,
+        )
+
+        try:
+            validation_messages = await agent.context_manager.provide_context(
+                query=validation_query,
+                max_input_tokens=agent.max_tokens,
+                reserved_for_output=2500,
+                system_prompt=PromptBuilder.validation_system_prompt(),
+                include_logs=True,
+                chat=False,
+                lightweight_agentic=False,
+                state=state,
             )
-            logger.info(reason)
-            state.current_task_index += 1
+
+            validation_result = await agent.client.chat(
+                validation_messages, temperature=0.0, max_tokens=20
+            )
+
+            validation_clean = validation_result.strip().upper()
+            outcome_met = "YES" in validation_clean
+
+            logger.info(
+                f"[STEP VALIDATION] LLM decided: {validation_clean} → "
+                f"{'OUTCOME MET' if outcome_met else 'OUTCOME NOT MET'}"
+            )
+
+        except Exception as e:
+            logger.warning(
+                f"Validation LLM call failed: {e}. Falling back to marker only."
+            )
+            outcome_met = has_marker
+
+        if not outcome_met and not has_marker:
+            logger.warning(
+                f"[STEP VALIDATION FAILED] LLM confirmed outcome not met on step {current_idx}."
+            )
+            state.increment_empty_loop()
+            state.request_loop_restart(
+                reason="LLM validation failed — outcome not met",
+                target_loop=target_loop,
+            )
+            yield ("phase_changed", {"phase": "restarting_loop"})
+            return
+
+        logger.info(
+            f"[STEP VALIDATION PASSED] Sub-task {current_idx + 1}/{len(state.tasks)} validated by LLM"
+        )
+
+        # Mark Task as completed
+        current_task.complete(
+            result=state.tool_results[-1].get("result") if state.tool_results else None
+        )
+
+        if current_task.status == "completed":
+            state.completed_task_ids.add(current_task.task_id)
+
+        state.current_task_index += 1
+
+        if state.current_task_index >= len(state.tasks):
+            state.mark_goal_achieved("All planned sub-tasks completed and validated")
+        else:
+            if hasattr(state, "advance_to_next_ready_task"):
+                state.advance_to_next_ready_task()
+
             state.empty_loops = 0
-            state.last_tool_success = None
-            state.request_loop_restart(reason=reason, target_loop=target_loop)
+            state.action_restarts = 0
+            state.request_loop_restart(
+                reason=f"Sub-task {current_idx} validated and done → advancing",
+                target_loop=target_loop,
+                reset_counters=False,
+            )
             yield ("phase_changed", {"phase": "restarting_loop"})
             return
 
     # ====================== SAFE ANTI-REPEAT ======================
     if tools_called_this_turn and is_multi_step and not strong_completion:
         logger.warning(
-            f"[ANTI-REPEAT FORCE] Tool called on step {state.current_task_index} but no strong completion. "
-            f"Staying on current step."
+            f"[ANTI-REPEAT FORCE] Tool called on step {state.current_task_index} but no strong completion."
         )
         state.increment_empty_loop()
         state.request_loop_restart(
@@ -381,12 +498,9 @@ async def goal_driven_task_loop(
     else:
         state.empty_loops = 0
 
-    # ====================== NORMAL TOOL EXECUTION (restart only if NOT complete) ======================
+    # ====================== NORMAL TOOL EXECUTION ======================
     if tools_called_this_turn:
-        if state.goal_reached:
-            # already handled above – fall through to synthesis
-            pass
-        else:
+        if not state.goal_reached:
             yield ("phase_changed", {"phase": "executing_tools"})
             state.request_loop_restart(
                 reason="Tool executed",
@@ -395,7 +509,7 @@ async def goal_driven_task_loop(
             yield ("phase_changed", {"phase": "restarting_loop"})
             return
 
-    # ====================== FINAL SYNTHESIS – ONLY ON TRUE COMPLETION ======================
+    # ====================== FINAL SYNTHESIS ======================
     if state.goal_reached:
         yield ("phase_changed", {"phase": "generating_final_answer"})
 
@@ -410,14 +524,11 @@ async def goal_driven_task_loop(
             query=synthesis_query,
             max_input_tokens=agent.max_tokens,
             reserved_for_output=12000,
-            system_prompt="FINAL ANSWER MODE\nProvide a clear, complete summary of what was accomplished.",
+            system_prompt=PromptBuilder.final_synthesis_system_prompt(),
             include_logs=True,
             chat=False,
             state=state,
         )
-
-        # ====================== STREAMED FINAL SYNTHESIS ======================
-        text_buffer = ""
 
         final_reply = await agent.client.chat(
             final_messages, temperature=0.0, top_p=0.1
@@ -438,12 +549,10 @@ async def goal_driven_task_loop(
         state.reset_for_new_task()
 
     else:
-        # Fallback safety net
         logger.warning("Loop ended without explicit goal or restart – forcing restart")
         state.request_loop_restart(reason="Fallback restart", target_loop=target_loop)
         yield ("phase_changed", {"phase": "restarting_loop"})
 
-    # ====================== CONDITIONAL RESET ======================
     if not state.goal_reached:
         state.status = "idle"
         state.is_complete = True
