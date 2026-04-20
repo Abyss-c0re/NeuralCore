@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from neuralcore.agents.task import Task
-
+from neuralcore.actions.registry import registry
 from neuralcore.utils.os_info import get_os_info
 from neuralcore.utils.logger import Logger
 
@@ -126,17 +126,58 @@ class PromptBuilder:
     @staticmethod
     def task_decomposition(original_query: str) -> str:
         """Pragmatic task decomposition.
-        Keeps planning minimal and realistic. Does not assume complex outcomes for simple tool calls."""
+        Automatically fetches the FULL (unlimited) list of all tools directly from registry.list_all_tools().
+        Planning is now 100% grounded in the real, complete tool registry."""
+
+        # ── Fetch the complete tool list directly from registry (NO LIMIT) ──
+        available_tools = registry.list_all_tools(
+            limit=None,  # ← explicit: no limit
+            include_hidden=False,
+            as_llm_format=False,
+            include_schema=False,
+        )
+
+        # ── Build clean, readable tools section (grouped by set) ──
+        tools_section = ""
+        if available_tools:
+            # Sort by set_name then name for logical grouping
+            sorted_tools = sorted(
+                available_tools,
+                key=lambda t: (t.get("set_name", ""), t.get("name", "")),
+            )
+
+            tools_list = []
+            for tool in sorted_tools:
+                name = tool.get("name", "unknown")
+                set_name = tool.get("set_name", "UnknownSet")
+                desc = (tool.get("description", "") or "").strip()[:160]
+                if desc and not desc.endswith("."):
+                    desc += "."
+                tools_list.append(f"• {name} [{set_name}] → {desc}")
+
+            tools_text = "\n".join(tools_list)
+            tools_section = f"""
+        CURRENTLY AVAILABLE TOOLS (full list — use these exact tools whenever possible):
+
+        {tools_text}
+
+        You MUST prefer these real tools. Only suggest a step that cannot be fulfilled by any of them if absolutely necessary.
+        """
+        else:
+            tools_section = "\nNo tools are currently registered in the system."
+
         return f"""You are a pragmatic task decomposition expert.
 
         USER REQUEST: {original_query}
 
+        {tools_section}
         Break this request into the **minimal number of clear, actionable steps** required to complete the goal.
 
         Core Rules (strict):
         - Use as few steps as possible. If one tool call can fulfill the request, return exactly 1 step.
         - Only create multiple steps when there are real dependencies or different capabilities needed.
         - Each step should correspond to what a single tool execution can realistically achieve.
+        - For "suggested_tool_category", prefer the **exact tool name** from the full list above when it fits. Otherwise use a short category hint (e.g. "web_search", "file_read").
         - For "expected_outcome", describe success in simple, practical terms. 
         Most tool-based steps should have outcomes like:
         - "Tool executed successfully and returned the requested data"
@@ -144,7 +185,6 @@ class PromptBuilder:
         - "Content was written to the target file"
         - "Analysis completed and results produced"
         - Do NOT invent complex structured objects or deep theoretical results unless the user request explicitly requires them.
-        - If a step likely needs a tool that may not be loaded, use "suggested_tool_category" with a short hint.
 
         Output ONLY valid JSON:
 
@@ -153,7 +193,7 @@ class PromptBuilder:
             {{
             "description": "exact sub-task description",
             "dependencies": [list of previous step indices or empty list],
-            "suggested_tool_category": "optional short hint or empty string",
+            "suggested_tool_category": "exact tool name if available, otherwise short category hint",
             "expected_outcome": "short, realistic success description (usually 'Tool executed successfully' or similar)"
             }}
         ]

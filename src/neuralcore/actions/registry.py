@@ -128,19 +128,87 @@ class ActionRegistry:
         return [(a, s) for _, a, s in results[:limit]]
 
     # list_all_tools, debug_print_all_tools, execute unchanged...
-    def list_all_tools(self, limit: int = 100) -> List[Dict]:
-        tools = []
+    def list_all_tools(
+        self,
+        limit: Optional[int] = None,
+        include_hidden: bool = False,
+        current_agent_id: Optional[str] = None,
+        is_subagent: bool = False,
+        as_llm_format: bool = False,
+        include_schema: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """
+        Returns the FULL list of ALL registered Actions in the system.
+        Single source of truth — lives in NeuralCore, must remain generic.
+        """
+        tools: List[Dict[str, Any]] = []
+
         for name, (action, set_name) in self.all_actions.items():
-            tools.append(
-                {
-                    "name": action.name,
-                    "description": action.description,
-                    "set_name": set_name,
-                    "tags": getattr(action, "tags", []),
+            # ==================== HIDING LOGIC ====================
+            if not include_hidden:
+                if current_agent_id and getattr(action, "hidden_for_agents", None):
+                    if current_agent_id in action.hidden_for_agents:
+                        continue
+                if is_subagent and getattr(action, "hidden_for_subagents", False):
+                    continue
+            # ======================================================
+
+            tool_dict: Dict[str, Any] = {
+                "name": action.name,
+                "description": action.description,
+                "set_name": set_name,
+                "tags": getattr(action, "tags", []),
+                "aliases": getattr(action, "aliases", []),
+                "require_confirmation": getattr(action, "require_confirmation", False),
+                "usage_count": getattr(action, "usage_count", 0),
+                "action_type": getattr(action, "type", "tool"),
+            }
+
+            # Safely add required parameters (they are not stored as self.required)
+            if include_schema or as_llm_format:
+                # Extract required from the schema we already built
+                params = action._raw_schema.get("parameters", {})
+                required = params.get("required", [])
+                if required:
+                    tool_dict["required"] = required
+
+                if include_schema:
+                    tool_dict["parameters"] = params.get("properties", {})
+
+            if as_llm_format:
+                # Return full OpenAI-compatible tool specification
+                tool_spec = {
+                    "type": "function",
+                    "function": {
+                        "name": action.name,
+                        "description": action.description,
+                        "parameters": action._raw_schema.get("parameters", {}),
+                    },
                 }
+                if getattr(action, "strict", False):
+                    tool_spec["function"]["strict"] = True
+
+                tools.append(tool_spec)
+                continue  # skip the normal dict when in LLM mode
+
+            tools.append(tool_dict)
+
+        # Sort by set_name then name for consistent output
+        tools.sort(
+            key=lambda x: (
+                x.get("set_name", "") if not as_llm_format else "",
+                x.get("name", ""),
             )
-        tools.sort(key=lambda x: x["name"])
-        return tools[:limit] if limit else tools
+        )
+
+        if limit is not None and limit > 0:
+            tools = tools[:limit]
+
+        logger.debug(
+            f"list_all_tools returned {len(tools)} tools "
+            f"(include_hidden={include_hidden}, agent_id={current_agent_id})"
+        )
+        return tools
 
     def debug_print_all_tools(self, limit: int = 8):
         tools = self.list_all_tools(limit)
