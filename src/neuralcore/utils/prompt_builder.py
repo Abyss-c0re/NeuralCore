@@ -177,7 +177,7 @@ class PromptBuilder:
         - Use as few steps as possible. If one tool call can fulfill the request, return exactly 1 step.
         - Only create multiple steps when there are real dependencies or different capabilities needed.
         - Each step should correspond to what a single tool execution can realistically achieve.
-        - For "suggested_tool_category", prefer the **exact tool name** from the full list above when it fits. Otherwise use a short category hint (e.g. "web_search", "file_read").
+        - For "suggested_tool", prefer the **exact tool name** from the full list above when it fits. Otherwise use a short category hint (e.g. "web_search", "file_read").
         - For "expected_outcome", describe success in simple, practical terms. 
         Most tool-based steps should have outcomes like:
         - "Tool executed successfully and returned the requested data"
@@ -193,7 +193,7 @@ class PromptBuilder:
             {{
             "description": "exact sub-task description",
             "dependencies": [list of previous step indices or empty list],
-            "suggested_tool_category": "exact tool name if available, otherwise short category hint",
+            "suggested_tool": "exact tool name if available, otherwise short category hint",
             "expected_outcome": "short, realistic success description (usually 'Tool executed successfully' or similar)"
             }}
         ]
@@ -213,57 +213,65 @@ class PromptBuilder:
         marker: str,
         loop_count: int,
         expected_outcome: str = "",
+        previous_results_context: str = "",
     ) -> str:
         is_final_step = current_index == total_tasks - 1
 
         final_step_block = ""
         if is_final_step:
             final_step_block = """
-        THIS IS THE FINAL SUB-TASK.
-        The user goal is only complete when the output artifact (file, report, etc.) has been successfully written/created.
-        You MUST use the appropriate write/save/create tool with correct parameters.
-        After the write tool succeeds and the expected_outcome is fully met, output the marker.
-        Do NOT end with a read/analysis step."""
+            THIS IS THE FINAL SUB-TASK.
+            The overall goal is complete as soon as this sub-task's expected_outcome is fully achieved.
+            Focus only on completing this last step correctly.
+            When the expected_outcome is met, output the marker."""
 
         expected_block = ""
         if expected_outcome and expected_outcome.strip():
             expected_block = f"""
-        EXPECTED OUTCOME THAT MUST BE VERIFIED BEFORE EMITTING MARKER:
-        {expected_outcome.strip()}
+            EXPECTED OUTCOME THAT MUST BE VERIFIED BEFORE EMITTING MARKER:
+            {expected_outcome.strip()}
 
-        After the tool result arrives, you MUST mentally verify:
-        - Did the tool produce exactly what the expected_outcome describes?
-        - Are arguments correct and the result meaningful?
-        Only if YES → output exactly the marker below. Otherwise continue working on this sub-task."""
+            After the tool result arrives, you MUST mentally verify:
+            - Did the tool produce exactly what the expected_outcome describes?
+            - Are arguments correct and the result meaningful?
+            Only if YES → output exactly the marker below. Otherwise continue working on this sub-task."""
+
+        previous_results_block = ""
+        if previous_results_context and previous_results_context.strip():
+            previous_results_block = f"""
+            PREVIOUS RESULTS (FULL CONTENT — reuse this, DO NOT re-read files):
+            {previous_results_context}
+            """
 
         return f"""You are executing **ONE SPECIFIC SUB-TASK ONLY**. Ignore everything else.
 
-        ORIGINAL USER REQUEST (background only): {original_query}
+            ORIGINAL USER REQUEST (background only): {original_query}
 
-        ALREADY COMPLETED STEPS (do NOT repeat):
-        {completed_context}
+            ALREADY COMPLETED STEPS (short summary — do NOT repeat):
+            {completed_context}
+            {previous_results_block}
 
-        TOOLS ALREADY USED (avoid exact repeats unless necessary):
-        {used_tools_str}
+            TOOLS ALREADY USED (avoid exact repeats unless necessary):
+            {used_tools_str}
 
-        TOOL RULE: If FindTool succeeded last turn, the tool is loaded — use it directly. Do not call FindTool again.
+            TOOL RULE: If FindTool succeeded last turn, the tool is loaded — use it directly. Do not call FindTool again.
 
-        REMAINING STEPS:
-        {remaining_context}
+            REMAINING STEPS:
+            {remaining_context}
 
-        CURRENT SUB-TASK ({current_index + 1}/{total_tasks}): {task_desc}
-        {expected_block}
-        {final_step_block}
+            CURRENT SUB-TASK ({current_index + 1}/{total_tasks}): {task_desc}
+            {expected_block}
+            {final_step_block}
 
-        STRICT PROTOCOL:
-        1. Focus only on the current sub-task.
-        2. Call the correct tool with accurate parameters.
-        3. After tool result: verify it matches the expected_outcome above.
-        4. When verification passes → output EXACTLY:
-        {marker}
-        Nothing else. No commentary.
+            STRICT PROTOCOL:
+            1. Focus only on the current sub-task.
+            2. Call the correct tool with accurate parameters.
+            3. After tool result: verify it matches the expected_outcome above.
+            4. When verification passes → output EXACTLY:
+            {marker}
+            Nothing else. No commentary.
 
-        Turn: {loop_count}"""
+            Turn: {loop_count}"""
 
     @staticmethod
     def objective_reminder(reminder_body: str) -> str:
