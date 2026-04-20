@@ -810,3 +810,46 @@ class PromptBuilder:
     Be precise, conservative, and objective.
     Use ONLY the information provided in the query.
     Answer with exactly one word: YES or NO."""
+
+    @staticmethod
+    def analysis_multi_query_generation(analysis_query: str) -> str:
+        """Generates 4-6 diverse search queries to thoroughly investigate the analysis topic
+        using tool outcomes / accumulated knowledge."""
+        return f"""
+        You are an expert research assistant. Given the following analysis goal, generate 4-6 diverse, specific search queries 
+        that will help retrieve the most relevant tool outcomes and findings from previous executions.
+
+        Rules:
+        - Make queries focused on different angles (technical details, errors, results, comparisons, timelines, etc.).
+        - Use precise terminology that might appear in tool outputs (command names, file paths, error messages, etc.).
+        - Include variations in scope: broad overview, specific components, potential issues.
+        - Return ONLY a valid JSON array of strings, e.g. ["query1", "query2", ...]
+        - Do not add explanations, numbering, or any text outside the JSON.
+
+        Analysis goal: {analysis_query}
+        """.strip()
+
+    @staticmethod
+    def analysis_report_synthesis(original_query: str, combined_research: str) -> str:
+        """Synthesizes a clean, structured analysis report from gathered tool outcomes."""
+        return f"""
+        You are a precise technical analyst. Using ONLY the provided tool outcome research below, 
+        create a comprehensive, well-structured analysis report for the original query.
+
+        Original analysis query:
+        {original_query}
+
+        Gathered tool outcomes and findings:
+        {combined_research}
+
+        Requirements for the report:
+        - Start with a clear **Summary** (2-4 sentences).
+        - Then **Key Findings** (bullet points with evidence references).
+        - **Analysis & Insights** (deeper interpretation, patterns, implications).
+        - **Potential Issues / Gaps** if any.
+        - **Recommendations** or next steps if relevant.
+        - End with **[FINAL_ANSWER_COMPLETE]** marker.
+
+        Be objective, cite specific tool results where possible, and keep the report concise yet complete.
+        Do not hallucinate information not present in the gathered research.
+        """.strip()
