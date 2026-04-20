@@ -118,7 +118,7 @@ class LLMClient:
 
     async def stream_chat(
         self,
-        messages: List[Dict[str, Any]],
+        messages: Union[str, List[Dict]] = "",
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         extra_body: Optional[Dict] = None,
@@ -342,7 +342,7 @@ class LLMClient:
 
     async def call_tools(
         self,
-        messages: List[Dict[str, Any]],
+        messages: Union[str, List[Dict]] = "",
         tools: Optional[Union[List[Dict[str, Any]], "ActionSet"]] = None,
         temperature: float = 0.0,
         max_tokens: int = 1024,
@@ -409,7 +409,7 @@ class LLMClient:
     async def stream_with_tools(
         self,
         manager,
-        messages: List[Dict[str, Any]],
+        messages: Union[str, List[Dict]] = "",
         tools: Optional[Union[List[Dict[str, Any]], "ActionSet"]] = None,
         temperature: float = 0.7,
         max_tokens: int = 22048,
