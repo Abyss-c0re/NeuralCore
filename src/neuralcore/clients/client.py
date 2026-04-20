@@ -244,7 +244,7 @@ class LLMClient:
 
     async def chat(
         self,
-        messages: List[Dict[str, Any]],
+        messages: Union[str, List[Dict]] = "",
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         extra_body: Optional[Dict] = None,
