@@ -645,6 +645,7 @@ class ContextManager:
         for item in chunk_items:
             if item.key in self.knowledge_base:
                 continue
+            item.metadata["is_large_item"] = metadata.get("is_large_item", False) if metadata else False
             item.embedding = await self.fetch_embedding(item.content, prefix="passage")
             self.knowledge_base[item.key] = item
             added += 1
@@ -1713,12 +1714,12 @@ class ContextManager:
         metadata: dict | None = None,
     ):
         """Record FULL tool result + lightweight call history.
-        Skips duplicate calls with identical tool name + arguments to prevent KB bloat."""
+        Now adds explicit 'is_large_item' flag for better consolidation triggers."""
         metadata = metadata or {}
         timestamp = time.time()
         args = metadata.get("args", {}) or {}
 
-        # ── NEW: Lightweight tool call history (name + params only, no output) ──
+        # Lightweight call history (unchanged)
         clean_args = {k: v for k, v in args.items() if k not in ("agent", "self")}
         call_entry = {
             "tool": tool_name,
@@ -1726,27 +1727,10 @@ class ContextManager:
             "timestamp": timestamp,
         }
         self.tool_call_history.append(call_entry)
-        if len(self.tool_call_history) > 20:  # keep last 20 calls
+        if len(self.tool_call_history) > 20:
             self.tool_call_history.pop(0)
 
-        logger.debug(f"[TOOL CALL LOGGED] {tool_name} with args={clean_args}")
-
-        # ── DEDUPLICATION: Check if this exact tool+args was already recorded recently ──
-        if self._is_duplicate_tool_call(tool_name, clean_args):
-            logger.info(
-                f"[TOOL DEDUP] Skipping KB recording for duplicate call: {tool_name} "
-                f"with args={clean_args}"
-            )
-            # Still log the action for summary/stats
-            self.tools_executed.append(tool_name)
-            self._log_action(
-                "tool_outcome",
-                f"{tool_name} (deduplicated) → skipped duplicate",
-                metadata,
-            )
-            return
-
-        # ── 1. Convert result to string with maximum fidelity (no size cap) ──
+        # Convert result
         if isinstance(result, (dict, list, tuple)):
             try:
                 result_str = json.dumps(result, ensure_ascii=False, indent=2)
@@ -1757,7 +1741,7 @@ class ContextManager:
 
         original_size = len(result_str)
 
-        # ── 2. Minimal cleaning only ──
+        # Minimal cleaning (unchanged)
         result_str = re.sub(
             r"(?i)You are a helpful Terminal AI agent.*?(?=\n\n|\Z)",
             "",
@@ -1765,30 +1749,19 @@ class ContextManager:
             flags=re.DOTALL,
         )
 
-        cleaned_size = len(result_str)
-
-        if cleaned_size < 30:
-            logger.debug(f"[TOOL OUTCOME] Skipped tiny/empty result from {tool_name}")
+        if len(result_str) < 30:
             return
 
-        # ── 3. DEBUG: Show exactly what we are about to save ──
-        preview = result_str[:600] + ("..." if len(result_str) > 600 else "")
-        logger.debug(
-            f"[RECORDING FULL] {tool_name} | "
-            f"original={original_size:,} chars | "
-            f"after_clean={cleaned_size:,} chars\n"
-            f"Preview:\n{preview}"
-        )
-
-        # ── 4. Build content block ──
+        # ← NEW: explicit large-item flag for consolidator
+        is_large = original_size > 800
         content = (
             f"Tool: {tool_name}\n"
             f"Executed: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp))}\n"
-            f"Result size: {original_size:,} characters\n\n"
+            f"Result size: {original_size:,} characters\n"
+            f"Large item: {is_large}\n\n"
             f"{result_str}"
         )
 
-        # ── 5. Save to knowledge base (full result) ──
         await self.add_external_content(
             source_type="tool_outcome",
             content=content,
@@ -1796,7 +1769,8 @@ class ContextManager:
                 "tool": tool_name,
                 "timestamp": timestamp,
                 "original_length": original_size,
-                "args": clean_args,  # store args for boosting & dedup
+                "is_large_item": is_large,  # ← new key
+                "args": clean_args,
                 **metadata,
             },
         )
@@ -1805,9 +1779,8 @@ class ContextManager:
         self._log_action(
             "tool_outcome", f"{tool_name} → {result_str[:120]}...", metadata
         )
-
         logger.info(
-            f"✅ Recorded full tool outcome: {tool_name} ({original_size:,} chars)"
+            f"✅ Recorded full tool outcome: {tool_name} ({original_size:,} chars, large={is_large})"
         )
 
     async def _get_recent_tool_outcomes(
