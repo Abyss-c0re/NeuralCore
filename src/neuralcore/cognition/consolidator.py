@@ -207,8 +207,8 @@ class KnowledgeConsolidator:
     async def extract_and_consolidate(
         self, trace: Optional[List[Dict]] = None, task_goal: str = ""
     ):
-        """Main method: distill higher-dimensional abstract concepts + trigger training only on real knowledge growth.
-        Keeps NeuralCore abstract — no client logic here."""
+        """Main method: distill higher-dimensional abstract concepts.
+        Keeps NeuralCore fully abstract and reusable for any domain."""
         now = time.time()
         if now - self._last_extraction_ts < self.extraction_cooldown:
             logger.debug(
@@ -237,7 +237,7 @@ class KnowledgeConsolidator:
             self.agent.context_manager, "investigation_state", {}
         ).get("findings", [])
 
-        # Knowledge growth diagnostics
+        # Knowledge growth diagnostics (domain-agnostic)
         kb = self.agent.context_manager.knowledge_base
         total_kb_tokens = sum(len(getattr(item, "content", "")) for item in kb.values())
         num_concepts = sum(
@@ -245,12 +245,6 @@ class KnowledgeConsolidator:
             for item in kb.values()
             if getattr(item, "source_type", "") == "extracted_concept"
         )
-        num_tool_outcomes = sum(
-            1
-            for item in kb.values()
-            if getattr(item, "source_type", "") == "tool_outcome"
-        )
-
         has_large_item = any(
             getattr(item, "source_type", "") == "tool_outcome"
             and len(getattr(item, "content", "")) > 800
@@ -258,8 +252,7 @@ class KnowledgeConsolidator:
         )
 
         logger.debug(
-            f"[CONSOLIDATE] KB stats | total_tokens≈{total_kb_tokens:,} | "
-            f"concepts={num_concepts} | tool_outcomes={num_tool_outcomes} | large_item={has_large_item}"
+            f"[CONSOLIDATE] KB stats | tokens≈{total_kb_tokens:,} | concepts={num_concepts} | large_item={has_large_item}"
         )
 
         logger.info(
@@ -267,32 +260,16 @@ class KnowledgeConsolidator:
         )
 
         candidates = list(kb.values())
-        logger.debug(
-            f"[CONSOLIDATE] Reranking {len(candidates)} candidates for concept distillation"
-        )
 
-        # Better input for distillation: higher k + prioritize concepts and large items
+        # Neutral reranking — no domain-specific bias
         relevant = await self.rerank(goal, candidates, k=60)
-
-        # Prioritize already-extracted concepts and large tool outcomes
-        relevant = sorted(
-            relevant,
-            key=lambda x: (
-                3
-                if getattr(x, "source_type", "") == "extracted_concept"
-                else 2
-                if len(getattr(x, "content", "")) > 800
-                else 1
-            ),
-            reverse=True,
-        )[:60]
 
         extracted = await self._distill_concepts(
             relevant,
             goal,
             hypotheses,
             findings,
-            self.concept_graph,  # ← new: pass existing concepts
+            self.concept_graph,  # allow refinement of previous abstractions
         )
 
         added = 0
@@ -320,24 +297,22 @@ class KnowledgeConsolidator:
         if added > 0:
             if hasattr(self.agent.context_manager, "_sparse_index_dirty"):
                 self.agent.context_manager._sparse_index_dirty = True
-            logger.info(
-                f"✅ Stored {added} new abstract concepts (large item: {has_large_item})"
-            )
+            logger.info(f"✅ Stored {added} new abstract concepts")
         else:
             logger.debug("[CONSOLIDATE] No new concepts distilled this round")
 
         self._update_concept_graph(extracted)
 
-        # Smart training trigger — only on meaningful growth
+        # Neutral training trigger — based purely on knowledge growth
         if added >= 1 or has_large_item or total_kb_tokens > 20000 or num_concepts >= 8:
             logger.info(
                 f"[TRAINING TRIGGER] Meaningful growth detected → scheduling retrain "
-                f"(added={added}, tokens≈{total_kb_tokens:,}, concepts={num_concepts}, large={has_large_item})"
+                f"(added={added}, tokens≈{total_kb_tokens:,}, concepts={num_concepts})"
             )
             asyncio.create_task(self._schedule_training())
         else:
             logger.debug(
-                f"[TRAINING TRIGGER] Growth too small for full retrain (added={added}, tokens≈{total_kb_tokens:,}, concepts={num_concepts})"
+                f"[TRAINING TRIGGER] Growth too small for full retrain (added={added})"
             )
 
     async def _distill_concepts(
