@@ -27,6 +27,9 @@ class Task:
     )
     expected_outcome: str = ""
 
+    # NEW: Recommended tool for this task (from planning)
+    suggested_tool: str = ""
+
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
     result: Optional[Any] = None
@@ -94,11 +97,10 @@ class Task:
             if self.assigned_agent
             else None,
             "expected_outcome": self.expected_outcome,
+            "suggested_tool": self.suggested_tool,  # ← NEW
             "start_time": self.start_time.isoformat() if self.start_time else None,
             "end_time": self.end_time.isoformat() if self.end_time else None,
-            "result": str(self.result)[:1000]
-            if self.result is not None
-            else None,  # safe truncation
+            "result": str(self.result)[:1000] if self.result is not None else None,
             "error": self.error,
             "subtasks": [st.to_dict() for st in self.subtasks],
             "metadata": self.metadata,
@@ -110,4 +112,5 @@ class Task:
             if self.start_time and self.end_time
             else ""
         )
-        return f"[{self.status.upper()}] {self.task_id[:8]}… | {self.description[:90]}{duration}"
+        tool_info = f" | tool={self.suggested_tool}" if self.suggested_tool else ""
+        return f"[{self.status.upper()}] {self.task_id[:8]}… | {self.description[:90]}{tool_info}{duration}"

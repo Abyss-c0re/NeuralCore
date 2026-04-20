@@ -34,6 +34,8 @@ class AgentState:
 
     # ==================== Loaded Tools Tracking ====================
     loaded_tools: List[str] = field(default_factory=list)
+    skip_manager_this_turn: bool = False
+    last_used_tool: Optional[str] = None
 
     # ==================== FindTool Tracking ====================
     findtool_call_count: int = 0
@@ -296,6 +298,8 @@ class AgentState:
         self.goal_achieved = False
         self.tool_calls = None
         self.full_reply = ""
+        self.skip_manager_this_turn: bool = False
+        self.last_used_tool: Optional[str] = None
         self.tool_results.clear()
         self.executed_functions.clear()
         self.last_tool_success = None
@@ -555,9 +559,14 @@ class AgentState:
 
         for i, step in enumerate(steps):
             expected = step.get("expected_outcome", "") or "Tool executed successfully"
+
+            # NEW: prefer "suggested_tool", fallback to old "suggested_tool_category"
+            suggested_tool = step.get("suggested_tool") or step.get("suggested_tool_category", "")
+
             t = Task(
                 description=step.get("description", f"Step {i + 1}"),
                 expected_outcome=expected,
+                suggested_tool=suggested_tool,                    # ← NEW
                 metadata={
                     "original_index": i,
                     "suggested_tool_category": step.get("suggested_tool_category"),
@@ -567,6 +576,12 @@ class AgentState:
             self.planned_tasks.append(t.description)
             self.task_expected_outcomes.append(t.expected_outcome)
             task_map[i] = t
+
+            # Populate tool assignment for quick lookup
+            if suggested_tool:
+                self.task_tool_assignments[i] = [suggested_tool]
+            else:
+                self.task_tool_assignments[i] = []
 
         for i, step in enumerate(steps):
             deps_indices = step.get("dependencies", [])
