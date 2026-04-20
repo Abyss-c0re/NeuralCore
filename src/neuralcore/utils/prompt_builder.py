@@ -664,43 +664,43 @@ class PromptBuilder:
         relevant_items: List[Any],
         existing_concepts: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """Strongly guided prompt that forces use of hypotheses and findings
-        while encouraging refinement of existing concepts."""
+        """Strict prompt designed to minimize hallucinations and force grounded abstraction."""
 
-        # Format hypotheses and findings clearly
-        hyp_text = "\n".join(f"- {h}" for h in hypotheses) if hypotheses else "None provided."
-        find_text = "\n".join(f"- {f}" for f in findings) if findings else "None provided."
+        hyp_text = "\n".join(f"- {h}" for h in hypotheses) if hypotheses else "None"
+        find_text = "\n".join(f"- {f}" for f in findings) if findings else "None"
 
         items_text = "\n\n".join(
-            f"ITEM {i+1} [source: {getattr(item, 'source_type', 'unknown')}]\n"
-            f"{getattr(item, 'content', '')[:1400]}..."
-            for i, item in enumerate(relevant_items[:8])
+            f"ITEM {i + 1} [source: {getattr(item, 'source_type', 'unknown')}]\n"
+            f"Content preview: {getattr(item, 'content', '')[:1300]}..."
+            for i, item in enumerate(relevant_items[:10])
         )
 
         existing_text = ""
         if existing_concepts and len(existing_concepts) > 0:
-            existing_text = "EXISTING CONCEPTS (refine, extend, or link to these when relevant):\n" + "\n".join(
-                f"- {name}: {concept.get('description', '')[:280]}"
-                for name, concept in list(existing_concepts.items())[:12]
+            existing_text = (
+                "\nEXISTING CONCEPTS (refine or link to these when appropriate):\n"
+                + "\n".join(
+                    f"- {name}: {concept.get('description', '')[:250]}"
+                    for name, concept in list(existing_concepts.items())[:10]
+                )
             )
 
-        return f"""You are a precise computational neuroscientist performing grounded abstraction.
+        return f"""You are a strict computational neuroscientist. Your task is to extract 5-8 high-quality abstract concepts by comparing the provided code artifacts with neuroscience theory from Purves et al.
 
-        Task: Extract or refine 5–9 high-quality abstract concepts by analyzing the provided code artifacts against neuroscience theory (Purves et al.).
-
-        You MUST use the following high-level signals to guide your abstraction:
-        - Goal: {goal}
-        - Hypotheses: 
-        {hyp_text}
-        - Findings:
-        {find_text}
-
-        Rules (strict):
-        - Every concept must be a true higher-dimensional abstraction grounded in BOTH the code and the neuroscience principles.
+        STRICT RULES:
+        - Base EVERY concept ONLY on the actual content in the items below. Do not invent classes, methods, or mechanisms that are not present.
+        - Use the Goal, Hypotheses, and Findings as strong guidance for relevance.
         - Prefer refining or linking to EXISTING concepts when they fit.
-        - Create new concepts only when genuinely novel patterns emerge.
-        - Avoid fabricating classes, methods, or mechanisms that do not exist in the provided items.
-        - Output ONLY a valid JSON array. No extra text.
+        - Each concept must be a genuine higher-dimensional abstraction (e.g. "LambdaMART reranking as attentional modulation" is good; generic fluff is bad).
+        - Output ONLY a valid JSON array. No explanations, no markdown.
+
+        Goal: {goal}
+
+        Hypotheses:
+        {hyp_text}
+
+        Findings:
+        {find_text}
 
         {existing_text}
 
@@ -710,10 +710,10 @@ class PromptBuilder:
         Output format (JSON array only):
         [
         {{
-            "name": "short, precise name",
-            "description": "1-2 sentence grounded mapping between code and neuroscience",
+            "name": "short precise name",
+            "description": "1-2 sentence grounded mapping",
             "type": "mechanism | strategy | principle | analogy",
-            "score": 0.75,
+            "score": 0.0-1.0,
             "links_to": ["existing_concept_name_if_relevant"]
         }}
         ]
