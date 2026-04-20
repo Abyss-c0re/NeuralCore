@@ -718,3 +718,7 @@ class PromptBuilder:
         }}
         ]
         """
+
+    @staticmethod
+    def context_summary_recent_tools_header() -> str:
+        return "Recent Tool Outcomes (last 4):"

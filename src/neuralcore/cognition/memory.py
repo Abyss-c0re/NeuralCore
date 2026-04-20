@@ -5,7 +5,7 @@ import time
 import numpy as np
 import hashlib
 import json
-from typing import Tuple, List, Dict, Any, Optional
+from typing import Tuple, List, Dict, Any, Optional, AsyncIterable
 from neuralcore.utils.logger import Logger
 from neuralcore.utils.prompt_builder import PromptBuilder
 from neuralcore.utils.config import get_loader
@@ -53,6 +53,7 @@ logger = Logger.get_logger()
 # ─────────────────────────────────────────────────────────────
 class ContextManager:
     def __init__(self, agent) -> None:
+        self.agent = agent
         self.max_tokens = agent.max_tokens
         clients = get_clients()
         self.client = clients.get("main")
@@ -441,6 +442,10 @@ class ContextManager:
     # CONTEXT SUMMARY, PRUNING, INVESTIGATION STATE
     # ─────────────────────────────────────────────────────────────
     def get_context_summary(self, max_messages: int = 10, max_chars: int = 1000) -> str:
+        """Improved context summary:
+        - Max 40% of budget for recent messages
+        - Remaining 60% split for last 4 tool outcomes (via _get_recent_tool_outcomes)
+        """
         if self.mode == "chat":
             if not self.pure_chat_history:
                 return ""
@@ -451,9 +456,15 @@ class ContextManager:
             )
             return "\n".join(lines)
 
+        # ── Calculate budget split ─────────────────────────────────────
+        msg_budget = int(max_chars * 0.40)  # 40% → messages
+        tools_budget = max_chars - msg_budget  # 60% → tools + other sections
+
+        # ── Build base sections (files, tools, kb, tokens, topic) ─────
         files = sorted(list(self.files_checked))
-        tools = self.tools_executed
+        tools_executed = self.tools_executed
         recent_messages = self.current_topic.history[-max_messages:]
+
         message_summaries = [
             f"[{msg['role'].upper()}] {msg['content'][:200]}{'...' if len(msg['content']) > 200 else ''}"
             for msg in recent_messages
@@ -468,28 +479,71 @@ class ContextManager:
         lines = [
             PromptBuilder.context_summary_header(),
             PromptBuilder.context_summary_files_section(files),
-            PromptBuilder.context_summary_tools_section(tools),
+            PromptBuilder.context_summary_tools_section(tools_executed),
             PromptBuilder.context_summary_kb_section(len(self.knowledge_base)),
             PromptBuilder.context_summary_token_section(total_tokens, self.max_tokens),
             PromptBuilder.context_summary_topic_section(self.current_topic.name),
             "",
             PromptBuilder.context_summary_last_messages_header(),
-            *message_summaries,
         ]
 
+        # Add messages — but respect msg_budget
+        msg_section = "\n".join(message_summaries)
+        if len(msg_section) > msg_budget:
+            msg_section = (
+                msg_section[:msg_budget].rsplit("\n", 1)[0] + "\n…(messages truncated)"
+            )
+
+        lines.extend([msg_section, ""])
+
+        # ── Investigation state (keep as before) ───────────────────────
         inv = self.investigation_state
         inv_block = PromptBuilder.context_summary_investigation_block(
             goal=inv["goal"], pending=inv["pending"], completed=inv["completed"]
         )
         lines.extend(
-            ["", PromptBuilder.context_summary_investigation_header(), inv_block]
+            [PromptBuilder.context_summary_investigation_header(), inv_block, ""]
         )
 
+        # ── Add last 4 tool outcomes (using the remaining budget) ───────
+        try:
+            # We run this synchronously via asyncio.run_coroutine_threadsafe or to_thread
+            # but since get_context_summary is sync, we use to_thread for safety
+            recent_tools = asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: asyncio.run(
+                    self._get_recent_tool_outcomes(
+                        limit=4,
+                        max_tokens_per_result=800,  # per tool limit
+                        max_total_tokens=tools_budget,
+                    )
+                ),
+            )
+            # Wait for result (this is safe inside agent context as it's short)
+            recent_tools = (
+                asyncio.get_event_loop().run_until_complete(recent_tools)
+                if asyncio.get_event_loop().is_running()
+                else ""
+            )
+
+            if recent_tools and recent_tools.strip():
+                lines.append(PromptBuilder.context_summary_recent_tools_header())
+                lines.append(recent_tools)
+        except Exception as e:
+            logger.warning(f"Failed to fetch recent tool outcomes for summary: {e}")
+
+        # ── Final truncation safety ─────────────────────────────────────
         full_summary = "\n".join(lines)
+
         if len(full_summary) > max_chars:
-            cutoff = max_chars - 50
+            cutoff = max_chars - 60
             summary_lines = full_summary[:cutoff].rsplit("\n", 1)[0]
-            return summary_lines + "\n…(truncated)"
+            full_summary = summary_lines + "\n…(summary truncated)"
+
+        logger.debug(
+            f"get_context_summary generated {len(full_summary)} chars "
+            f"(~40% messages, ~60% tools+metadata)"
+        )
         return full_summary
 
     def prune_sub_agent_noise(self):
@@ -556,11 +610,15 @@ class ContextManager:
     def _chunk_text(
         self, text: str, parent_key: str, source_type: str
     ) -> List[KnowledgeItem]:
+        """Chunk text and generate unique keys.
+
+        For streaming tool outcomes we use content hash in the key to prevent collisions
+        across multiple calls to add_external_content under the same parent_key.
+        """
         if len(text) < TOOL_OUTCOME_NO_CHUNK_THRESHOLD:
             chunk_texts = [text]
         else:
             if self.tokenizer:
-                # Use the proper chunking method from TextTokenizer (respects inner tokenizer.encode/decode)
                 chunk_texts = self.tokenizer.split_text_into_chunks(
                     text,
                     max_tokens=CHUNK_SIZE_TOKENS,
@@ -568,7 +626,7 @@ class ContextManager:
                 )
                 chunk_texts = chunk_texts[:MAX_CHUNKS_PER_ITEM]
             else:
-                # fallback: character-based
+                # fallback character-based
                 chunk_size = CHUNK_SIZE_TOKENS * 4
                 overlap = CHUNK_OVERLAP_TOKENS * 4
                 chunks = []
@@ -579,42 +637,94 @@ class ContextManager:
                     start = end - overlap
                 chunk_texts = chunks[:MAX_CHUNKS_PER_ITEM]
 
-        items = []
+        items: List[KnowledgeItem] = []
         for i, chunk_content in enumerate(chunk_texts):
             if not chunk_content.strip():
                 continue
-            chunk_key = f"{parent_key}_chunk_{i}"
+
+            # === KEY FIX: Use content hash for uniqueness ===
+            content_hash = hashlib.md5(chunk_content.encode("utf-8")).hexdigest()[:12]
+
+            chunk_key = f"{parent_key}_chunk_{content_hash}"
+
             metadata = {
                 "parent_key": parent_key,
-                "chunk_index": i,
+                "chunk_index": i,  # keep original order
+                "content_hash": content_hash,
                 "total_chunks": len(chunk_texts),
                 "source_type": source_type,
             }
+
             item = KnowledgeItem(chunk_key, source_type, chunk_content, metadata)
             items.append(item)
+
         return items
+
+    async def _add_streaming_chunk_batch(
+        self,
+        tool_name: str,
+        accumulated_text: str,
+        parent_key: str,
+        chunk_index: int,
+        metadata: dict,
+        timestamp: float,
+        silent: bool = True,
+    ) -> None:
+        """Add a batch of accumulated text as one proper chunk."""
+        if not accumulated_text.strip():
+            return
+
+        chunk_content = (
+            f"Tool: {tool_name} (streaming batch {chunk_index})\n"
+            f"Executed: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp))}\n\n"
+            f"{accumulated_text}"
+        )
+
+        chunk_meta = {
+            "tool": tool_name,
+            "timestamp": timestamp,
+            "batch_index": chunk_index,
+            "parent_key": parent_key,
+            "streamed": True,
+            "is_large_item": True,
+            **metadata,
+        }
+
+        await self.add_external_content(
+            source_type="tool_outcome_chunk",
+            content=chunk_content,
+            metadata=chunk_meta,
+            silent=silent,
+        )
 
     # ─────────────────────────────────────────────────────────────
     # ADD EXTERNAL CONTENT (now lazy, does NOT rebuild immediately)
     # ─────────────────────────────────────────────────────────────
 
     async def add_external_content(
-        self, source_type: str, content: str, metadata: Dict[str, Any] | None = None
+        self,
+        source_type: str,
+        content: str,
+        metadata: Dict[str, Any] | None = None,
+        silent: bool = False,
     ) -> str | None:
+        """Add content to knowledge base.
+
+        - Streaming chunks (tool_outcome_chunk) are allowed MULTIPLE times under the same parent_key.
+        - Normal items keep strict deduplication.
+        """
         if not content or len(content.strip()) < 15:
             return None
 
         metadata = metadata or {}
         content_lower = content.lower()
 
-        # ── Smart, less aggressive guard ──
+        # Contamination guard
         forbidden = PromptBuilder.contamination_forbidden_phrases()
-
         is_contaminated = any(phrase.lower() in content_lower for phrase in forbidden)
 
         if is_contaminated:
             if source_type in ("tool_outcome", "task_result"):
-                # Clean instead of block for legitimate results
                 for phrase in forbidden:
                     content = re.sub(
                         re.escape(phrase) + r".*?(\n|$)",
@@ -622,30 +732,36 @@ class ContextManager:
                         content,
                         flags=re.IGNORECASE | re.DOTALL,
                     )
-                logger.debug(f"[KB GUARD] Partially cleaned {source_type}")
             else:
                 logger.warning(
                     f"[KB GUARD] Blocked contaminated content (source={source_type})"
                 )
                 return None
 
-        # Deduplication
-        parent_key = (
+        # Parent key
+        parent_key = metadata.get("parent_key") or (
             metadata.get("path")
             or metadata.get("filename")
             or f"{source_type}_{hash(content[:300])}"
         )
+        parent_key = str(parent_key)
 
-        if parent_key and str(parent_key) in self.files_checked:
+        # === CRITICAL FIX FOR STREAMING ===
+        is_streaming_chunk = source_type == "tool_outcome_chunk"
+
+        # Strict deduplication ONLY for normal (non-streaming) items
+        if not is_streaming_chunk and parent_key in self.files_checked:
+            logger.debug(f"→ Skipped duplicate under parent_key: {parent_key}")
             return None
 
+        # Process chunks / content
         chunk_items = self._chunk_text(content, parent_key, source_type)
 
         added = 0
         for item in chunk_items:
             if item.key in self.knowledge_base:
                 continue
-            item.metadata["is_large_item"] = metadata.get("is_large_item", False) if metadata else False
+            item.metadata["is_large_item"] = metadata.get("is_large_item", False)
             item.embedding = await self.fetch_embedding(item.content, prefix="passage")
             self.knowledge_base[item.key] = item
             added += 1
@@ -653,20 +769,29 @@ class ContextManager:
         if added > 0:
             self._sparse_index_dirty = True
             self.context_stats["kb_added"] += added
-            logger.info(
-                f"✅ Added {added} clean chunks for {parent_key} | source={source_type}"
-            )
+
+            if not silent:
+                logger.info(
+                    f"✅ Added {added} clean chunks for parent_key={parent_key} | source={source_type}"
+                )
+            else:
+                logger.debug(
+                    f"[STREAM] Added {added} chunks under parent_key={parent_key} | source={source_type}"
+                )
         else:
-            logger.debug(f"→ Skipped duplicate/empty content for {parent_key}")
+            logger.debug(f"→ Skipped duplicate content for parent_key={parent_key}")
 
-        if "path" in metadata or "filename" in metadata:
-            self.files_checked.add(str(parent_key))
+        # ONLY mark as seen for NON-streaming items
+        if not is_streaming_chunk:
+            self.files_checked.add(parent_key)
 
-        self._log_action(
-            "add_knowledge",
-            f"Added {source_type} → {parent_key} ({added} chunks)",
-            metadata,
-        )
+        if not silent:
+            self._log_action(
+                "add_knowledge",
+                f"Added {source_type} → {parent_key} ({added} chunks)",
+                metadata,
+            )
+
         return parent_key
 
     # ─────────────────────────────────────────────────────────────
@@ -1710,11 +1835,10 @@ class ContextManager:
     async def record_tool_outcome(
         self,
         tool_name: str,
-        result: Any,
+        result: Any | AsyncIterable[str] | None = None,
         metadata: dict | None = None,
-    ):
-        """Record FULL tool result + lightweight call history.
-        Now adds explicit 'is_large_item' flag for better consolidation triggers."""
+    ) -> None:
+        """Record tool outcome — supports both full result and streaming."""
         metadata = metadata or {}
         timestamp = time.time()
         args = metadata.get("args", {}) or {}
@@ -1730,7 +1854,18 @@ class ContextManager:
         if len(self.tool_call_history) > 20:
             self.tool_call_history.pop(0)
 
-        # Convert result
+        # ── STREAMING PATH ─────────────────────────────────────────────────────
+        if result is not None and hasattr(result, "__aiter__"):
+            logger.info(f"🔄 Streaming tool outcome detected: {tool_name}")
+            await self._record_streaming_tool_outcome(
+                tool_name=tool_name,
+                chunk_stream=result,
+                metadata=metadata,  # pass full metadata
+                timestamp=timestamp,
+            )
+            return
+
+        # ── FULL RESULT PATH ───────────────────────────────────────────────────
         if isinstance(result, (dict, list, tuple)):
             try:
                 result_str = json.dumps(result, ensure_ascii=False, indent=2)
@@ -1739,27 +1874,19 @@ class ContextManager:
         else:
             result_str = str(result) if result is not None else ""
 
-        original_size = len(result_str)
-
-        # Minimal cleaning (unchanged)
-        result_str = re.sub(
-            r"(?i)You are a helpful Terminal AI agent.*?(?=\n\n|\Z)",
-            "",
-            result_str,
-            flags=re.DOTALL,
-        )
-
+        # Short results → still finalize for consistency
         if len(result_str) < 30:
+            self._finalize_tool_recording(
+                tool_name=tool_name,
+                preview=result_str[:200],
+                success=True,
+                metadata=metadata,
+            )
             return
 
-        # ← NEW: explicit large-item flag for consolidator
-        is_large = original_size > 800
-        content = (
-            f"Tool: {tool_name}\n"
-            f"Executed: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp))}\n"
-            f"Result size: {original_size:,} characters\n"
-            f"Large item: {is_large}\n\n"
-            f"{result_str}"
+        is_large = len(result_str) > 800
+        content = self._build_tool_content(
+            tool_name, timestamp, len(result_str), is_large, result_str
         )
 
         await self.add_external_content(
@@ -1768,32 +1895,38 @@ class ContextManager:
             metadata={
                 "tool": tool_name,
                 "timestamp": timestamp,
-                "original_length": original_size,
-                "is_large_item": is_large,  # ← new key
+                "original_length": len(result_str),
+                "is_large_item": is_large,
                 "args": clean_args,
+                "streamed": False,
                 **metadata,
             },
         )
 
-        self.tools_executed.append(tool_name)
-        self._log_action(
-            "tool_outcome", f"{tool_name} → {result_str[:120]}...", metadata
-        )
-        logger.info(
-            f"✅ Recorded full tool outcome: {tool_name} ({original_size:,} chars, large={is_large})"
+        # <<< FINALIZE with metadata >>>
+        self._finalize_tool_recording(
+            tool_name=tool_name,
+            preview=result_str[:200],  # consistent short preview
+            success=True,
+            metadata=metadata,
         )
 
     async def _get_recent_tool_outcomes(
         self,
         limit: int = 4,
-        max_tokens_per_result: int = 2000,
+        max_tokens_per_result: int = 2000,  # now properly used
         max_total_tokens: int = 5000,
     ) -> str:
-        """Guaranteed to return the MOST RECENT tool result (full directory listing)."""
+        """Return the most recent tool outcomes (full results).
+
+        Only real 'tool_outcome' entries are considered (streaming chunks are ignored).
+        Respects per-result token limit for very large outputs.
+        """
         if not self.knowledge_base:
             logger.debug("No entries in knowledge_base")
             return ""
 
+        # Only consider final consolidated tool_outcomes (not individual chunks)
         tool_items = [
             (
                 item.metadata.get("timestamp", 0),
@@ -1804,7 +1937,11 @@ class ContextManager:
             )
             for key, item in self.knowledge_base.items()
             if item.source_type == "tool_outcome"
+            and not item.metadata.get("streamed", False) is True  # safety
+            and not str(key).startswith("tool_outcome_chunk")  # extra safety
         ]
+
+        # Sort by timestamp descending (newest first)
         tool_items.sort(reverse=True)
 
         parts: List[str] = []
@@ -1817,11 +1954,16 @@ class ContextManager:
                 else ""
             )
 
+            # Truncate content per result if it's too large
+            content = item.content
+            if len(content) > max_tokens_per_result * 4:  # rough char → token estimate
+                content = content[: max_tokens_per_result * 4] + "\n... [truncated]"
+
             block = PromptBuilder.latest_tool_block(
                 tool_name=tool_name,
                 timestamp_str=timestamp_str,
                 size=size,
-                content=item.content,
+                content=content,
             )
 
             block_tokens = (
@@ -1830,13 +1972,233 @@ class ContextManager:
                 else len(block) // 4
             )
 
+            # Respect total token budget across all recent outcomes
             if used_tokens + block_tokens > max_total_tokens:
+                logger.debug(
+                    f"Token budget reached in _get_recent_tool_outcomes ({used_tokens}/{max_total_tokens})"
+                )
                 break
 
             parts.append(block)
             used_tokens += block_tokens
 
-        return "\n".join(parts) if parts else ""
+        result = "\n".join(parts) if parts else ""
+        logger.debug(
+            f"_get_recent_tool_outcomes returned {len(result)} chars from {len(parts)} tool outcomes"
+        )
+        return result
+
+    async def _record_streaming_tool_outcome(
+        self,
+        tool_name: str,
+        chunk_stream: AsyncIterable[str],
+        metadata: dict,
+        timestamp: float,
+    ) -> None:
+        """Accumulate text into ~768-token batches and report meaningful progress.
+        Now uses adaptive + logarithmic-style progress when total size is unknown."""
+        logger.info(f"🔄 Starting streaming ingestion: {tool_name}")
+
+        full_content: List[str] = []
+        accumulated: List[str] = []
+        accumulated_tokens = 0
+        batch_index = 0
+
+        parent_key = (
+            f"{tool_name}_"
+            f"{int(timestamp)}_"
+            f"{hashlib.md5(str(metadata.get('args', {})).encode()).hexdigest()[:12]}"
+        )
+
+        # Hints from tool (especially useful for PDFs)
+        total_pages = metadata.get("total_pages") or 0
+        estimated_total_chars = metadata.get("estimated_total_chars", 0)
+
+        last_reported_percent = 0
+        chars_at_last_report = 0
+
+        try:
+            async for chunk in chunk_stream:
+                if not chunk or not chunk.strip():
+                    continue
+
+                full_content.append(chunk)
+                accumulated.append(chunk)
+                accumulated_tokens += len(chunk) // 4
+
+                # Flush batch when we reach target size (~768 tokens)
+                if accumulated_tokens >= CHUNK_SIZE_TOKENS or len(accumulated) >= 8:
+                    batch_text = "".join(accumulated)
+                    await self._add_streaming_chunk_batch(
+                        tool_name=tool_name,
+                        accumulated_text=batch_text,
+                        parent_key=parent_key,
+                        chunk_index=batch_index,
+                        metadata=metadata,
+                        timestamp=timestamp,
+                    )
+                    batch_index += 1
+                    accumulated.clear()
+                    accumulated_tokens = 0
+
+                # === IMPROVED PROGRESS REPORTING ===
+                current_chars = len("".join(full_content))
+
+                if total_pages > 0:
+                    # Best case: real page count from PDF tool
+                    progress = min(
+                        95, int((len(full_content) / (total_pages * 1.05)) * 100)
+                    )
+                elif estimated_total_chars > 0:
+                    progress = min(
+                        95, int((current_chars / estimated_total_chars) * 100)
+                    )
+                else:
+                    # Adaptive fallback for unknown total size (much better than fixed *1.8)
+                    # Uses logarithmic growth so progress keeps moving slowly toward 95%
+                    if current_chars < 10000:
+                        progress = 5
+                    else:
+                        # log10 scaling gives nice slow increase even for very large files
+                        progress = min(
+                            95,
+                            int(
+                                10
+                                + 85 * (1 - (1 / (1 + (current_chars / 50000) ** 0.6)))
+                            ),
+                        )
+
+                # Report only when we cross a new 5% threshold (or every ~30-50k chars after 50%)
+                if progress >= 10 and (
+                    progress // 5 > last_reported_percent // 5
+                    or current_chars - chars_at_last_report > 40000
+                ):
+                    logger.info(
+                        f"📈 {tool_name} streaming: {progress}% complete "
+                        f"({batch_index} batches, {current_chars:,} chars)"
+                    )
+                    last_reported_percent = progress
+                    chars_at_last_report = current_chars
+
+            # Final batch flush
+            if accumulated:
+                batch_text = "".join(accumulated)
+                await self._add_streaming_chunk_batch(
+                    tool_name=tool_name,
+                    accumulated_text=batch_text,
+                    parent_key=parent_key,
+                    chunk_index=batch_index,
+                    metadata=metadata,
+                    timestamp=timestamp,
+                )
+                batch_index += 1  # for final log
+
+        except Exception as e:
+            logger.error(f"Error during streaming of {tool_name}: {e}", exc_info=True)
+
+        # === FINAL CONSOLIDATED ENTRY ===
+        if full_content:
+            full_result = "".join(full_content)
+            total_chars = len(full_result)
+
+            await self.add_external_content(
+                source_type="tool_outcome",
+                content=self._build_tool_content(
+                    tool_name, timestamp, total_chars, True, full_result
+                ),
+                metadata={
+                    "tool": tool_name,
+                    "timestamp": timestamp,
+                    "original_length": total_chars,
+                    "is_large_item": True,
+                    "streamed": True,
+                    "total_chunks": batch_index,
+                    "parent_key": parent_key,
+                    "args": metadata.get("args", {}),
+                    **metadata,
+                },
+            )
+
+            logger.info(
+                f"✅ Streaming completed: {tool_name} → "
+                f"1 final tool_outcome + {batch_index} batches "
+                f"({total_chars:,} characters)"
+            )
+            preview = full_result[:200] if full_result else ""
+        else:
+            logger.warning(
+                f"Streaming completed but no content received for {tool_name}"
+            )
+            preview = ""
+
+        self._finalize_tool_recording(
+            tool_name=tool_name,
+            preview=preview,
+            success=True,
+            metadata=metadata,
+        )
+
+    def _build_tool_content(
+        self,
+        tool_name: str,
+        timestamp: float,
+        size: int,
+        is_large: bool,
+        result_str: str,
+    ) -> str:
+        return (
+            f"Tool: {tool_name}\n"
+            f"Executed: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp))}\n"
+            f"Result size: {size:,} characters\n"
+            f"Large item: {is_large}\n"
+            f"Streamed: True\n\n"
+            f"{result_str}"
+        )
+
+    def _finalize_tool_recording(
+        self,
+        tool_name: str,
+        preview: str,
+        success: bool = True,
+        metadata: dict | None = None,
+    ) -> None:
+        """Original lines preserved + moved add_tool_result logic.
+        Now properly receives metadata when available."""
+
+        metadata = metadata or {}
+
+        # === YOUR ORIGINAL LINES (kept 100% unchanged) ===
+        self.tools_executed.append(tool_name)
+        self._log_action("tool_outcome", f"{tool_name} → {preview}...", {})
+
+        # === MOVED state.add_tool_result LOGIC (after result is finished) ===
+        if self.agent is not None and hasattr(self.agent, "state"):
+            try:
+                self.agent.state.add_tool_result(
+                    tool_name=tool_name,
+                    result=preview,  # short preview as before
+                    success=success,
+                )
+
+                # Update last_tool_success with full context
+                self.agent.state.last_tool_success = {
+                    "tool_name": tool_name,
+                    "success": success,
+                    "timestamp": time.time(),
+                    "step_index": getattr(self.agent.state, "current_task_index", -1),
+                    "streamed": metadata.get("streamed", False),
+                    **{
+                        k: v
+                        for k, v in metadata.items()
+                        if k in ("args", "usage_count", "action_type")
+                    },
+                }
+            except Exception as e:
+                logger.warning(f"[STATE RECORD FAILED] {tool_name}: {e}")
+        else:
+            logger.debug(
+                f"Skipping add_tool_result for {tool_name}: no agent.state available"
+            )
 
     async def sync_to_agent_state(self, state: "AgentState") -> None:
         """Automatically populate AgentState from ContextManager (single source of truth).

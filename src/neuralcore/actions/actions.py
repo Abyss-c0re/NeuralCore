@@ -120,36 +120,24 @@ class Action:
         return hasattr(obj, "agent_id") and isinstance(getattr(obj, "agent_id"), str)
 
     # ====================== EXECUTION ======================
-    async def __call__(self, **kwargs) -> Any:
-        """Execute the action and automatically record the FULL tool outcome + generic success indicator.
 
-        Confirmation handling (NeuralCore generic pattern):
-        - If require_confirmation=True and _confirmation_passed=False (default),
-          raise ConfirmationRequired immediately.
-        - Higher-level client code (NeuralVoid-style or real client apps) catches it,
-          asks the human, then re-calls the SAME action with _confirmation_passed=True.
-        - This keeps NeuralCore 100% abstract and free of any UI/confirmation logic.
+    async def __call__(self, **kwargs) -> Any:
+        """Execute the action — now with full support for streaming results.
+
+        Streaming support:
+        - If the executor returns an AsyncIterable (async generator or async iterator),
+        it is passed directly to context_manager.record_tool_outcome() as a stream.
+        - This enables chunk-by-chunk embedding without holding the entire output in memory.
         """
         logger.info(f"[ACTION START] {self.name}")
         logger.debug(f"[ACTION INPUT] {self.name} kwargs={kwargs}")
 
-        if self._bound_agent is not None:
-            agent_id = getattr(self._bound_agent, "agent_id", "NO_AGENT_ID")
-            agent_type = type(self._bound_agent).__name__
-            logger.debug(
-                f"[ACTION BOUND] {self.name} → bound to {agent_type} (agent_id={agent_id})"
-            )
-        else:
-            logger.debug(f"[ACTION BOUND] {self.name} → NO AGENT BOUND")
-
-        # ==================== CONFIRMATION CHECK (GENERIC) ====================
-        # Client code re-calls with _confirmation_passed=True after human approval
+        # ==================== CONFIRMATION CHECK (unchanged) ====================
         confirmation_bypassed = kwargs.pop("_confirmation_passed", False)
         if self.require_confirmation and not confirmation_bypassed:
             preview = self.confirmation_preview(kwargs)
             logger.info(f"[ACTION CONFIRMATION REQUIRED] {self.name} preview={preview}")
             raise ConfirmationRequired(self.name, kwargs, preview)
-        # ======================================================================
 
         try:
             call_args = []
@@ -160,6 +148,7 @@ class Action:
                     )
                 call_args.append(self._bound_agent)
 
+            # Execute the tool
             result = self.executor(*call_args, **kwargs)
             if asyncio.iscoroutine(result) or isinstance(result, Awaitable):
                 logger.debug(f"[ACTION AWAITING] {self.name}")
@@ -167,18 +156,31 @@ class Action:
 
             self.usage_count += 1
 
-            # Convert result for LLM
-            if isinstance(result, (dict, list, tuple)):
-                try:
-                    final_result = json.dumps(result, ensure_ascii=False, indent=2)
-                except Exception:
-                    final_result = str(result)
-            else:
-                final_result = str(result) if result is not None else ""
+            # ====================== STREAMING DETECTION & HANDLING ======================
+            is_streaming = False
+            if hasattr(
+                result, "__aiter__"
+            ):  # AsyncIterable (async generator, async iterator, etc.)
+                is_streaming = True
+                logger.info(
+                    f"[ACTION STREAMING] {self.name} → detected async iterable result"
+                )
+                final_result_for_history = f"<streaming output — {self.name} — chunks will be embedded incrementally>"
 
-            if not final_result or final_result.strip() in ("{}", "[]", "None", ""):
-                final_result = f"{self.name} executed successfully.\nNo output was returned by the tool."
-                logger.debug(f"[ACTION NORMALIZED EMPTY RESULT] {self.name}")
+            else:
+                # Original sync / full-result path
+                if isinstance(result, (dict, list, tuple)):
+                    try:
+                        final_result = json.dumps(result, ensure_ascii=False, indent=2)
+                    except Exception:
+                        final_result = str(result)
+                else:
+                    final_result = str(result) if result is not None else ""
+
+                if not final_result or final_result.strip() in ("{}", "[]", "None", ""):
+                    final_result = f"{self.name} executed successfully.\nNo output was returned by the tool."
+
+                final_result_for_history = final_result
 
             success = not (isinstance(result, dict) and result.get("status") == "error")
 
@@ -190,50 +192,37 @@ class Action:
                 "step_index": getattr(self._bound_agent.state, "current_task_index", -1)
                 if self._bound_agent is not None
                 else -1,
+                "streamed": is_streaming,
             }
 
             # ====================== RECORDING ======================
             if self._bound_agent is not None:
-                # 1. AgentState — lightweight structured success flag
-                if hasattr(self._bound_agent, "state"):
-                    try:
-                        self._bound_agent.state.add_tool_result(
-                            tool_name=self.name,
-                            result=final_result[:800] + "..."
-                            if len(final_result) > 800
-                            else final_result,
-                            success=success,
-                        )
-                        # Store generic indicator for executor to check later
-                        self._bound_agent.state.last_tool_success = (
-                            step_success_indicator
-                        )
-                    except Exception as e:
-                        logger.warning(f"[STATE RECORD FAILED] {self.name}: {e}")
-
-                # 2. ContextManager — full fidelity for KB/RAG
                 if hasattr(self._bound_agent, "context_manager"):
                     try:
                         await self._bound_agent.context_manager.record_tool_outcome(
                             tool_name=self.name,
-                            result=final_result,
+                            result=result,  # ← Pass raw result (can be AsyncIterable)
                             metadata={
                                 "args": kwargs,
                                 "action_type": self.type,
                                 "usage_count": self.usage_count,
                                 "success": success,
                                 "raw_type": type(result).__name__,
+                                "streamed": is_streaming,
                                 "step_success_indicator": step_success_indicator,
                             },
                         )
+
                     except Exception as e:
                         logger.warning(f"[CONTEXT RECORD FAILED] {self.name}: {e}")
 
-            logger.info(f"[ACTION SUCCESS] {self.name} | success={success}")
-            return final_result
+            logger.info(
+                f"[ACTION SUCCESS] {self.name} | success={success} | streamed={is_streaming}"
+            )
+            return final_result_for_history  # Return a short placeholder for streaming case
 
         except ConfirmationRequired:
-            raise  # let the client-level catcher handle it
+            raise
         except Exception as exc:
             logger.error(f"[ACTION ERROR] {self.name} error={exc}", exc_info=True)
 
@@ -244,14 +233,14 @@ class Action:
                 "args": kwargs,
             }
 
-            if self._bound_agent is not None:
-                if hasattr(self._bound_agent, "context_manager"):
-                    await self._bound_agent.context_manager.record_tool_outcome(
-                        tool_name=self.name,
-                        result=error_result,
-                        metadata={"error": True},
-                    )
-                self._bound_agent._auto_sync_state()
+            if self._bound_agent is not None and hasattr(
+                self._bound_agent, "context_manager"
+            ):
+                await self._bound_agent.context_manager.record_tool_outcome(
+                    tool_name=self.name,
+                    result=error_result,
+                    metadata={"error": True},
+                )
 
             return error_result
 
