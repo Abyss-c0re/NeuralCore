@@ -218,10 +218,11 @@ class KnowledgeConsolidator:
             return
         self._last_extraction_ts = now
 
+        # Safe trace handling
         if trace is None or len(trace) == 0:
             trace = (
-                getattr(self.agent.context_manager, "tool_call_history", [])[-20:]
-                + getattr(self.agent.context_manager, "action_log", [])[-25:]
+                getattr(self.agent.context_manager, "tool_call_history", [])[-30:]
+                + getattr(self.agent.context_manager, "action_log", [])[-30:]
             )
 
         if not trace:
@@ -261,16 +262,6 @@ class KnowledgeConsolidator:
             f"concepts={num_concepts} | tool_outcomes={num_tool_outcomes} | large_item={has_large_item}"
         )
 
-        if has_large_item or total_kb_tokens > 15000 or num_concepts >= 5:
-            logger.info(
-                f"[CONSOLIDATE] Strong knowledge growth detected → "
-                f"tokens≈{total_kb_tokens:,} | concepts={num_concepts} | large_item={has_large_item}"
-            )
-        else:
-            logger.debug(
-                f"[CONSOLIDATE] Knowledge still small (tokens≈{total_kb_tokens:,}, concepts={num_concepts})"
-            )
-
         logger.info(
             f"[CONSOLIDATE] Starting extraction | goal: {goal[:80]}... | trace len={len(trace)}"
         )
@@ -279,14 +270,29 @@ class KnowledgeConsolidator:
         logger.debug(
             f"[CONSOLIDATE] Reranking {len(candidates)} candidates for concept distillation"
         )
-        relevant = await self.rerank(goal, candidates, k=40)
+
+        # Better input for distillation: higher k + prioritize concepts and large items
+        relevant = await self.rerank(goal, candidates, k=60)
+
+        # Prioritize already-extracted concepts and large tool outcomes
+        relevant = sorted(
+            relevant,
+            key=lambda x: (
+                3
+                if getattr(x, "source_type", "") == "extracted_concept"
+                else 2
+                if len(getattr(x, "content", "")) > 800
+                else 1
+            ),
+            reverse=True,
+        )[:60]
 
         extracted = await self._distill_concepts(
             relevant,
             goal,
             hypotheses,
             findings,
-            self.concept_graph,  # pass existing concepts
+            self.concept_graph,  # ← new: pass existing concepts
         )
 
         added = 0
@@ -323,12 +329,7 @@ class KnowledgeConsolidator:
         self._update_concept_graph(extracted)
 
         # Smart training trigger — only on meaningful growth
-        if (
-            added >= 2
-            or has_large_item
-            or total_kb_tokens > 25000
-            or num_concepts >= 12
-        ):
+        if added >= 1 or has_large_item or total_kb_tokens > 20000 or num_concepts >= 8:
             logger.info(
                 f"[TRAINING TRIGGER] Meaningful growth detected → scheduling retrain "
                 f"(added={added}, tokens≈{total_kb_tokens:,}, concepts={num_concepts}, large={has_large_item})"
@@ -348,6 +349,7 @@ class KnowledgeConsolidator:
         existing_concepts: Optional[Dict[str, Any]] = None,
     ) -> List[Dict]:
         if not relevant_items:
+            logger.debug("[DISTILL] No relevant items — skipping")
             return []
 
         prompt = PromptBuilder.abstract_concept_extraction(
@@ -455,9 +457,9 @@ class KnowledgeConsolidator:
                 "objective": "lambdarank",
                 "metric": "ndcg",
                 "ndcg_eval_at": [5, 10],
-                "learning_rate": 0.05,
-                "num_leaves": 31,
-                "min_data_in_leaf": 5,
+                "learning_rate": 0.06,
+                "num_leaves": 32,
+                "min_data_in_leaf": 6,
                 "boosting_type": "gbdt",
                 "feature_fraction": 0.90,
                 "bagging_fraction": 0.85,
