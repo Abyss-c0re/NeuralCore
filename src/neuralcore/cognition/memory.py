@@ -1156,26 +1156,52 @@ class ContextManager:
         return candidates
 
     async def ranked_retrieve(
-        self, query: str, max_kb_tokens: int = 5000, k: int = 10
+        self,
+        query: str,
+        max_kb_tokens: int = 5000,
+        k: int = 10,
+        research_mode: bool = False,
     ) -> str:
-        """Main retrieval used by provide_context.
-        Always routes through consolidator.rerank() when available (so training data is collected)."""
+        """Main retrieval used by provide_context and research workflows.
+
+        When research_mode=True:
+            - Only tool_outcome items are considered (cleanest signal for research/investigation)
+            - Returns the most relevant tool result content with minimal noise
+            - Still uses full hybrid RRF + file/param boosting + consolidator reranking
+
+        When research_mode=False (default): behaves exactly as before (mixed KB sources).
+        """
         if not self.knowledge_base or not query.strip():
+            logger.debug("ranked_retrieve: KB empty or query empty → returning ''")
             return ""
 
         consolidator = getattr(self, "consolidator", None)
-
         logger.debug(
-            f"[RANKED_RETRIEVE] START | query='{query[:100]}...' | KB_size={len(self.knowledge_base)} | "
+            f"[RANKED_RETRIEVE] START | query='{query[:100]}...' | "
+            f"KB_size={len(self.knowledge_base)} | max_kb_tokens={max_kb_tokens} | "
+            f"k={k} | research_mode={research_mode} | "
             f"consolidator_present={consolidator is not None}"
         )
 
-        # 1. Broad candidates (RRF + boost)
+        # 1. Broad candidates (RRF + file/param boost) – already battle-tested
         candidates = await self._get_broad_candidates(query)
         logger.debug(f"[RANKED_RETRIEVE] Broad candidates: {len(candidates)}")
 
+        # ── RESEARCH MODE: clean extraction from tool outcomes only ──
+        if research_mode:
+            original_count = len(candidates)
+            candidates = [
+                item for item in candidates if item.source_type == "tool_outcome"
+            ]
+            logger.debug(
+                f"[RESEARCH_MODE] Filtered to tool outcomes only: {original_count} → {len(candidates)}"
+            )
+            if not candidates:
+                logger.debug("[RESEARCH_MODE] No tool outcomes found in KB")
+                return ""
+
         # 2. Rerank (this is the critical point for sample collection)
-        if consolidator:
+        if consolidator and candidates:
             logger.debug(
                 f"[RANKED_RETRIEVE] → Calling KnowledgeConsolidator.rerank() with {len(candidates)} candidates"
             )
@@ -1185,15 +1211,16 @@ class ContextManager:
             )
         else:
             logger.debug(
-                "[RANKED_RETRIEVE] No consolidator → fallback to top broad candidates"
+                "[RANKED_RETRIEVE] No consolidator → fallback to top candidates"
             )
             reranked_items = candidates[:k]
 
-        # 3. Format
+        # 3. Format using existing clean block logic
         result = await self._format_knowledge_blocks(reranked_items, max_kb_tokens)
 
         logger.debug(
-            f"[RANKED_RETRIEVE] END → formatted {len(result)} chars from {len(reranked_items)} items"
+            f"[RANKED_RETRIEVE] END → formatted {len(result):,} chars from {len(reranked_items)} items "
+            f"(research_mode={research_mode})"
         )
         return result
 
@@ -1449,12 +1476,15 @@ class ContextManager:
         chat: bool = False,
         state: Optional["AgentState"] = None,
         lightweight_agentic: bool = False,
-    ) -> List[Dict[str, Any]]:
+        return_as_string: bool = False,
+        research_mode: bool = False,  # ← Combined with return_as_string
+    ) -> List[Dict[str, Any]] | str:
         messages: List[Dict[str, Any]] = []
 
         logger.debug(
             f"provide_context called | query='{query[:100]}...' | chat={chat} | "
-            f"lightweight_agentic={lightweight_agentic} | has_state={state is not None}"
+            f"lightweight_agentic={lightweight_agentic} | research_mode={research_mode} | "
+            f"has_state={state is not None} | return_as_string={return_as_string}"
         )
 
         if chat:
@@ -1469,7 +1499,10 @@ class ContextManager:
                     messages.append({"role": msg["role"], "content": msg["content"]})
 
             if query.strip() and self.knowledge_base:
-                kb_text = await self.ranked_retrieve(query, max_kb_tokens // 2)
+                # Chat usually benefits from general (non-research) context
+                kb_text = await self.ranked_retrieve(
+                    query, max_kb_tokens // 2, research_mode=False
+                )
                 if kb_text:
                     messages.append(
                         {
@@ -1498,6 +1531,16 @@ class ContextManager:
                     assistant_role="assistant",
                     tool_role="tool",
                 )
+
+            # ── String return for chat mode ──
+            if return_as_string:
+                formatted = []
+                for msg in messages:
+                    role = msg.get("role", "unknown").upper()
+                    content = str(msg.get("content", "")).strip()
+                    formatted.append(f"{role}:\n{content}")
+                return "\n\n".join(formatted)
+
             return messages
 
         # ── AGENTIC MODE ──
@@ -1588,9 +1631,11 @@ class ContextManager:
             messages.append({"role": "system", "content": full_context})
             tokens_used = self.count_tokens(messages)
 
-            # Smart KB retrieval
+            # Smart KB retrieval – now respects research_mode
             if query.strip():
-                kb_text = await self.ranked_retrieve(query, 1800)
+                kb_text = await self.ranked_retrieve(
+                    query, 1800, research_mode=research_mode
+                )
                 if kb_text:
                     messages.append(
                         {
@@ -1651,9 +1696,11 @@ class ContextManager:
         )
         history_budget = max(remaining - kb_tokens, min_history_tokens)
 
-        # Extra KB only for rich mode
+        # Extra KB only for rich mode – now respects research_mode
         if query.strip() and kb_tokens > 600 and not lightweight_agentic:
-            kb_text = await self.ranked_retrieve(query, kb_tokens)
+            kb_text = await self.ranked_retrieve(
+                query, kb_tokens, research_mode=research_mode
+            )
             if kb_text:
                 messages.append(
                     {
@@ -1708,8 +1755,19 @@ class ContextManager:
 
         logger.debug(
             f"provide_context finished | messages={len(messages)} | "
-            f"lightweight={lightweight_agentic} | tokens={final_tokens}"
+            f"lightweight={lightweight_agentic} | research_mode={research_mode} | "
+            f"return_as_string={return_as_string} | tokens={final_tokens}"
         )
+
+        # ── NEW: optional string return for agentic mode ──
+        if return_as_string:
+            formatted = []
+            for msg in messages:
+                role = msg.get("role", "unknown").upper()
+                content = str(msg.get("content", "")).strip()
+                formatted.append(f"{role}:\n{content}")
+            return "\n\n".join(formatted)
+
         return messages
 
     def prune_to_fit_context(
