@@ -1,5 +1,5 @@
 import json
-from typing import AsyncIterator, Any, Tuple
+from typing import AsyncIterator, Any, Tuple, Optional
 
 from neuralcore.agents.state import AgentState
 from neuralcore.agents.task import Task
@@ -205,7 +205,7 @@ async def goal_driven_task_loop(
     agent, state: AgentState, target_loop: str
 ) -> AsyncIterator[Tuple[str, Any]]:
     """Robust multi-step loop using Task objects.
-    All prompts are now centralized in PromptBuilder."""
+    Fixed: infinite restart on single-tool tasks + type safety."""
 
     is_multi_step = len(state.tasks) > 1
     marker = PromptBuilder.FINAL_ANSWER_MARKER
@@ -215,8 +215,11 @@ async def goal_driven_task_loop(
     tools_called_this_turn = False
 
     # ====================== STATE-AWARE PROMPT ======================
-    if is_multi_step and 0 <= state.current_task_index < len(state.tasks):
-        current_task: Task = state.tasks[state.current_task_index]
+    current_task: Optional[Task] = None
+    if 0 <= state.current_task_index < len(state.tasks):
+        current_task = state.tasks[state.current_task_index]
+
+    if current_task:
         task_desc = current_task.description
 
         used_tools = [r.get("name", "unknown") for r in state.tool_results]
@@ -240,7 +243,7 @@ async def goal_driven_task_loop(
         remaining_context = "\n".join(remaining) if remaining else "No more steps."
 
         expected_outcome: str = (
-            current_task.expected_outcome or "Step completed successfully"
+            current_task.expected_outcome or "Tool executed successfully"
         )
 
         current_query = PromptBuilder.sub_task_execution(
@@ -272,7 +275,6 @@ async def goal_driven_task_loop(
         state.request_loop_restart(reason="No query detected", target_loop=target_loop)
         return
 
-    # Use centralized system prompt
     messages = await agent.context_manager.provide_context(
         query=current_query,
         max_input_tokens=agent.max_tokens,
@@ -336,13 +338,33 @@ async def goal_driven_task_loop(
     tool_reported_success = bool(last_success and last_success.get("success"))
     strong_completion = has_marker or tool_reported_success
 
-    # ====================== LLM-BASED VALIDATION (using PromptBuilder) ======================
-    if is_multi_step and strong_completion:
-        current_idx = state.current_task_index
-        current_task: Task = state.tasks[current_idx]
+    # ====================== UNIFIED COMPLETION LOGIC ======================
+    if tools_called_this_turn and current_task:
+        # Mark current Task as completed on tool success (fixes single-tool infinite loop)
+        current_task.complete(
+            result=state.tool_results[-1].get("result") if state.tool_results else None
+        )
+        if current_task.status == "completed":
+            state.completed_task_ids.add(current_task.task_id)
 
+        # Single-step task or final step → mark goal achieved and exit loop cleanly
+        if not is_multi_step or state.current_task_index >= len(state.tasks) - 1:
+            state.mark_goal_achieved("Task completed via successful tool execution")
+            return  # Let outer goal_achieved condition break the loop
+
+        # Multi-step continuation
+        yield ("phase_changed", {"phase": "executing_tools"})
+        state.request_loop_restart(
+            reason="Tool executed — advancing to next sub-task",
+            target_loop=target_loop,
+        )
+        yield ("phase_changed", {"phase": "restarting_loop"})
+        return
+
+    # ====================== LLM VALIDATION (multi-step only) ======================
+    if is_multi_step and strong_completion and current_task and not state.goal_reached:
         logger.info(
-            f"[STEP VALIDATION] Starting LLM-based validation for step {current_idx + 1}"
+            f"[STEP VALIDATION] Starting LLM-based validation for step {state.current_task_index + 1}"
         )
 
         last_result_str = (
@@ -355,7 +377,7 @@ async def goal_driven_task_loop(
             current_task=current_task,
             last_result_str=last_result_str,
             total_tasks=len(state.tasks),
-            current_idx=current_idx,
+            current_idx=state.current_task_index,
         )
 
         try:
@@ -383,14 +405,12 @@ async def goal_driven_task_loop(
             )
 
         except Exception as e:
-            logger.warning(
-                f"Validation LLM call failed: {e}. Falling back to marker only."
-            )
+            logger.warning(f"Validation LLM call failed: {e}. Falling back to marker.")
             outcome_met = has_marker
 
         if not outcome_met and not has_marker:
             logger.warning(
-                f"[STEP VALIDATION FAILED] LLM confirmed outcome not met on step {current_idx}."
+                f"[STEP VALIDATION FAILED] Step {state.current_task_index} not met."
             )
             state.increment_empty_loop()
             state.request_loop_restart(
@@ -401,16 +421,8 @@ async def goal_driven_task_loop(
             return
 
         logger.info(
-            f"[STEP VALIDATION PASSED] Sub-task {current_idx + 1}/{len(state.tasks)} validated by LLM"
+            f"[STEP VALIDATION PASSED] Sub-task {state.current_task_index + 1} validated"
         )
-
-        # Mark Task as completed
-        current_task.complete(
-            result=state.tool_results[-1].get("result") if state.tool_results else None
-        )
-
-        if current_task.status == "completed":
-            state.completed_task_ids.add(current_task.task_id)
 
         state.current_task_index += 1
 
@@ -423,7 +435,7 @@ async def goal_driven_task_loop(
             state.empty_loops = 0
             state.action_restarts = 0
             state.request_loop_restart(
-                reason=f"Sub-task {current_idx} validated and done → advancing",
+                reason=f"Sub-task validated → advancing",
                 target_loop=target_loop,
                 reset_counters=False,
             )
@@ -476,8 +488,7 @@ async def goal_driven_task_loop(
                 f"[Action Restart #{state.action_restarts}] Detected '{detected_keyword}'"
             )
             state.request_loop_restart(
-                reason="Action restart requested",
-                target_loop=target_loop,
+                reason="Action restart requested", target_loop=target_loop
             )
             yield ("phase_changed", {"phase": "restarting_loop"})
             return
@@ -490,24 +501,12 @@ async def goal_driven_task_loop(
             state.request_loop_stop(reason=reason, target_loop=target_loop)
         else:
             state.request_loop_restart(
-                reason="Empty loop continuation",
-                target_loop=target_loop,
+                reason="Empty loop continuation", target_loop=target_loop
             )
             yield ("phase_changed", {"phase": "restarting_loop"})
             return
     else:
         state.empty_loops = 0
-
-    # ====================== NORMAL TOOL EXECUTION ======================
-    if tools_called_this_turn:
-        if not state.goal_reached:
-            yield ("phase_changed", {"phase": "executing_tools"})
-            state.request_loop_restart(
-                reason="Tool executed",
-                target_loop=target_loop,
-            )
-            yield ("phase_changed", {"phase": "restarting_loop"})
-            return
 
     # ====================== FINAL SYNTHESIS ======================
     if state.goal_reached:
@@ -545,7 +544,7 @@ async def goal_driven_task_loop(
             },
         )
 
-        logger.info("Multi-step task completed successfully → full reset")
+        logger.info("Task completed successfully → full reset")
         state.reset_for_new_task()
 
     else:
