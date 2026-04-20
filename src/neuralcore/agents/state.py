@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Any, List, Dict, Optional, Set
 import time
+
 from neuralcore.utils.formatting import prepare_chat_messages
 from neuralcore.agents.task import Task
 from neuralcore.utils.prompt_builder import PromptBuilder
@@ -74,9 +75,7 @@ class AgentState:
     # ==================== Human-in-the-Loop (Confirmation) ====================
     needs_approval: bool = False
     pending_approval_prompt: str = ""
-    last_confirmation_request: Optional[Dict[str, Any]] = (
-        None  # ← NEW: required for re-execution
-    )
+    last_confirmation_request: Optional[Dict[str, Any]] = None
 
     # ==================== History & Debugging ====================
     iteration_history: List[Dict[str, Any]] = field(default_factory=list)
@@ -95,8 +94,6 @@ class AgentState:
     is_soft_restart: bool = False
 
     # ==================== Loop Control Signals ====================
-    # Generic inbox for engine-level loop commands (restart / pause / wait / resume / break).
-    # 100% abstract — used by every @workflow.loop via WorkflowEngine.
     pending_loop_signals: List[Dict[str, Any]] = field(default_factory=list)
 
     # ==================== Properties ====================
@@ -134,34 +131,23 @@ class AgentState:
         *,
         reset: bool = False,
     ) -> List[Dict[str, Any]]:
-        """
-        Centralized helper to prepare chat messages for the current agent state.
-        Populates self.messages if reset=True or if messages list is empty.
-        Returns the prepared message list for use in loops/executors.
-        """
-
         if reset or not self.messages:
             self.messages.clear()
-            # Build initial messages with system prompt
             self.messages = prepare_chat_messages(
                 user_content=content,
                 system_prompt=system_prompt or "",
             )
         else:
-            # Append user message to existing conversation
             self.messages.append({"role": "user", "content": content})
 
         self.message_count = len(self.messages)
-        self.last_message_time = time.time()  # assuming time is imported
+        self.last_message_time = time.time()
 
         logger.debug(
             f"AgentState.prepare_messages → prepared {len(self.messages)} messages "
             f"(reset={reset}, content_len={len(content)})"
         )
-
         return self.messages
-
-        # ==================== Loop Restart Control (RECOMMENDED) ====================
 
     def request_loop_restart(
         self,
@@ -169,25 +155,16 @@ class AgentState:
         target_loop: Optional[str] = None,
         reset_counters: bool = True,
     ) -> None:
-        """
-        Unified, abstract way to request a restart of the current loop iteration.
-
-        This is the **preferred** method throughout NeuralCore + NeuralVoid + client apps.
-        Works for both:
-          - WorkflowEngine.run() main loop
-          - WorkflowEngine.execute_loop() (YAML + @workflow.loop)
-        """
         self.add_loop_signal(
             signal="restart",
             target_loop=target_loop,
             reason=reason,
             payload={"reset_counters": reset_counters},
         )
-
         self.set_soft_restart(True)
 
         if reset_counters:
-            self.loop_count = 0  # optional: depends on semantics
+            self.loop_count = 0
             self.empty_loops = 0
             self.action_restarts = 0
             self.clear_findtool_tracking()
@@ -202,11 +179,6 @@ class AgentState:
         reason: str = "explicit",
         target_loop: Optional[str] = None,
     ) -> None:
-        """
-        Request graceful stop/break of the current loop (or specific loop).
-        This is the counterpart to request_loop_restart.
-        Works for both main run() workflow and execute_loop().
-        """
         self.add_loop_signal(
             signal="stop",
             target_loop=target_loop,
@@ -238,7 +210,6 @@ class AgentState:
         self.last_findtool_loop = -1
         logger.debug("AgentState → FindTool tracking cleared")
 
-    # ==================== Loaded Tools Helpers ====================
     def update_loaded_tools(self, tools: List[str]) -> None:
         self.loaded_tools = [t for t in tools if t]
         logger.debug(f"AgentState → loaded_tools updated: {self.loaded_tools}")
@@ -247,7 +218,6 @@ class AgentState:
         self.loaded_tools.clear()
         logger.debug("AgentState → loaded_tools cleared")
 
-    # ==================== NEW: Loop Signal Helpers (abstract) ====================
     def add_loop_signal(
         self,
         signal: str,
@@ -256,7 +226,6 @@ class AgentState:
         wait_config: Optional[dict] = None,
         payload: Optional[dict] = None,
     ) -> None:
-        """Add a generic loop-control signal (restart / pause / wait / resume / break)."""
         sig = {
             "signal": signal,
             "target_loop": target_loop,
@@ -271,15 +240,12 @@ class AgentState:
         )
 
     def clear_pending_loop_signals(self) -> None:
-        """Clear all pending signals (called after processing)."""
         count = len(self.pending_loop_signals)
         self.pending_loop_signals.clear()
         if count:
             logger.debug(f"AgentState → cleared {count} pending loop signal(s)")
 
-    # ==================== NEW: State Validation ====================
     def validate_state_integrity(self) -> List[str]:
-        """Validate that state has all required structures for multi-step execution."""
         warnings = []
 
         if len(self.planned_tasks) != len(self.task_expected_outcomes):
@@ -299,7 +265,7 @@ class AgentState:
             self.planned_tasks and self.current_task_index >= len(self.planned_tasks)
         ):
             warnings.append(
-                f"current_task_index {self.current_task_index} out of bounds (0-{len(self.planned_tasks) - 1 if self.planned_tasks else 0})"
+                f"current_task_index {self.current_task_index} out of bounds"
             )
             if self.planned_tasks:
                 self.current_task_index = min(
@@ -307,15 +273,12 @@ class AgentState:
                 )
 
         if self.planned_tasks and not self.task_expected_outcomes:
-            warnings.append(
-                "planned_tasks exist but task_expected_outcomes is empty — planning may be incomplete"
-            )
+            warnings.append("planned_tasks exist but task_expected_outcomes is empty")
 
         return warnings
 
     # ==================== Core Methods ====================
     def reset_for_new_task(self, new_task: str = "") -> None:
-
         self.planned_tasks.clear()
         self.task_expected_outcomes.clear()
         self.task_tool_assignments.clear()
@@ -348,7 +311,6 @@ class AgentState:
         self.wait_completed = False
         self.last_wait_event = None
 
-        # ==================== Reset Human-in-the-Loop ====================
         self.needs_approval = False
         self.pending_approval_prompt = ""
         self.last_confirmation_request = None
@@ -365,14 +327,13 @@ class AgentState:
         self.clear_loaded_tools()
         self.clear_findtool_tracking()
         self.clear_soft_restart()
-        self.clear_pending_loop_signals()  # ← NEW: clear loop signals on reset
+        self.clear_pending_loop_signals()
 
         self.start_time = time.time()
 
         self.task = new_task
         self.current_task = ""
         self.current_workflow = "default"
-        self.planned_tasks = []
 
         logger.debug(f"AgentState reset complete. Goal: '{self.task}'")
 
@@ -390,9 +351,6 @@ class AgentState:
 
         level = logger.info if success else logger.warning
         level(f"Tool '{tool_name}' executed → success={success}")
-
-        if not success:
-            logger.debug(f"Tool failure details: {result}")
 
     def add_executed_function(
         self, function_name: str, args: Optional[Dict[str, Any]] = None
@@ -476,7 +434,6 @@ class AgentState:
         self.wait_completed = False
         self.last_wait_event = None
         self.status = "waiting"
-
         logger.info(
             f"Agent entered waiting state: {wait_type} | prompt={prompt[:100]}..."
         )
@@ -492,9 +449,7 @@ class AgentState:
             )
 
     def get_objective_reminder(self) -> str:
-        """Builds dynamic state reminder and delegates formatting to PromptBuilder."""
         parts: List[str] = []
-
         goal_text = self.task or "No goal set"
         parts.append(f"Current goal: {goal_text}")
 
@@ -534,24 +489,7 @@ class AgentState:
         if self.duration > 60:
             parts.append(f"Running for {self.duration:.0f}s")
 
-        if self.task_dependencies:
-            dep_parts: List[str] = []
-            for idx, dep_list in self.task_dependencies.items():
-                if isinstance(idx, int) and 0 <= idx < len(self.planned_tasks):
-                    dep_names: List[str] = []
-                    if isinstance(dep_list, list):
-                        for d in dep_list:
-                            if isinstance(d, int) and 0 <= d < len(self.planned_tasks):
-                                dep_names.append(self.planned_tasks[d])
-                    if dep_names:
-                        dep_parts.append(
-                            f"Step {idx + 1} depends on: {', '.join(dep_names[:2])}"
-                        )
-            if dep_parts:
-                parts.append("Dependencies:\n" + "\n".join(dep_parts[:4]))
-
         reminder_body = "\n".join(parts)
-
         warnings = self.validate_state_integrity()
         if warnings:
             logger.warning(f"AgentState integrity warnings: {warnings}")
@@ -559,7 +497,6 @@ class AgentState:
         return PromptBuilder.objective_reminder(reminder_body)
 
     def to_dict(self) -> Dict[str, Any]:
-        """Generic, serializable snapshot — safe for NeuralHub, WebSocket, VR, etc."""
         exclude = {
             "message_queue",
             "_input_event",
@@ -567,7 +504,6 @@ class AgentState:
             "_background_task",
             "_task_contexts",
         }
-
         data: Dict[str, Any] = {
             k: v
             for k, v in self.__dict__.items()
@@ -588,7 +524,6 @@ class AgentState:
         data["has_sub_tasks"] = self.has_sub_tasks
         data["goal_reached"] = self.goal_reached
 
-        # Waiting state
         data["waiting"] = getattr(self, "waiting", False)
         data["wait_type"] = getattr(self, "wait_type", None)
         data["wait_prompt"] = getattr(self, "wait_prompt", "")
@@ -598,33 +533,17 @@ class AgentState:
         data["wait_start_time"] = getattr(self, "wait_start_time", None)
         data["last_wait_event"] = getattr(self, "last_wait_event", None)
 
-        # Human-in-the-Loop (full confirmation support)
         data["needs_approval"] = getattr(self, "needs_approval", False)
         data["pending_approval_prompt"] = getattr(self, "pending_approval_prompt", "")
         data["last_confirmation_request"] = getattr(
             self, "last_confirmation_request", None
         )
-
-        # Loop Control Signals (NEW)
         data["pending_loop_signals"] = self.pending_loop_signals[:]
-
-        if data.get("waiting"):
-            data["wait_summary"] = {
-                "type": data["wait_type"],
-                "prompt": data["wait_prompt"][:200] + "..."
-                if len(data.get("wait_prompt", "")) > 200
-                else data.get("wait_prompt", ""),
-                "elapsed": round(
-                    time.time() - (data.get("wait_start_time") or time.time()), 1
-                ),
-                "target": data["wait_target"],
-            }
 
         return data
 
     # ==================== Task Management Helpers ====================
     def build_tasks_from_plan(self, steps: List[Dict[str, Any]]) -> None:
-        """Convert LLM plan into Task objects while keeping flat list references."""
         self.tasks.clear()
         self.completed_task_ids.clear()
         self.planned_tasks.clear()
@@ -635,10 +554,10 @@ class AgentState:
         task_map: Dict[int, Task] = {}
 
         for i, step in enumerate(steps):
+            expected = step.get("expected_outcome", "") or "Tool executed successfully"
             t = Task(
                 description=step.get("description", f"Step {i + 1}"),
-                expected_outcome=step.get("expected_outcome", ""),
-                dependencies=[],  # will be set via indices below
+                expected_outcome=expected,
                 metadata={
                     "original_index": i,
                     "suggested_tool_category": step.get("suggested_tool_category"),
@@ -646,12 +565,9 @@ class AgentState:
             )
             self.tasks.append(t)
             self.planned_tasks.append(t.description)
-            self.task_expected_outcomes.append(
-                t.expected_outcome or "Step completed successfully"
-            )
+            self.task_expected_outcomes.append(t.expected_outcome)
             task_map[i] = t
 
-        # Resolve dependencies (indices → task_ids)
         for i, step in enumerate(steps):
             deps_indices = step.get("dependencies", [])
             dep_ids = []
@@ -662,9 +578,7 @@ class AgentState:
                         dep_ids.append(task_map[idx].task_id)
             self.tasks[i].dependencies = dep_ids
             self.tasks[i]._dependency_set = set(dep_ids)
-            self.task_dependencies[i] = (
-                deps_indices  # keep original index-based for compatibility
-            )
+            self.task_dependencies[i] = deps_indices
 
         if self.tasks:
             self.root_task = Task(description=self.task or "Root task")
@@ -674,7 +588,6 @@ class AgentState:
         logger.info(f"[TASK BUILD] Created {len(self.tasks)} tasks from plan")
 
     def get_current_task(self) -> Optional[Task]:
-        """Return current Task object (preferred over index)."""
         if 0 <= self.current_task_index < len(self.tasks):
             return self.tasks[self.current_task_index]
         return None
@@ -682,14 +595,12 @@ class AgentState:
     def mark_current_task_complete(
         self, result: Any = None, error: Optional[str] = None
     ) -> None:
-        """Update current task + sync state."""
         current = self.get_current_task()
         if current:
             current.complete(result=result, error=error)
             if current.status == "completed":
                 self.completed_task_ids.add(current.task_id)
 
-        # Sync legacy fields
         if error:
             self.last_error = error
             self.error_count += 1
@@ -697,7 +608,6 @@ class AgentState:
             self.goal_achieved = self.current_task_index >= len(self.tasks) - 1
 
     def advance_to_next_ready_task(self) -> bool:
-        """Move to next task whose dependencies are satisfied."""
         for i in range(self.current_task_index, len(self.tasks)):
             task = self.tasks[i]
             if task.is_ready(self.completed_task_ids):
@@ -706,12 +616,9 @@ class AgentState:
         return False
 
     def validate_task_integrity(self) -> List[str]:
-        """Extended validation including new Task objects."""
-        warnings = self.validate_state_integrity()  # keep old one
-
+        warnings = self.validate_state_integrity()
         if len(self.tasks) != len(self.planned_tasks):
             warnings.append(
                 f"tasks list ({len(self.tasks)}) out of sync with planned_tasks ({len(self.planned_tasks)})"
             )
-
         return warnings
