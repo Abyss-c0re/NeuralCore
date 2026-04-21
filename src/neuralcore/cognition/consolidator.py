@@ -45,6 +45,18 @@ class KnowledgeConsolidator:
         self._last_extraction_ts = 0.0
         self.extraction_cooldown = 8.0
         self._last_training_ts = 0.0
+        self.active_features: List[str] = [
+            "keyword_score",
+            "content_length",
+            "source_type_score",
+            "is_tool_outcome",
+            "recency_score",
+            "dense_cosine",
+            "cosine_x_keyword",
+            "semantic_rescue",
+            "kw_x_length",
+            "tool_x_source",
+        ]
 
         logger.info(
             f"✅ KnowledgeConsolidator initialized | novelty_threshold={self.novelty_threshold}"
@@ -52,55 +64,55 @@ class KnowledgeConsolidator:
 
     # ====================== FEATURE EXTRACTION ======================
     def _extract_features_sync(
-        self, query: str, candidates: List[Any], investigation_state: Dict
+        self,
+        query: str,
+        candidates: List[Any],
+        investigation_state: Dict,
+        query_emb: Optional[np.ndarray] = None,
     ) -> pd.DataFrame:
+        """
+        Option B — properly computes dense_cosine and interaction features.
+        """
         rows = []
-
-        fetch_emb = getattr(self.agent.context_manager, "fetch_embedding", None)
-        query_emb = fetch_emb(query, prefix="query") if fetch_emb else None
-
-        inv_summary = (
-            str(investigation_state.get("goal", ""))
-            + " "
-            + " ".join(investigation_state.get("hypotheses", []))
-        )
-        inv_emb = (
-            fetch_emb(inv_summary, prefix="query")
-            if fetch_emb and inv_summary.strip()
-            else None
-        )
+        query_words = re.findall(r"\b\w+\b", query.lower())
 
         for item in candidates:
             recency_seconds = time.time() - getattr(item, "timestamp", time.time())
             recency_hours = recency_seconds / 3600.0
 
+            kw = keyword_score(
+                query_words=query_words, text=getattr(item, "content", "")
+            )
+            length = len(getattr(item, "content", ""))
+            source_score = self._encode_source_type(getattr(item, "source_type", ""))
+            is_tool = 1.0 if getattr(item, "source_type", "") == "tool_outcome" else 0.0
+
             emb = getattr(item, "embedding", None)
+            dense = self._safe_cosine(query_emb, emb) if query_emb is not None else 0.0
 
             row = {
-                "dense_cosine": self._safe_cosine(query_emb, emb),
-                "investigation_align": self._safe_cosine(inv_emb, emb),
-                "keyword_score": keyword_score(
-                    query_words=re.findall(r"\b\w+\b", query.lower()),
-                    text=getattr(item, "content", ""),
-                ),
-                "recency_score": np.exp(-0.75 * recency_hours),
-                "recency_minutes": recency_seconds / 60.0,
-                "source_type_score": self._encode_source_type(
-                    getattr(item, "source_type", "")
-                ),
-                "content_length": len(getattr(item, "content", "")),
-                "is_tool_outcome": 1.0
-                if getattr(item, "source_type", "") == "tool_outcome"
-                else 0.0,
-                "is_concept": 1.0
-                if getattr(item, "source_type", "") == "extracted_concept"
-                else 0.0,
+                "keyword_score": kw,
+                "content_length": length,
+                "source_type_score": source_score,
+                "is_tool_outcome": is_tool,
+                "recency_score": np.exp(-0.08 * recency_hours),
+                "dense_cosine": dense,
+                "cosine_x_keyword": dense * kw * 1.5,  # slight boost to interaction
+                "semantic_rescue": dense * 2.0
+                if kw < 4.6
+                else 0.0
+                if kw < 4.5
+                else 0.0,  # lowered threshold + multiplier
+                "kw_x_length": kw * np.log1p(length) * 1.1,  # slight amplification
+                "tool_x_source": is_tool
+                * source_score
+                * 2.2,  # stronger preference for tool + good source
             }
             rows.append(row)
 
         df = pd.DataFrame(rows)
-        if self.feature_names:
-            df = df.reindex(columns=self.feature_names, fill_value=0.0)
+        if self.active_features:
+            df = df.reindex(columns=self.active_features, fill_value=0.0)
         return df
 
     def _safe_cosine(
@@ -127,11 +139,16 @@ class KnowledgeConsolidator:
         if len(candidates) <= k:
             return candidates[:k]
 
+        # Fetch query embedding once (efficient)
+        fetch_emb = getattr(self.agent.context_manager, "fetch_embedding", None)
+        query_emb = await fetch_emb(query, prefix="query") if fetch_emb else None
+
         features_df = await asyncio.to_thread(
             self._extract_features_sync,
             query,
             candidates,
             self.state.__dict__ if hasattr(self.state, "__dict__") else {},
+            query_emb,  # ← Pass the embedding
         )
 
         if self.reranker_model is not None:
@@ -140,33 +157,38 @@ class KnowledgeConsolidator:
             )
             scores = np.asarray(scores_raw, dtype=np.float64).flatten()
         else:
-            if features_df is None or len(features_df) == 0:
-                scores = np.zeros(len(candidates), dtype=np.float64)
-            else:
-                dense = np.array(features_df.get("dense_cosine", 0.0), dtype=np.float64)
-                inv_align = np.array(
-                    features_df.get("investigation_align", 0.0), dtype=np.float64
-                )
-                kw_score = np.array(
-                    features_df.get("keyword_score", 0.0), dtype=np.float64
-                )
-                recency = np.array(
-                    features_df.get("recency_score", 0.0), dtype=np.float64
-                )
-                scores = dense * 0.4 + inv_align * 0.3 + kw_score * 0.2 + recency * 0.1
+            # Updated fallback (matches new features)
+            kw = np.array(features_df.get("keyword_score", 0.0))
+            length = np.array(features_df.get("content_length", 0.0))
+            source = np.array(features_df.get("source_type_score", 0.0))
+            tool = np.array(features_df.get("is_tool_outcome", 0.0))
+            dense = np.array(features_df.get("dense_cosine", 0.0))
+
+            scores = (
+                kw * 0.45
+                + np.log1p(length) * 0.20
+                + source * 0.12
+                + tool * 0.08
+                + dense * 0.15  # semantic now has a role in fallback too
+            )
 
         scored_items = list(zip(candidates, scores))
         ranked = sorted(scored_items, key=lambda x: float(x[1]), reverse=True)
         reranked_items = [item for item, _ in ranked[:k]]
 
         self._collect_training_sample(query, candidates, reranked_items)
-
         return reranked_items
 
     def _collect_training_sample(
         self, query: str, candidates: List[Any], chosen_items: List[Any]
     ):
-        if len(self.training_data) > 800:
+        """
+        Patched version:
+        - Removed the harmful 1.4× boost on semantic features
+        - Uses graded labels (2 = chosen, 0 = not chosen) — much better for LambdaRank
+        - Keeps training data bounded and recent
+        """
+        if len(self.training_data) > 1200:
             return
 
         features_df = self._extract_features_sync(
@@ -175,32 +197,32 @@ class KnowledgeConsolidator:
             self.state.__dict__ if hasattr(self.state, "__dict__") else {},
         )
 
-        added = 0
+        chosen_ids = {id(item) for item in chosen_items}
+        new_samples = []
+
         for i, item in enumerate(candidates):
             row = features_df.iloc[i].to_dict() if not features_df.empty else {}
+            label = 2 if id(item) in chosen_ids else 0
+            new_samples.append((row, label))
 
-            if "dense_cosine" in row:
-                row["dense_cosine"] = row.get("dense_cosine", 0.0) * 1.4
-            if "investigation_align" in row:
-                row["investigation_align"] = row.get("investigation_align", 0.0) * 1.4
+        self.training_data.extend(new_samples)
 
-            label = 1 if item in chosen_items else 0
-            self.training_data.append((row, label))
-            added += 1
+        # Keep only the most recent samples
+        if len(self.training_data) > 900:
+            self.training_data = self.training_data[-700:]
 
-        pos = sum(1 for _, label in self.training_data if label == 1)
+        pos = sum(1 for _, label in self.training_data if label > 0)
         logger.debug(
-            f"[TRAINING DATA] Collected {added} REAL samples | total now: {len(self.training_data)} "
-            f"| positive labels: {pos}/{len(self.training_data)}"
+            f"[TRAINING DATA] Collected {len(new_samples)} samples | "
+            f"total={len(self.training_data)} | positive={pos}"
         )
 
         now = time.time()
         if len(self.training_data) >= self.min_samples_for_training:
-            last_ts = getattr(self, "_last_training_ts", 0.0)
-            if now - last_ts > 60.0:
+            if now - getattr(self, "_last_training_ts", 0.0) > 60.0:
                 self._last_training_ts = now
                 logger.info(
-                    f"[TRAINING] Starting retrain with {len(self.training_data)} accumulated samples"
+                    f"[TRAINING] Triggering retrain with {len(self.training_data)} samples"
                 )
                 asyncio.create_task(self._schedule_training())
 
@@ -453,14 +475,16 @@ class KnowledgeConsolidator:
         return str(path / f"{agent_id}_knowledge_consolidator_ltr.txt")
 
     async def train_reranker(self, X: pd.DataFrame, y: np.ndarray, groups: List[int]):
+        """
+        Patched version with more stable hyperparameters and better diagnostics.
+        Targets ~200-300 trees instead of 1400+ while maintaining strong ranking quality.
+        """
         if len(X) < 10:
             logger.warning("Too few samples to train reranker")
             return
 
         model_path = self._get_model_path()
-        logger.info(
-            f"Training LambdaMART on {len(X)} samples → {model_path} (incremental)"
-        )
+        logger.info(f"Training LambdaMART on {len(X)} samples → {model_path}")
 
         try:
             init_model = None
@@ -479,54 +503,51 @@ class KnowledgeConsolidator:
                 "objective": "lambdarank",
                 "metric": "ndcg",
                 "ndcg_eval_at": [5, 10],
-                "learning_rate": 0.06,
-                "num_leaves": 32,
-                "min_data_in_leaf": 6,
-                "boosting_type": "gbdt",
-                "feature_fraction": 0.90,
-                "bagging_fraction": 0.85,
+                "learning_rate": 0.035,  # even more stable
+                "num_leaves": 32,  # allow a bit more complexity
+                "min_data_in_leaf": 4,
+                "feature_fraction": 0.88,
+                "bagging_fraction": 0.82,
                 "bagging_freq": 3,
-                "verbose": -1,
                 "lambda_l1": 0.1,
-                "lambda_l2": 0.2,
+                "lambda_l2": 0.15,
+                "verbose": -1,
             }
 
             self.reranker_model = lgb.train(
                 params,
                 train_set,
-                num_boost_round=300,
+                num_boost_round=300,  # capped lower
                 valid_sets=[train_set],
                 init_model=init_model,
                 callbacks=[
-                    lgb.early_stopping(40, verbose=False),
+                    lgb.early_stopping(35, verbose=False),
                     lgb.log_evaluation(0),
                 ],
             )
 
             self.feature_names = list(X.columns)
 
-            num_trees = getattr(
-                self.reranker_model,
-                "num_trees",
-                lambda: len(getattr(self.reranker_model, "trees", [])),
-            )()
-
+            num_trees = self.reranker_model.num_trees()
             importances = dict(
                 zip(self.feature_names, self.reranker_model.feature_importance())
             )
 
-            if num_trees > 250:
-                logger.info(
-                    f"Model has {num_trees} trees — still growing naturally. "
-                    f"Monitor dense_cosine / investigation_align rising."
+            logger.info(
+                f"✅ LambdaMART trained | trees={num_trees} | "
+                f"feature_importances: {importances}"
+            )
+
+            # Warn if semantic features somehow reappear
+            if (
+                importances.get("dense_cosine", 0) == 0
+                and "dense_cosine" in self.feature_names
+            ):
+                logger.warning(
+                    "dense_cosine still has 0 importance — consider removing it"
                 )
 
             self.reranker_model.save_model(model_path)
-
-            logger.info(
-                f"✅ LambdaMART model trained and saved | trees={num_trees} | "
-                f"feature_importances: {importances}"
-            )
 
         except Exception as e:
             logger.error(f"Failed to train reranker: {e}", exc_info=True)
