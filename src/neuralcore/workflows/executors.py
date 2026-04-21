@@ -126,7 +126,7 @@ async def classify_intent(agent, query: str) -> str:
 async def goal_driven_task_loop(
     agent, state: AgentState, target_loop: str
 ) -> AsyncIterator[Tuple[str, Any]]:
-    """Robust multi-step loop with persistent tool management via AgentState."""
+    """Robust multi-step loop with persistent tool management + reliable final synthesis."""
     is_multi_step = len(state.tasks) > 1
     marker = PromptBuilder.FINAL_ANSWER_MARKER
     state.increment_loop()
@@ -147,7 +147,6 @@ async def goal_driven_task_loop(
         if not state.skip_manager_this_turn and suggested_tool:
             last_tool = state.last_used_tool
 
-            # Unload only the previous tool if different
             if last_tool and last_tool != suggested_tool:
                 try:
                     agent.manager.unload_tools([last_tool])
@@ -155,7 +154,6 @@ async def goal_driven_task_loop(
                 except Exception as e:
                     logger.warning(f"[TOOL MGMT] Failed to unload {last_tool}: {e}")
 
-            # Load the recommended tool for this step
             if not agent.manager.is_loaded(suggested_tool):
                 try:
                     agent.manager.load_tools([suggested_tool])
@@ -167,7 +165,7 @@ async def goal_driven_task_loop(
                         f"[TOOL MGMT] Could not pre-load {suggested_tool}: {e}"
                     )
 
-        # Rich previous-results context (unchanged)
+        # Rich previous-results context
         previous_results_context = ""
         if state.tool_results:
             file_contents = []
@@ -187,7 +185,6 @@ async def goal_driven_task_loop(
         used_tools = [r.get("name", "unknown") for r in state.tool_results]
         used_tools_str = ", ".join(set(used_tools)) if used_tools else "none"
 
-        # Enhanced preview with notice (unchanged)
         completed = []
         for i in range(state.current_task_index):
             if i < len(state.tool_results):
@@ -283,14 +280,13 @@ async def goal_driven_task_loop(
 
                     if "FindTool" in tool_name:
                         state.record_findtool_call()
-                        state.skip_manager_this_turn = True  # ← PERSISTENT
+                        state.skip_manager_this_turn = True
                         state.request_loop_restart(
                             reason="FindTool called", target_loop=target_loop
                         )
                         yield ("phase_changed", {"phase": "restarting_loop"})
                         return
                     else:
-                        # Update last used tool for next iteration
                         state.last_used_tool = tool_name
 
             elif kind == "finish":
@@ -303,7 +299,6 @@ async def goal_driven_task_loop(
         yield "error", str(e)
         return
 
-    # Reset skip flag after a successful non-FindTool turn
     if not state.skip_manager_this_turn:
         state.skip_manager_this_turn = False
 
@@ -321,6 +316,7 @@ async def goal_driven_task_loop(
         result = state.tool_results[-1].get("result") if state.tool_results else None
         state.mark_current_task_complete(result=result)
 
+        # === LAST STEP → set goal reached but DO NOT return yet ===
         if not is_multi_step or state.current_task_index >= len(state.tasks) - 1:
             state.full_reply = f"Task completed successfully. {marker}"
             state.is_complete = True
@@ -332,22 +328,24 @@ async def goal_driven_task_loop(
                 {"full_reply": state.full_reply, "tool_calls": [], "is_complete": True},
             )
             yield ("phase_changed", {"phase": "completed"})
+            # DO NOT return here — fall through to final synthesis
+        else:
+            state.current_task_index += 1
+            if hasattr(state, "advance_to_next_ready_task"):
+                state.advance_to_next_ready_task()
+
+            logger.info(f"[ADVANCE] Sub-task {state.current_task_index} ready → next")
+            yield ("phase_changed", {"phase": "executing_tools"})
+            state.request_loop_restart(
+                reason="Tool executed — advancing to next sub-task",
+                target_loop=target_loop,
+            )
+            yield ("phase_changed", {"phase": "restarting_loop"})
             return
-
-        state.current_task_index += 1
-        if hasattr(state, "advance_to_next_ready_task"):
-            state.advance_to_next_ready_task()
-
-        logger.info(f"[ADVANCE] Sub-task {state.current_task_index} ready → next")
-        yield ("phase_changed", {"phase": "executing_tools"})
-        state.request_loop_restart(
-            reason="Tool executed — advancing to next sub-task", target_loop=target_loop
-        )
-        yield ("phase_changed", {"phase": "restarting_loop"})
-        return
 
     # ====================== LLM VALIDATION (multi-step only) ======================
     if is_multi_step and strong_completion and current_task and not state.goal_reached:
+        # ... (validation block unchanged) ...
         logger.info(
             f"[STEP VALIDATION] Starting LLM validation for step {state.current_task_index + 1}"
         )
@@ -473,40 +471,3 @@ async def goal_driven_task_loop(
     else:
         state.empty_loops = 0
 
-    # ====================== FINAL SYNTHESIS (fallback only) ======================
-    if state.goal_reached:
-        yield ("phase_changed", {"phase": "generating_final_answer"})
-        synthesis_query = PromptBuilder.final_synthesis(state.task)
-        if state.tool_results:
-            synthesis_query += "\n\nTool results summary:\n" + "\n".join(
-                f"• {r.get('name', 'unknown')}: {str(r.get('result', ''))[:500]}..."
-                for r in state.tool_results[-3:]
-            )
-
-        final_messages = await agent.context_manager.provide_context(
-            query=synthesis_query,
-            max_input_tokens=agent.max_tokens,
-            reserved_for_output=12000,
-            system_prompt=PromptBuilder.final_synthesis_system_prompt(),
-            include_logs=True,
-            chat=False,
-            state=state,
-        )
-        final_reply = await agent.client.chat(
-            final_messages, temperature=0.0, top_p=0.1
-        )
-        await agent.add_message("assistant", final_reply)
-        yield (
-            "llm_response",
-            {"full_reply": final_reply, "tool_calls": [], "is_complete": True},
-        )
-        logger.info("Task completed successfully → full reset")
-        state.reset_for_new_task()
-    else:
-        logger.warning("Loop ended without explicit goal or restart – forcing restart")
-        state.request_loop_restart(reason="Fallback restart", target_loop=target_loop)
-        yield ("phase_changed", {"phase": "restarting_loop"})
-
-    if not state.goal_reached:
-        state.status = "idle"
-        state.is_complete = True
