@@ -1456,7 +1456,8 @@ class ContextManager:
                     return name, desc
             except Exception as e:
                 logger.error(
-                    f"Topic extraction failed (attempt {attempt + 1})", exc_info=True
+                    f"Topic extraction failed (attempt {attempt + 1} Reason: {e})",
+                    exc_info=True,
                 )
                 attempt += 1
         return None, None
@@ -1995,7 +1996,7 @@ class ContextManager:
             )
             for key, item in self.knowledge_base.items()
             if item.source_type == "tool_outcome"
-            and not item.metadata.get("streamed", False) is True  # safety
+            and item.metadata.get("streamed", False) is not True  # safety
             and not str(key).startswith("tool_outcome_chunk")  # extra safety
         ]
 
