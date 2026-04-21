@@ -127,7 +127,9 @@ class PromptBuilder:
     def task_decomposition(original_query: str) -> str:
         """Pragmatic task decomposition.
         Automatically fetches the FULL (unlimited) list of all tools directly from registry.list_all_tools().
-        Planning is now 100% grounded in the real, complete tool registry."""
+        Planning is now 100% grounded in the real, complete tool registry.
+        Combined with multi-step detection: always plans, then caller decides singular vs multi based on plan size.
+        """
 
         # ── Fetch the complete tool list directly from registry (NO LIMIT) ──
         available_tools = registry.list_all_tools(
@@ -171,9 +173,11 @@ class PromptBuilder:
         USER REQUEST: {original_query}
 
         {tools_section}
+
         Break this request into the **minimal number of clear, actionable steps** required to complete the goal.
 
         Core Rules (strict):
+        - **SINGULAR vs MULTI DECISION IS BASED ON YOUR OUTPUT SIZE**: If the request is simple and can be fulfilled with **one tool call or one action**, output **EXACTLY 1 step**. Only create 2 or more steps when there are genuine dependencies, multiple distinct capabilities, or sequential phases that cannot be combined.
         - Use as few steps as possible. If one tool call can fulfill the request, return exactly 1 step.
         - Only create multiple steps when there are real dependencies or different capabilities needed.
         - Each step should correspond to what a single tool execution can realistically achieve.
@@ -396,22 +400,78 @@ class PromptBuilder:
 
     @staticmethod
     def lightweight_agentic_context(
-        objective_text: str,
-        compact_history: str = "",
-        current_subtask: str = "",
-        loaded_tools: str = "",
-        tool_expectations: str = "",
+        agent_state,
     ) -> str:
-        """Ultra-compact context optimized for long-running lightweight agentic loops."""
+        """Ultra-compact context optimized for long-running lightweight agentic loops.
+
+        Now receives the full AgentState object instead of individual extracted strings.
+        Completely generic and reusable — no client-specific assumptions.
+        """
+        # Core identity & goal
+        objective_text = agent_state.get_objective_reminder()
+
+        # Current sub-task (safe lookup)
+        current_subtask = ""
+        if (
+            agent_state.planned_tasks
+            and isinstance(agent_state.current_task_index, int)
+            and 0 <= agent_state.current_task_index < len(agent_state.planned_tasks)
+        ):
+            current_subtask = agent_state.planned_tasks[agent_state.current_task_index]
+
+        # Currently loaded tools
+        loaded_tools = ""
+        if agent_state.loaded_tools:
+            loaded_tools = PromptBuilder.loaded_tools_summary(agent_state.loaded_tools)
+
+        # Recent tool activity (compact)
+        compact_history = ""
+        if hasattr(agent_state, "tool_results") and agent_state.tool_results:
+            parts = []
+            # Use last 10 tool results for compact history
+            for entry in reversed(agent_state.tool_results[-10:]):
+                tool_name = entry.get("name", "unknown")
+                raw_result = str(entry.get("result", ""))
+
+                if tool_name == "FindTool":
+                    loaded = (
+                        "loaded tools" in raw_result.lower()
+                        or "success" in raw_result.lower()
+                    )
+                    preview = raw_result[:180].replace("\n", " ")
+                    status = "SUCCESS" if loaded else "ATTEMPT"
+                    parts.append(f"[FindTool {status}] → {preview}...")
+                else:
+                    preview = raw_result[:140].replace("\n", " ")
+                    if len(raw_result) > 140:
+                        preview += " [...]"
+                    parts.append(f"[{tool_name}] → {preview}...")
+            compact_history = "\n".join(parts)
+
+        # Tool expectations for current step
+        tool_expectations = ""
+        if (
+            agent_state.task_expected_outcomes
+            and isinstance(agent_state.current_task_index, int)
+            and 0
+            <= agent_state.current_task_index
+            < len(agent_state.task_expected_outcomes)
+        ):
+            expected = agent_state.task_expected_outcomes[
+                agent_state.current_task_index
+            ]
+            tool_expectations = PromptBuilder.tool_expectations_helper(expected)
+
+        # Build the context
         parts = [f"=== OBJECTIVE ===\n{objective_text}"]
 
-        if current_subtask:
+        if current_subtask.strip():
             parts.append(f"=== CURRENT SUB-TASK ===\n{current_subtask}")
 
-        if loaded_tools:
+        if loaded_tools.strip():
             parts.append(f"=== CURRENTLY LOADED TOOLS ===\n{loaded_tools}")
 
-        if compact_history:
+        if compact_history.strip():
             parts.append(f"=== RECENT TOOL ACTIVITY (last 10) ===\n{compact_history}")
 
         if tool_expectations.strip():
@@ -424,6 +484,7 @@ class PromptBuilder:
             f"• When the expected outcome for the current step is achieved, output exactly: {PromptBuilder.FINAL_ANSWER_MARKER}\n"
             "• Stay focused. No extra commentary."
         )
+
         return "\n\n".join(parts)
 
     @staticmethod
