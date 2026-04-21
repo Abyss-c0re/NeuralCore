@@ -29,22 +29,21 @@ class KnowledgeConsolidator:
         self.concept_graph: Dict[str, Any] = {}
 
         # ====================== NOVELTY DETECTION ======================
-        # Configurable similarity threshold to skip already-known concepts
-        # Can be set in config under: app.cognition.novelty_threshold
         app_config = getattr(getattr(self.agent, "loader", None), "config", {}).get(
             "app", {}
         )
         cognition_config = app_config.get("cognition", {})
         self.novelty_threshold: float = cognition_config.get("novelty_threshold", 0.85)
 
-        # Real training data
+        # Training data
         self.training_data: List[Tuple[Dict[str, float], int]] = []
         self.min_samples_for_training = 10
 
-        # Simple debounce for heavy extraction
+        # Debounce
         self._last_extraction_ts = 0.0
         self.extraction_cooldown = 8.0
         self._last_training_ts = 0.0
+
         self.active_features: List[str] = [
             "keyword_score",
             "content_length",
@@ -56,11 +55,43 @@ class KnowledgeConsolidator:
             "semantic_rescue",
             "kw_x_length",
             "tool_x_source",
+            "category_score",  # NEW: helps the model prefer certain categories
         ]
 
         logger.info(
             f"✅ KnowledgeConsolidator initialized | novelty_threshold={self.novelty_threshold}"
         )
+
+    # ====================== NEW: Get candidates from both sources ======================
+    def _get_all_candidates(self) -> List[Any]:
+        """Combine short-term memory + persistent KnowledgeBase items."""
+        candidates: List[Any] = []
+
+        # 1. Short-term memory (existing behavior)
+        short_term = getattr(self.agent.context_manager, "knowledge_base", {})
+        if isinstance(short_term, dict):
+            candidates.extend(list(short_term.values()))
+
+        # 2. Persistent long-term KnowledgeBase (NEW)
+        kb = getattr(self.agent.context_manager, "knowledge_base", None)
+        if kb and getattr(kb, "enabled", False) and hasattr(kb, "index"):
+            for key, meta in kb.index.get("items", {}).items():
+                # Create lightweight object compatible with feature extraction
+                item = type(
+                    "obj",
+                    (object,),
+                    {
+                        "key": key,
+                        "content": "",  # content loaded lazily if needed
+                        "source_type": "file",
+                        "embedding": None,
+                        "metadata": meta,
+                        "category_path": meta.get("category_path", ""),
+                    },
+                )()
+                candidates.append(item)
+
+        return candidates
 
     # ====================== FEATURE EXTRACTION ======================
     def _extract_features_sync(
@@ -70,9 +101,6 @@ class KnowledgeConsolidator:
         investigation_state: Dict,
         query_emb: Optional[np.ndarray] = None,
     ) -> pd.DataFrame:
-        """
-        Option B — properly computes dense_cosine and interaction features.
-        """
         rows = []
         query_words = re.findall(r"\b\w+\b", query.lower())
 
@@ -90,6 +118,12 @@ class KnowledgeConsolidator:
             emb = getattr(item, "embedding", None)
             dense = self._safe_cosine(query_emb, emb) if query_emb is not None else 0.0
 
+            # NEW: Category awareness
+            category = getattr(item, "category_path", "") or getattr(
+                item, "metadata", {}
+            ).get("category_path", "")
+            category_score = 1.8 if category else 1.0
+
             row = {
                 "keyword_score": kw,
                 "content_length": length,
@@ -97,16 +131,11 @@ class KnowledgeConsolidator:
                 "is_tool_outcome": is_tool,
                 "recency_score": np.exp(-0.08 * recency_hours),
                 "dense_cosine": dense,
-                "cosine_x_keyword": dense * kw * 1.5,  # slight boost to interaction
-                "semantic_rescue": dense * 2.0
-                if kw < 4.6
-                else 0.0
-                if kw < 4.5
-                else 0.0,  # lowered threshold + multiplier
-                "kw_x_length": kw * np.log1p(length) * 1.1,  # slight amplification
-                "tool_x_source": is_tool
-                * source_score
-                * 2.2,  # stronger preference for tool + good source
+                "cosine_x_keyword": dense * kw * 1.5,
+                "semantic_rescue": dense * 2.0 if kw < 4.6 else 0.0,
+                "kw_x_length": kw * np.log1p(length) * 1.1,
+                "tool_x_source": is_tool * source_score * 2.2,
+                "category_score": category_score,  # NEW FEATURE
             }
             rows.append(row)
 
@@ -131,15 +160,23 @@ class KnowledgeConsolidator:
             "tool_outcome": 2.0,
             "agent_trace": 2.5,
             "raw_knowledge": 1.0,
+            "file": 1.8,
         }
         return mapping.get(str(st).lower(), 1.0)
 
     # ====================== RERANKING ======================
-    async def rerank(self, query: str, candidates: List[Any], k: int = 20) -> List[Any]:
+    async def rerank(
+        self,
+        query: str,
+        candidates: Optional[List[Any]] = None,
+        k: int = 20,
+    ) -> List[Any]:
+        if candidates is None:
+            candidates = self._get_all_candidates()
+
         if len(candidates) <= k:
             return candidates[:k]
 
-        # Fetch query embedding once (efficient)
         fetch_emb = getattr(self.agent.context_manager, "fetch_embedding", None)
         query_emb = await fetch_emb(query, prefix="query") if fetch_emb else None
 
@@ -148,7 +185,7 @@ class KnowledgeConsolidator:
             query,
             candidates,
             self.state.__dict__ if hasattr(self.state, "__dict__") else {},
-            query_emb,  # ← Pass the embedding
+            query_emb,
         )
 
         if self.reranker_model is not None:
@@ -157,19 +194,20 @@ class KnowledgeConsolidator:
             )
             scores = np.asarray(scores_raw, dtype=np.float64).flatten()
         else:
-            # Updated fallback (matches new features)
             kw = np.array(features_df.get("keyword_score", 0.0))
             length = np.array(features_df.get("content_length", 0.0))
             source = np.array(features_df.get("source_type_score", 0.0))
             tool = np.array(features_df.get("is_tool_outcome", 0.0))
             dense = np.array(features_df.get("dense_cosine", 0.0))
+            cat = np.array(features_df.get("category_score", 1.0))
 
             scores = (
-                kw * 0.45
-                + np.log1p(length) * 0.20
+                kw * 0.40
+                + np.log1p(length) * 0.18
                 + source * 0.12
                 + tool * 0.08
-                + dense * 0.15  # semantic now has a role in fallback too
+                + dense * 0.15
+                + cat * 0.07  # NEW: category influence in fallback
             )
 
         scored_items = list(zip(candidates, scores))
@@ -182,12 +220,6 @@ class KnowledgeConsolidator:
     def _collect_training_sample(
         self, query: str, candidates: List[Any], chosen_items: List[Any]
     ):
-        """
-        Patched version:
-        - Removed the harmful 1.4× boost on semantic features
-        - Uses graded labels (2 = chosen, 0 = not chosen) — much better for LambdaRank
-        - Keeps training data bounded and recent
-        """
         if len(self.training_data) > 1200:
             return
 
@@ -207,7 +239,6 @@ class KnowledgeConsolidator:
 
         self.training_data.extend(new_samples)
 
-        # Keep only the most recent samples
         if len(self.training_data) > 900:
             self.training_data = self.training_data[-700:]
 
@@ -230,14 +261,8 @@ class KnowledgeConsolidator:
     async def extract_and_consolidate(
         self, trace: Optional[List[Dict]] = None, task_goal: str = ""
     ):
-        """Main method: distill higher-dimensional abstract concepts.
-        Keeps NeuralCore fully abstract and reusable for any domain."""
         now = time.time()
         if now - self._last_extraction_ts < self.extraction_cooldown:
-            logger.debug(
-                "[CONSOLIDATE] Cooldown active (%.1fs remaining), skipping heavy extraction",
-                self.extraction_cooldown - (now - self._last_extraction_ts),
-            )
             return
         self._last_extraction_ts = now
 
@@ -248,7 +273,6 @@ class KnowledgeConsolidator:
             )
 
         if not trace:
-            logger.debug("[CONSOLIDATE] No trace available — skipping")
             return
 
         goal = getattr(self.agent.state, "task", None) or task_goal or "general task"
@@ -259,44 +283,20 @@ class KnowledgeConsolidator:
             self.agent.context_manager, "investigation_state", {}
         ).get("findings", [])
 
-        kb = self.agent.context_manager.knowledge_base
-        total_kb_tokens = sum(len(getattr(item, "content", "")) for item in kb.values())
-        num_concepts = sum(
-            1
-            for item in kb.values()
-            if getattr(item, "source_type", "") == "extracted_concept"
-        )
-        has_large_item = any(
-            getattr(item, "source_type", "") == "tool_outcome"
-            and len(getattr(item, "content", "")) > 800
-            for item in kb.values()
-        )
+        logger.info(f"[CONSOLIDATE] Starting extraction | goal: {goal[:80]}...")
 
-        logger.debug(
-            f"[CONSOLIDATE] KB stats | tokens≈{total_kb_tokens:,} | concepts={num_concepts} | large_item={has_large_item}"
-        )
-        logger.info(
-            f"[CONSOLIDATE] Starting extraction | goal: {goal[:80]}... | trace len={len(trace)}"
-        )
-
-        candidates = list(kb.values())
+        # === NEW: Use both short-term and persistent KnowledgeBase ===
+        candidates = self._get_all_candidates()
         relevant = await self.rerank(goal, candidates, k=60)
 
-        # === NOVELTY FILTER BEFORE DISTILLATION ===
         novel_relevant = self._filter_novel_items(relevant)
 
         if not novel_relevant:
-            logger.debug(
-                "[CONSOLIDATE] All candidates already known — skipping distillation"
-            )
+            logger.debug("[CONSOLIDATE] All candidates already known — skipping")
             return
 
         extracted = await self._distill_concepts(
-            novel_relevant,
-            goal,
-            hypotheses,
-            findings,
-            self.concept_graph,
+            novel_relevant, goal, hypotheses, findings, self.concept_graph
         )
 
         added = 0
@@ -309,7 +309,6 @@ class KnowledgeConsolidator:
                     "type": concept.get("type", "strategy"),
                     "confidence": concept.get("score", 0.82),
                     "goal": goal,
-                    "from_large_item": has_large_item,
                 },
             )
 
@@ -325,25 +324,14 @@ class KnowledgeConsolidator:
             if hasattr(self.agent.context_manager, "_sparse_index_dirty"):
                 self.agent.context_manager._sparse_index_dirty = True
             logger.info(f"✅ Stored {added} new abstract concepts")
-        else:
-            logger.debug("[CONSOLIDATE] No new concepts distilled this round")
 
         self._update_concept_graph(extracted)
 
-        if added >= 1 or has_large_item or total_kb_tokens > 20000 or num_concepts >= 8:
-            logger.info(
-                f"[TRAINING TRIGGER] Meaningful growth detected → scheduling retrain "
-                f"(added={added}, tokens≈{total_kb_tokens:,}, concepts={num_concepts})"
-            )
+        if added >= 1:
             asyncio.create_task(self._schedule_training())
-        else:
-            logger.debug(
-                f"[TRAINING TRIGGER] Growth too small for full retrain (added={added})"
-            )
 
-    # ====================== NEW: NOVELTY FILTER ======================
+    # ====================== NOVELTY FILTER (unchanged) ======================
     def _filter_novel_items(self, candidates: List[Any]) -> List[Any]:
-        """Return only items that are sufficiently novel compared to existing concepts."""
         if not self.concept_graph or not candidates:
             return candidates
 
@@ -367,10 +355,6 @@ class KnowledgeConsolidator:
             if max_sim < threshold:
                 novel.append(item)
 
-        logger.debug(
-            f"[NOVELTY] Filtered {len(candidates) - len(novel)} known items "
-            f"(threshold={threshold}) → {len(novel)} novel candidates"
-        )
         return novel
 
     async def _distill_concepts(
@@ -382,7 +366,6 @@ class KnowledgeConsolidator:
         existing_concepts: Optional[Dict[str, Any]] = None,
     ) -> List[Dict]:
         if not relevant_items:
-            logger.debug("[DISTILL] No relevant items — skipping")
             return []
 
         prompt = PromptBuilder.abstract_concept_extraction(
@@ -415,9 +398,7 @@ class KnowledgeConsolidator:
         for c in concepts:
             name = c.get("name")
             if name:
-                # Safely handle None values for description and content
                 description = str(c.get("description") or "").strip()
-                # Find the corresponding KnowledgeItem that was just created
                 matching_item = next(
                     (
                         item
@@ -434,34 +415,24 @@ class KnowledgeConsolidator:
                     c["embedding"] = matching_item.embedding
                 self.concept_graph[name] = c
 
-    # ====================== TRAINING (unchanged) ======================
+    # ====================== TRAINING ======================
     async def _schedule_training(self):
         current_samples = len(self.training_data)
         if current_samples < self.min_samples_for_training:
-            logger.debug(
-                f"[TRAINING] Only {current_samples}/{self.min_samples_for_training} samples — waiting"
-            )
             return
 
-        logger.info(
-            f"[TRAINING] Starting retrain with {current_samples} accumulated samples"
-        )
+        logger.info(f"[TRAINING] Starting retrain with {current_samples} samples")
 
         try:
             X_list = [sample[0] for sample in self.training_data]
             y = np.array([sample[1] for sample in self.training_data])
             X = pd.DataFrame(X_list)
-
             groups = [len(X)] if len(X) > 0 else [1]
 
             await self.train_reranker(X, y, groups)
 
             if len(self.training_data) > 800:
                 self.training_data = self.training_data[-600:]
-
-            logger.info(
-                f"[TRAINING] Kept last {len(self.training_data)} samples for future runs"
-            )
 
         except Exception as e:
             logger.error(f"[TRAINING] Failed during scheduling: {e}", exc_info=True)
@@ -475,12 +446,7 @@ class KnowledgeConsolidator:
         return str(path / f"{agent_id}_knowledge_consolidator_ltr.txt")
 
     async def train_reranker(self, X: pd.DataFrame, y: np.ndarray, groups: List[int]):
-        """
-        Patched version with more stable hyperparameters and better diagnostics.
-        Targets ~200-300 trees instead of 1400+ while maintaining strong ranking quality.
-        """
         if len(X) < 10:
-            logger.warning("Too few samples to train reranker")
             return
 
         model_path = self._get_model_path()
@@ -491,11 +457,8 @@ class KnowledgeConsolidator:
             if os.path.exists(model_path):
                 try:
                     init_model = lgb.Booster(model_file=model_path)
-                    logger.debug("Loaded existing model for incremental training")
-                except Exception as e:
-                    logger.warning(
-                        f"Could not load existing model: {e}. Starting fresh."
-                    )
+                except Exception:
+                    pass
 
             train_set = lgb.Dataset(X, label=y, group=groups)
 
@@ -503,8 +466,8 @@ class KnowledgeConsolidator:
                 "objective": "lambdarank",
                 "metric": "ndcg",
                 "ndcg_eval_at": [5, 10],
-                "learning_rate": 0.035,  # even more stable
-                "num_leaves": 32,  # allow a bit more complexity
+                "learning_rate": 0.035,
+                "num_leaves": 32,
                 "min_data_in_leaf": 4,
                 "feature_fraction": 0.88,
                 "bagging_fraction": 0.82,
@@ -517,7 +480,7 @@ class KnowledgeConsolidator:
             self.reranker_model = lgb.train(
                 params,
                 train_set,
-                num_boost_round=300,  # capped lower
+                num_boost_round=300,
                 valid_sets=[train_set],
                 init_model=init_model,
                 callbacks=[
@@ -527,26 +490,14 @@ class KnowledgeConsolidator:
             )
 
             self.feature_names = list(X.columns)
-
             num_trees = self.reranker_model.num_trees()
             importances = dict(
                 zip(self.feature_names, self.reranker_model.feature_importance())
             )
 
             logger.info(
-                f"✅ LambdaMART trained | trees={num_trees} | "
-                f"feature_importances: {importances}"
+                f"✅ LambdaMART trained | trees={num_trees} | feature_importances: {importances}"
             )
-
-            # Warn if semantic features somehow reappear
-            if (
-                importances.get("dense_cosine", 0) == 0
-                and "dense_cosine" in self.feature_names
-            ):
-                logger.warning(
-                    "dense_cosine still has 0 importance — consider removing it"
-                )
-
             self.reranker_model.save_model(model_path)
 
         except Exception as e:
@@ -556,9 +507,6 @@ class KnowledgeConsolidator:
         model_path = self._get_model_path()
         try:
             if not os.path.exists(model_path):
-                logger.info(
-                    f"No trained model at {model_path}. Will bootstrap from hybrid scores."
-                )
                 self.reranker_model = None
                 return
 
@@ -574,26 +522,19 @@ class KnowledgeConsolidator:
             self.reranker_model = None
 
     def reset_model(self, keep_graph: bool = True):
-        logger.info("🔄 Resetting LambdaMART model due to prompt/extraction changes")
-
+        logger.info("🔄 Resetting LambdaMART model")
         self.training_data.clear()
         self.reranker_model = None
         self.feature_names = []
 
         if not keep_graph:
             self.concept_graph.clear()
-            logger.info("Concept graph also cleared")
-        else:
-            logger.info(
-                f"Kept existing concept_graph with {len(self.concept_graph)} concepts"
-            )
 
         model_path = self._get_model_path()
         if os.path.exists(model_path):
             try:
                 os.remove(model_path)
-                logger.info(f"Deleted old model file: {model_path}")
-            except Exception as e:
-                logger.warning(f"Could not delete model file: {e}")
+            except Exception:
+                pass
 
-        logger.info("✅ Model reset complete. Next training will start from scratch.")
+        logger.info("✅ Model reset complete.")

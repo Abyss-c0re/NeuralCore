@@ -15,6 +15,7 @@ from neuralcore.utils.search import keyword_score, cosine_sim
 from neuralcore.agents.state import AgentState
 from neuralcore.cognition.items import KnowledgeItem, Topic
 from neuralcore.cognition.consolidator import KnowledgeConsolidator
+from neuralcore.cognition.knowledge import KnowledgeBase
 
 # scikit-learn for sparse vectors
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -91,7 +92,7 @@ class ContextManager:
         self.similarity_threshold = MSG_THR
         self.topics: List[Topic] = []
         self.current_topic = Topic("Initial topic")
-        self.knowledge_base: Dict[str, KnowledgeItem] = {}
+        self.short_term_mem: Dict[str, KnowledgeItem] = {}
         self.embedding_cache: Dict[str, np.ndarray] = {}
 
         # Sparse index (TF-IDF) – now lazy + async
@@ -128,6 +129,7 @@ class ContextManager:
         self._last_analysis_ts = 0.0
         self.tools_executed: List[str] = []
         self.tool_call_history: List[Dict[str, Any]] = []
+        self.knowledge_base = KnowledgeBase(self)
         self.consolidator = KnowledgeConsolidator(agent)
 
     def _init_fastembed(self, embed_config: dict):
@@ -207,7 +209,7 @@ class ContextManager:
         self.topics.clear()
 
         # Knowledge Base & embeddings
-        self.knowledge_base.clear()
+        self.short_term_mem.clear()
         self.embedding_cache.clear() if hard else None
         self._sparse_index_dirty = True
         self.tfidf_matrix = None
@@ -258,7 +260,7 @@ class ContextManager:
         # Clear any pending locks if needed (but _mode_lock stays alive)
         logger.info(
             f"ContextManager reset complete. "
-            f"KB cleared: {len(self.knowledge_base)} items remaining. "
+            f"KB cleared: {len(self.short_term_mem)} items remaining. "
             f"Mode: {self.mode}"
         )
 
@@ -480,7 +482,7 @@ class ContextManager:
             PromptBuilder.context_summary_header(),
             PromptBuilder.context_summary_files_section(files),
             PromptBuilder.context_summary_tools_section(tools_executed),
-            PromptBuilder.context_summary_kb_section(len(self.knowledge_base)),
+            PromptBuilder.context_summary_kb_section(len(self.short_term_mem)),
             PromptBuilder.context_summary_token_section(total_tokens, self.max_tokens),
             PromptBuilder.context_summary_topic_section(self.current_topic.name),
             "",
@@ -759,11 +761,11 @@ class ContextManager:
 
         added = 0
         for item in chunk_items:
-            if item.key in self.knowledge_base:
+            if item.key in self.short_term_mem:
                 continue
             item.metadata["is_large_item"] = metadata.get("is_large_item", False)
             item.embedding = await self.fetch_embedding(item.content, prefix="passage")
-            self.knowledge_base[item.key] = item
+            self.short_term_mem[item.key] = item
             added += 1
 
         if added > 0:
@@ -799,12 +801,12 @@ class ContextManager:
     # ─────────────────────────────────────────────────────────────
     def _rebuild_sparse_index_sync(self):
         """Robust TF-IDF rebuild – fixes 'no terms remain' crash."""
-        if len(self.knowledge_base) < 1:
+        if len(self.short_term_mem) < 1:
             self.tfidf_matrix = None
             self.kb_keys_ordered = []
             return
-        texts = [item.content for item in self.knowledge_base.values()]
-        self.kb_keys_ordered = list(self.knowledge_base.keys())
+        texts = [item.content for item in self.short_term_mem.values()]
+        self.kb_keys_ordered = list(self.short_term_mem.keys())
 
         if self.tfidf_vectorizer is None:
             self.tfidf_vectorizer = TfidfVectorizer(
@@ -827,13 +829,13 @@ class ContextManager:
     async def _rebuild_sparse_index(self):
         """Async wrapper for CPU-heavy TF-IDF rebuild."""
         await asyncio.to_thread(self._rebuild_sparse_index_sync)
-        self._last_rebuild_size = len(self.knowledge_base)
+        self._last_rebuild_size = len(self.short_term_mem)
 
     async def _ensure_sparse_index(self):
         """Lazy + async rebuild."""
         if (
             not self._sparse_index_dirty
-            and len(self.knowledge_base) == self._last_rebuild_size
+            and len(self.short_term_mem) == self._last_rebuild_size
         ):
             return
         await self._rebuild_sparse_index()
@@ -867,8 +869,8 @@ class ContextManager:
                     not hasattr(self.tfidf_vectorizer, "vocabulary_")
                     or len(self.tfidf_vectorizer.vocabulary_) == 0
                 ):
-                    if len(self.knowledge_base) > 0:
-                        texts = [item.content for item in self.knowledge_base.values()]
+                    if len(self.short_term_mem) > 0:
+                        texts = [item.content for item in self.short_term_mem.values()]
                         logger.debug(f"Fitting TF-IDF on {len(texts)} documents")
                         self.tfidf_matrix = self.tfidf_vectorizer.fit_transform(texts)
                     else:
@@ -905,7 +907,7 @@ class ContextManager:
     async def _retrieve_relevant_knowledge(self, query: str, max_kb_tokens: int) -> str:
         """Hybrid RAG with parameter/file-aware boosting for exact tool matches.
         All prompt text moved to PromptBuilder."""
-        if not self.knowledge_base or not query.strip():
+        if not self.short_term_mem or not query.strip():
             logger.debug(
                 "retrieve_relevant_knowledge: KB empty or query empty → returning ''"
             )
@@ -913,7 +915,7 @@ class ContextManager:
 
         logger.debug(
             f"[RETRIEVE] START (legacy path) | query='{query[:100]}...' | "
-            f"KB_size={len(self.knowledge_base)} | max_tokens={max_kb_tokens}"
+            f"KB_size={len(self.short_term_mem)} | max_tokens={max_kb_tokens}"
         )
 
         # Use centralized prompt for embedding query
@@ -925,7 +927,7 @@ class ContextManager:
         # Dense ranking
         dense_ranked = []
         if query_emb.size > 0:
-            for key, item in self.knowledge_base.items():
+            for key, item in self.short_term_mem.items():
                 if (
                     getattr(item, "embedding", None) is not None
                     and item.embedding.size > 0
@@ -958,7 +960,7 @@ class ContextManager:
         if file_mentions:
             logger.debug(f"[BOOST] Detected file/param mentions: {file_mentions}")
             boosted = 0
-            for key, item in self.knowledge_base.items():
+            for key, item in self.short_term_mem.items():
                 if item.source_type != "tool_outcome":
                     continue
                 boost = 0.0
@@ -995,7 +997,7 @@ class ContextManager:
         # Final scored list
         scored = sorted(
             [
-                (rrf_scores.get(key, 0.0), key, self.knowledge_base[key])
+                (rrf_scores.get(key, 0.0), key, self.short_term_mem[key])
                 for key in rrf_scores
             ],
             reverse=True,
@@ -1062,12 +1064,12 @@ class ContextManager:
     async def _get_broad_candidates(self, query: str) -> List[KnowledgeItem]:
         """Returns broad candidates using RRF fusion + file/param boosting.
         Always returns pure List[KnowledgeItem]."""
-        if not self.knowledge_base:
+        if not self.short_term_mem:
             logger.debug("[BROAD] KB empty → returning []")
             return []
 
         logger.debug(
-            f"[BROAD] START | query='{query[:100]}...' | KB_size={len(self.knowledge_base)}"
+            f"[BROAD] START | query='{query[:100]}...' | KB_size={len(self.short_term_mem)}"
         )
 
         # Dense ranking
@@ -1077,7 +1079,7 @@ class ContextManager:
 
         dense_ranked = []
         if query_emb.size > 0:
-            for key, item in self.knowledge_base.items():
+            for key, item in self.short_term_mem.items():
                 emb = getattr(item, "embedding", None)
                 if emb is not None and emb.size > 0:
                     sim = cosine_sim(query_emb, emb)
@@ -1089,8 +1091,8 @@ class ContextManager:
         sparse_scores = await self._sparse_retrieve(query)
         sparse_ranked = []
         for key, score in sparse_scores.items():
-            if score > 0 and key in self.knowledge_base:
-                sparse_ranked.append((score, key, self.knowledge_base[key]))
+            if score > 0 and key in self.short_term_mem:
+                sparse_ranked.append((score, key, self.short_term_mem[key]))
 
         logger.debug(f"[BROAD] Sparse ranked: {len(sparse_ranked)} items")
 
@@ -1107,7 +1109,7 @@ class ContextManager:
         if file_mentions:
             logger.debug(f"[BOOST] Detected mentions: {file_mentions}")
             boosted = 0
-            for key, item in self.knowledge_base.items():
+            for key, item in self.short_term_mem.items():
                 if item.source_type != "tool_outcome":
                     continue
                 boost = 0.0
@@ -1143,7 +1145,7 @@ class ContextManager:
         # Final candidates - always (score, item) for safe sorting
         scored = [
             (rrf_scores.get(key, 0.0), item)
-            for key, item in self.knowledge_base.items()
+            for key, item in self.short_term_mem.items()
             if key in rrf_scores
         ]
         scored.sort(key=lambda x: x[0], reverse=True)
@@ -1159,67 +1161,86 @@ class ContextManager:
         self,
         query: str,
         max_kb_tokens: int = 5000,
-        k: int = 10,
+        k: int = 12,
         research_mode: bool = False,
     ) -> str:
-        """Main retrieval used by provide_context and research workflows.
+        """Hybrid retrieval: short-term memory + persistent KnowledgeBase.
 
         When research_mode=True:
-            - Only tool_outcome items are considered (cleanest signal for research/investigation)
-            - Returns the most relevant tool result content with minimal noise
+            - Only tool_outcome items are considered (cleanest signal for research)
             - Still uses full hybrid RRF + file/param boosting + consolidator reranking
-
-        When research_mode=False (default): behaves exactly as before (mixed KB sources).
+        When research_mode=False (default): normal mixed retrieval.
         """
-        if not self.knowledge_base or not query.strip():
-            logger.debug("ranked_retrieve: KB empty or query empty → returning ''")
+        if not query.strip():
             return ""
 
-        consolidator = getattr(self, "consolidator", None)
         logger.debug(
-            f"[RANKED_RETRIEVE] START | query='{query[:100]}...' | "
-            f"KB_size={len(self.knowledge_base)} | max_kb_tokens={max_kb_tokens} | "
-            f"k={k} | research_mode={research_mode} | "
-            f"consolidator_present={consolidator is not None}"
+            f"[RANKED_RETRIEVE] START | query='{query[:80]}...' | "
+            f"short_term={len(self.short_term_mem)} | "
+            f"persistent_enabled={getattr(self.knowledge_base, 'enabled', False)} | "
+            f"research_mode={research_mode}"
         )
 
-        # 1. Broad candidates (RRF + file/param boost) – already battle-tested
-        candidates = await self._get_broad_candidates(query)
-        logger.debug(f"[RANKED_RETRIEVE] Broad candidates: {len(candidates)}")
+        # === 1. Get candidates from SHORT-TERM memory ===
+        short_term_candidates = await self._get_broad_candidates(query)
 
-        # ── RESEARCH MODE: clean extraction from tool outcomes only ──
-        if research_mode:
-            original_count = len(candidates)
-            candidates = [
-                item for item in candidates if item.source_type == "tool_outcome"
-            ]
-            logger.debug(
-                f"[RESEARCH_MODE] Filtered to tool outcomes only: {original_count} → {len(candidates)}"
-            )
-            if not candidates:
-                logger.debug("[RESEARCH_MODE] No tool outcomes found in KB")
-                return ""
+        # === 2. Get candidates from PERSISTENT KnowledgeBase ===
+        long_term_candidates: List[KnowledgeItem] = []
+        if getattr(self.knowledge_base, "enabled", False):
+            try:
+                long_term_candidates = await self.knowledge_base.retrieve(
+                    query, k=15, categories=None
+                )
+                logger.debug(
+                    f"[RANKED_RETRIEVE] Persistent KB returned {len(long_term_candidates)} items"
+                )
+            except Exception as e:
+                logger.warning(f"Persistent KB retrieve failed: {e}")
 
-        # 2. Rerank (this is the critical point for sample collection)
-        if consolidator and candidates:
-            logger.debug(
-                f"[RANKED_RETRIEVE] → Calling KnowledgeConsolidator.rerank() with {len(candidates)} candidates"
-            )
-            reranked_items = await consolidator.rerank(query, candidates, k=k)
-            logger.debug(
-                f"[RANKED_RETRIEVE] Reranker returned {len(reranked_items)} items"
-            )
-        else:
-            logger.debug(
-                "[RANKED_RETRIEVE] No consolidator → fallback to top candidates"
-            )
-            reranked_items = candidates[:k]
+        # === 3. Merge + deduplicate ===
+        all_candidates = short_term_candidates + long_term_candidates
 
-        # 3. Format using existing clean block logic
-        result = await self._format_knowledge_blocks(reranked_items, max_kb_tokens)
+        seen = set()
+        unique_candidates = []
+        for item in all_candidates:
+            key = getattr(item, "key", id(item))
+            if key not in seen:
+                seen.add(key)
+                unique_candidates.append(item)
 
         logger.debug(
-            f"[RANKED_RETRIEVE] END → formatted {len(result):,} chars from {len(reranked_items)} items "
+            f"[RANKED_RETRIEVE] Combined unique candidates: {len(unique_candidates)}"
+        )
+
+        # === RESEARCH MODE FILTER ===
+        if research_mode:
+            original_count = len(unique_candidates)
+            unique_candidates = [
+                item
+                for item in unique_candidates
+                if getattr(item, "source_type", None) in ("tool_outcome", "file")
+                # ^^^ now includes both live tool results AND persistent KnowledgeBase documents
+            ]
+            logger.debug(
+                f"[RESEARCH_MODE] Filtered to tool_outcomes + KB files: {original_count} → {len(unique_candidates)}"
+            )
+            if not unique_candidates:
+                logger.debug(
+                    "[RESEARCH_MODE] No relevant items (tool_outcome or file) found"
+                )
+                return ""
+
+        # === 4. Rerank with consolidator ===
+        if self.consolidator and unique_candidates:
+            reranked = await self.consolidator.rerank(query, unique_candidates, k=k)
+        else:
+            reranked = unique_candidates[:k]
+
+        # === 5. Format final output ===
+        result = await self._format_knowledge_blocks(reranked, max_kb_tokens)
+
+        logger.debug(
+            f"[RANKED_RETRIEVE] END → {len(result):,} chars from {len(reranked)} items "
             f"(research_mode={research_mode})"
         )
         return result
@@ -1468,19 +1489,18 @@ class ContextManager:
     async def provide_context(
         self,
         query: str = "",
-        max_input_tokens: int = 22000,
-        reserved_for_output: int = 2048,
-        system_prompt: str = "You are a helpful Terminal AI agent with full coding and filesystem support.",
+        max_input_tokens: int = 10000,
+        reserved_for_output: int = 24000,
         include_logs: bool = False,
         min_history_tokens: int = 2000,
-        max_kb_tokens: int = 5000,
+        max_kb_tokens: int = 18000,
         chat: bool = False,
-        state: Optional["AgentState"] = None,
         lightweight_agentic: bool = False,
+        research_mode: bool = False,
         return_as_string: bool = False,
-        research_mode: bool = False,  # ← Combined with return_as_string
     ) -> List[Dict[str, Any]] | str:
         messages: List[Dict[str, Any]] = []
+        state = self.agent.state
 
         logger.debug(
             f"provide_context called | query='{query[:100]}...' | chat={chat} | "
@@ -1491,16 +1511,13 @@ class ContextManager:
         if chat:
             # ── RICH CHAT MODE (unchanged) ──
             logger.debug("→ Entering CHAT mode")
-            clean_system = system_prompt.strip()
-            messages.append({"role": "system", "content": clean_system})
 
             if self.pure_chat_history:
                 recent = self.pure_chat_history[-12:]
                 for msg in recent:
                     messages.append({"role": msg["role"], "content": msg["content"]})
 
-            if query.strip() and self.knowledge_base:
-                # Chat usually benefits from general (non-research) context
+            if query.strip() and self.short_term_mem:
                 kb_text = await self.ranked_retrieve(
                     query, max_kb_tokens // 2, research_mode=False
                 )
@@ -1533,19 +1550,22 @@ class ContextManager:
                     tool_role="tool",
                 )
 
-            # ── String return for chat mode ──
             if return_as_string:
                 formatted = []
                 for msg in messages:
                     role = msg.get("role", "unknown").upper()
                     content = str(msg.get("content", "")).strip()
                     formatted.append(f"{role}:\n{content}")
-                return "\n\n".join(formatted)
+                context = "\n\n".join(formatted)
+                logger.debug(f"Context provided: {context}")
+                return context
 
             return messages
 
         # ── AGENTIC MODE ──
         logger.debug("→ Entering AGENTIC mode")
+
+        tokens_used = 0
 
         if lightweight_agentic and state is not None:
             # ── IMPROVED LIGHTWEIGHT PATH FOR LONG-RUNNING LOOPS ──
@@ -1560,107 +1580,19 @@ class ContextManager:
                     f"AgentState integrity warnings before lightweight context: {warnings}"
                 )
 
-            objective_text = state.get_objective_reminder()
-
-            # BULLETPROOF current_subtask lookup
-            if (
-                state.planned_tasks
-                and isinstance(state.current_task_index, int)
-                and 0 <= state.current_task_index < len(state.planned_tasks)
-            ):
-                current_subtask = state.planned_tasks[state.current_task_index]
-            else:
-                current_subtask = (
-                    query.strip() or "Continue with next action or mark task complete"
-                )
-
-            # Tool expectations via PromptBuilder helper (NO inline strings)
-            tool_expectations = ""
-            if (
-                state.task_expected_outcomes
-                and isinstance(state.current_task_index, int)
-                and 0 <= state.current_task_index < len(state.task_expected_outcomes)
-            ):
-                expected = state.task_expected_outcomes[state.current_task_index]
-                tool_expectations = PromptBuilder.tool_expectations_helper(expected)
-
-            # Enhanced Compact Tool History
-            compact_history = ""
-            if self.tool_call_history:
-                parts = []
-                for entry in reversed(self.tool_call_history[-10:]):
-                    tool_name = entry.get("tool", "unknown")
-                    raw_result = str(entry.get("result", ""))
-
-                    if tool_name == "FindTool":
-                        loaded = (
-                            "loaded tools" in raw_result.lower()
-                            or "success" in raw_result.lower()
-                        )
-                        preview = raw_result[:180].replace("\n", " ")
-                        status = "SUCCESS" if loaded else "ATTEMPT"
-                        parts.append(f"[FindTool {status}] → {preview}...")
-                    else:
-                        preview = raw_result[:140].replace("\n", " ")
-                        if len(raw_result) > 140:
-                            preview += " [...]"
-                        parts.append(f"[{tool_name}] → {preview}...")
-                compact_history = "\n".join(parts)
-
-            # Loaded tools
-            loaded_tools_str = ""
-            if hasattr(state, "loaded_tools") and state.loaded_tools:
-                loaded_tools_str = PromptBuilder.loaded_tools_summary(
-                    state.loaded_tools
-                )
-            elif hasattr(state, "tool_results") and state.tool_results:
-                used_tools = {r.get("name", "unknown") for r in state.tool_results[-8:]}
-                if used_tools:
-                    loaded_tools_str = PromptBuilder.loaded_tools_summary(
-                        list(used_tools)
-                    )
-
             # Build context using PromptBuilder helper only
-            full_context = PromptBuilder.lightweight_agentic_context(
-                objective_text=objective_text,
-                compact_history=compact_history,
-                current_subtask=current_subtask,
-                loaded_tools=loaded_tools_str,
-                tool_expectations=tool_expectations,
-            )
+            full_context = PromptBuilder.lightweight_agentic_context(state)
 
             messages.append({"role": "system", "content": full_context})
             tokens_used = self.count_tokens(messages)
 
-            # Smart KB retrieval – now respects research_mode
-            if query.strip():
-                kb_text = await self.ranked_retrieve(
-                    query, 1800, research_mode=research_mode
-                )
-                if kb_text:
-                    messages.append(
-                        {
-                            "role": "system",
-                            "content": PromptBuilder.relevant_external_context_section(
-                                kb_text
-                            ),
-                        }
-                    )
-                    tokens_used = self.count_tokens(messages)
-
         else:
-            # ── ORIGINAL RICH AGENTIC MODE (unchanged) ──
+            # ── ORIGINAL RICH AGENTIC MODE ──
+            summary = self.get_context_summary()
             full_system = (
                 PromptBuilder.agentic_action_system_prefix()
-                + "\n\n"
-                + system_prompt.strip()
+                + f"\n\n{summary}\n\n{PromptBuilder.context_summary_instruction()}"
             )
-
-            summary = self.get_context_summary()
-            if summary:
-                full_system += (
-                    f"\n\n{summary}\n\n{PromptBuilder.context_summary_instruction()}"
-                )
 
             if include_logs:
                 try:
@@ -1675,15 +1607,8 @@ class ContextManager:
             messages.append({"role": "system", "content": full_system})
             tokens_used = self.count_tokens(messages)
 
-            if state is not None:
-                objective_text = state.get_objective_reminder()
-                objective_block = PromptBuilder.objective_and_state_section(
-                    objective_text
-                )
-                messages.append({"role": "system", "content": objective_block})
-                tokens_used = self.count_tokens(messages)
-
         # ── COMMON FINAL STEPS ──
+
         query_tokens = (
             self.count_tokens([{"role": "user", "content": query}])
             if query.strip()
@@ -1695,28 +1620,50 @@ class ContextManager:
         kb_tokens = (
             min(max_kb_tokens, remaining // 3) if not lightweight_agentic else 1800
         )
-        history_budget = max(remaining - kb_tokens, min_history_tokens)
 
-        # Extra KB only for rich mode – now respects research_mode
-        if query.strip() and kb_tokens > 600 and not lightweight_agentic:
+        # ── Collect external context (KB) ──
+        context_parts: List[str] = []
+
+        # In research_mode ONLY provide relevant context (KB), skip conversation history
+        if query.strip():
+            # ── NEW: In research mode, embed executed tools (names + args only) into the query for better embedding/retrieval
+            if research_mode and state is not None and state.executed_functions:
+                executed_tools_summary = []
+                for func in state.executed_functions[-8:]:  # last 8 for relevance
+                    name = func.get("name", "unknown")
+                    args = func.get("args", {})
+                    if args:
+                        args_str = ", ".join(
+                            f"{k}={v}" for k, v in list(args.items())[:5]
+                        )
+                        executed_tools_summary.append(f"{name}({args_str})")
+                    else:
+                        executed_tools_summary.append(name)
+
+                tools_str = " | ".join(executed_tools_summary)
+                enriched_query = f"{query} [EXECUTED TOOLS: {tools_str}]"
+            else:
+                enriched_query = query
+
             kb_text = await self.ranked_retrieve(
-                query, kb_tokens, research_mode=research_mode
+                enriched_query if research_mode else query,
+                kb_tokens,
+                research_mode=research_mode,
             )
             if kb_text:
-                messages.append(
-                    {
-                        "role": "system",
-                        "content": PromptBuilder.relevant_external_context_section(
-                            kb_text
-                        ),
-                    }
+                context_parts.append(
+                    PromptBuilder.relevant_external_context_section(kb_text)
                 )
-                tokens_used = self.count_tokens(messages)
 
         # ── HISTORY HANDLING ──
         if lightweight_agentic:
             logger.debug("→ LIGHTWEIGHT MODE: skipping full conversation history")
+        elif research_mode:
+            logger.debug(
+                "→ RESEARCH MODE: skipping conversation history, only relevant KB context"
+            )
         else:
+            history_budget = max(remaining - kb_tokens, min_history_tokens)
             recent_msgs: List[Dict[str, str]] = []
             for msg, t in zip(
                 reversed(self.current_topic.history),
@@ -1727,15 +1674,22 @@ class ContextManager:
                 recent_msgs.insert(0, msg)
                 history_budget -= t
                 tokens_used += t
+
             messages.extend(recent_msgs)
 
-        # Always end with current user query
-        messages.append(
-            {
-                "role": "user",
-                "content": query.strip() or "[AUTONOMOUS CONTINUATION]",
-            }
+        # ── FINAL USER MESSAGE: query + all external context (no more spamming system messages) ──
+        provided_context = (
+            "\n\n---\n\n".join(context_parts)
+            if context_parts
+            else "[No additional external context]"
         )
+
+        user_query_text = query.strip() or "[AUTONOMOUS CONTINUATION]"
+        user_content = f"""{user_query_text}
+
+        {provided_context}"""
+
+        messages.append({"role": "user", "content": user_content})
 
         final_tokens = self.count_tokens(messages)
         logger.debug(f"Final context before prune → {final_tokens} tokens")
@@ -1744,7 +1698,7 @@ class ContextManager:
             removed, pruned_turns = self.prune_to_fit_context(
                 messages,
                 max_tokens=target,
-                min_keep_messages=3 if lightweight_agentic else 5,
+                min_keep_messages=2 if lightweight_agentic else 4,
                 system_role="system",
                 user_role="user",
                 assistant_role="assistant",
@@ -1760,14 +1714,15 @@ class ContextManager:
             f"return_as_string={return_as_string} | tokens={final_tokens}"
         )
 
-        # ── NEW: optional string return for agentic mode ──
         if return_as_string:
             formatted = []
             for msg in messages:
                 role = msg.get("role", "unknown").upper()
                 content = str(msg.get("content", "")).strip()
                 formatted.append(f"{role}:\n{content}")
-            return "\n\n".join(formatted)
+            context = "\n\n".join(formatted)
+            logger.debug(f"Context provided: {context}")
+            return context
 
         return messages
 
@@ -1981,8 +1936,8 @@ class ContextManager:
         Only real 'tool_outcome' entries are considered (streaming chunks are ignored).
         Respects per-result token limit for very large outputs.
         """
-        if not self.knowledge_base:
-            logger.debug("No entries in knowledge_base")
+        if not self.short_term_mem:
+            logger.debug("No entries in short_term_mem")
             return ""
 
         # Only consider final consolidated tool_outcomes (not individual chunks)
@@ -1994,7 +1949,7 @@ class ContextManager:
                 item.metadata.get("tool", "unknown"),
                 len(item.content),
             )
-            for key, item in self.knowledge_base.items()
+            for key, item in self.short_term_mem.items()
             if item.source_type == "tool_outcome"
             and item.metadata.get("streamed", False) is not True  # safety
             and not str(key).startswith("tool_outcome_chunk")  # extra safety
@@ -2228,6 +2183,7 @@ class ContextManager:
 
         # === YOUR ORIGINAL LINES (kept 100% unchanged) ===
         self.tools_executed.append(tool_name)
+        logger.debug(f"tool_outcome {tool_name} → {preview}...")
         self._log_action("tool_outcome", f"{tool_name} → {preview}...", {})
 
         # === MOVED state.add_tool_result LOGIC (after result is finished) ===
