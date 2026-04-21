@@ -1,0 +1,786 @@
+2026-04-21 05:28:22,347 - neuralcore - DEBUG - ActionRegistry initialized
+2026-04-21 05:28:22,347 - neuralcore - DEBUG - Global registry created with sets: []
+2026-04-21 05:28:22,350 - neuralcore - DEBUG - Workflow registry initialized (steps + loops + conditions + waits)
+2026-04-21 05:28:22,795 - neuralcore - INFO - ✅ Condition registered: 'goal_achieved' → No description
+2026-04-21 05:28:22,795 - neuralcore - INFO - ✅ Condition registered: 'subtask_complete' → Break when sub-task is really done — stricter for multi-step.
+2026-04-21 05:28:22,795 - neuralcore - INFO - ✅ Condition registered: 'has_final_reply' → Chat loop break — keep simple but require meaningful content.
+2026-04-21 05:28:22,795 - neuralcore - INFO - ✅ Condition registered: 'max_tool_calls_reached' → Per-turn tool call limit (prevents runaway tool loops in one response)
+2026-04-21 05:28:22,795 - neuralcore - INFO - ✅ Condition registered: 'too_many_empty_loops' → Prevents infinite empty LLM replies
+2026-04-21 05:28:22,795 - neuralcore - INFO - ✅ Condition registered: 'max_action_restarts_reached' → Prevents excessive 'Next Action' loops
+2026-04-21 05:28:22,795 - neuralcore - INFO - ✅ Loop 'goal_driven_loop' registered (max=∞, break=goal_achieved)
+2026-04-21 05:28:22,795 - neuralcore - INFO - ✅ Loop 'chat_tool_loop' registered (max=∞, break=none)
+2026-04-21 05:28:22,795 - neuralcore - INFO - ✅ Step 'deploy_chat_loop' registered to workflow 'deploy_chat' (toolsets=-, hidden=-, tools=-, dynamic=True, agent_bound=True)
+2026-04-21 05:28:22,795 - neuralcore - INFO - ✅ Step 'llm_stream' registered to workflow 'sub_agent_execute' (toolsets=-, hidden=-, tools=-, dynamic=True, agent_bound=True)
+2026-04-21 05:28:22,795 - neuralcore - INFO - ✅ Step 'plan_microtasks' registered to workflow 'orchestrator' (toolsets=-, hidden=-, tools=-, dynamic=True, agent_bound=True)
+2026-04-21 05:28:22,795 - neuralcore - INFO - ✅ Step 'launch_next_subtask' registered to workflow 'orchestrator' (toolsets=-, hidden=-, tools=-, dynamic=True, agent_bound=True)
+2026-04-21 05:28:22,795 - neuralcore - INFO - ✅ Step 'wait_for_subtask' registered to workflow 'orchestrator' (toolsets=-, hidden=-, tools=-, dynamic=True, agent_bound=True)
+2026-04-21 05:28:22,795 - neuralcore - INFO - ✅ Step 'check_orchestrator_complete' registered to workflow 'orchestrator' (toolsets=-, hidden=-, tools=-, dynamic=True, agent_bound=True)
+2026-04-21 05:28:23,126 - neuralcore - INFO - LLMClient init | model=qwen3.5-9b | base_url=http://localhost:1212/v1 | extra_body_keys=['presence_penalty', 'top_k', 'chat_template_kwargs']
+2026-04-21 05:28:23,134 - neuralcore - INFO - LLMClient init | model=qwen3.5-9b | base_url=http://localhost:1212/v1 | extra_body_keys=['presence_penalty', 'top_k', 'chat_template_kwargs']
+2026-04-21 05:28:23,134 - neuralcore - DEBUG - DynamicActionManager initialized with agent=agent_002
+2026-04-21 05:28:23,260 - neuralcore - INFO - ✅ FastEmbed ready (model: BAAI/bge-small-en-v1.5)
+2026-04-21 05:28:23,260 - neuralcore - INFO - ✅ KnowledgeConsolidator initialized | novelty_threshold=0.82
+2026-04-21 05:28:23,260 - neuralcore - INFO - ✅ Registered workflow 'deploy_chat': Workflow: deploy_chat
+2026-04-21 05:28:23,260 - neuralcore - INFO - ✅ Registered workflow 'sub_agent_execute': Workflow: sub_agent_execute
+2026-04-21 05:28:23,260 - neuralcore - INFO - ✅ Registered workflow 'orchestrator': Workflow: orchestrator
+2026-04-21 05:28:23,260 - neuralcore - INFO - Registered external step: _loop_goal_driven_loop
+2026-04-21 05:28:23,260 - neuralcore - INFO - Registered external step: _loop_chat_tool_loop
+2026-04-21 05:28:23,260 - neuralcore - INFO - Registered external step: deploy_chat_loop
+2026-04-21 05:28:23,260 - neuralcore - INFO - Registered external step: llm_stream
+2026-04-21 05:28:23,260 - neuralcore - INFO - Registered external step: plan_microtasks
+2026-04-21 05:28:23,260 - neuralcore - INFO - Registered external step: launch_next_subtask
+2026-04-21 05:28:23,260 - neuralcore - INFO - Registered external step: wait_for_subtask
+2026-04-21 05:28:23,261 - neuralcore - INFO - Registered external step: check_orchestrator_complete
+2026-04-21 05:28:23,261 - neuralcore - INFO - ✅ Registered custom condition 'goal_achieved': no desc
+2026-04-21 05:28:23,261 - neuralcore - INFO - ✅ Registered custom condition 'subtask_complete': no desc
+2026-04-21 05:28:23,261 - neuralcore - INFO - ✅ Registered custom condition 'has_final_reply': no desc
+2026-04-21 05:28:23,261 - neuralcore - INFO - ✅ Registered custom condition 'max_tool_calls_reached': no desc
+2026-04-21 05:28:23,261 - neuralcore - INFO - ✅ Registered custom condition 'too_many_empty_loops': no desc
+2026-04-21 05:28:23,261 - neuralcore - INFO - ✅ Registered custom condition 'max_action_restarts_reached': no desc
+2026-04-21 05:28:23,261 - neuralcore - INFO - ✅ Synced loop 'goal_driven_loop' from decorator registry (max=∞)
+2026-04-21 05:28:23,261 - neuralcore - INFO - ✅ Synced loop 'chat_tool_loop' from decorator registry (max=∞)
+2026-04-21 05:28:23,261 - neuralcore - INFO - 🔄 Switched to workflow 'deploy_chat' → Workflow: deploy_chat
+2026-04-21 05:28:23,261 - neuralcore - INFO - ✅ Workflows fully loaded: deploy_chat — Workflow: deploy_chat (3 decorator workflows + 2 loops)
+2026-04-21 05:28:23,261 - neuralcore - INFO - ✅ WorkflowEngine ready
+2026-04-21 05:28:23,261 - neuralcore - INFO - [ACTIONSET ADD] FindTool
+2026-04-21 05:28:23,261 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=1
+2026-04-21 05:28:23,261 - neuralcore - INFO - ToolBrowser (FindTool) added to DynamicCore as persistent tool
+2026-04-21 05:28:23,261 - neuralcore - DEBUG - AgentState → loaded_tools cleared
+2026-04-21 05:28:23,261 - neuralcore - DEBUG - AgentState → FindTool tracking cleared
+2026-04-21 05:28:23,261 - neuralcore - DEBUG - AgentState reset complete. Goal: ''
+2026-04-21 05:28:23,261 - neuralcore - DEBUG - AgentState → loaded_tools updated: []
+2026-04-21 05:28:23,263 - neuralcore - DEBUG - Registering set 'FileEditingTools' with 0 actions
+2026-04-21 05:28:23,263 - neuralcore - DEBUG - Created new ActionSet 'FileEditingTools' for decorator
+2026-04-21 05:28:23,263 - neuralcore - INFO - [ACTIONSET ADD] write_file
+2026-04-21 05:28:23,263 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=1
+2026-04-21 05:28:23,263 - neuralcore - DEBUG - Added action 'write_file' to index under set 'FileEditingTools'
+2026-04-21 05:28:23,263 - neuralcore - INFO - [TOOL REGISTERED] write_file | require_confirmation=False | set=FileEditingTools
+2026-04-21 05:28:23,263 - neuralcore - INFO - [ACTIONSET ADD] replace_block
+2026-04-21 05:28:23,263 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=2
+2026-04-21 05:28:23,263 - neuralcore - DEBUG - Added action 'replace_block' to index under set 'FileEditingTools'
+2026-04-21 05:28:23,263 - neuralcore - INFO - [TOOL REGISTERED] replace_block | require_confirmation=False | set=FileEditingTools
+2026-04-21 05:28:23,263 - neuralcore - INFO - [ACTIONSET ADD] read_file
+2026-04-21 05:28:23,263 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=3
+2026-04-21 05:28:23,264 - neuralcore - DEBUG - Added action 'read_file' to index under set 'FileEditingTools'
+2026-04-21 05:28:23,264 - neuralcore - INFO - [TOOL REGISTERED] read_file | require_confirmation=False | set=FileEditingTools
+2026-04-21 05:28:23,264 - neuralcore - INFO - [ACTIONSET ADD] read_multiple_files
+2026-04-21 05:28:23,264 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=4
+2026-04-21 05:28:23,264 - neuralcore - DEBUG - Added action 'read_multiple_files' to index under set 'FileEditingTools'
+2026-04-21 05:28:23,264 - neuralcore - INFO - [TOOL REGISTERED] read_multiple_files | require_confirmation=False | set=FileEditingTools
+2026-04-21 05:28:23,264 - neuralcore - INFO - [ACTIONSET ADD] read_folder
+2026-04-21 05:28:23,264 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=5
+2026-04-21 05:28:23,264 - neuralcore - DEBUG - Added action 'read_folder' to index under set 'FileEditingTools'
+2026-04-21 05:28:23,264 - neuralcore - INFO - [TOOL REGISTERED] read_folder | require_confirmation=False | set=FileEditingTools
+2026-04-21 05:28:23,264 - neuralcore - INFO - [ACTIONSET ADD] apply_diff
+2026-04-21 05:28:23,264 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=6
+2026-04-21 05:28:23,264 - neuralcore - DEBUG - Added action 'apply_diff' to index under set 'FileEditingTools'
+2026-04-21 05:28:23,264 - neuralcore - INFO - [TOOL REGISTERED] apply_diff | require_confirmation=True | set=FileEditingTools
+2026-04-21 05:28:23,264 - neuralcore - INFO - [ACTIONSET ADD] regex_replace
+2026-04-21 05:28:23,264 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=7
+2026-04-21 05:28:23,264 - neuralcore - DEBUG - Added action 'regex_replace' to index under set 'FileEditingTools'
+2026-04-21 05:28:23,264 - neuralcore - INFO - [TOOL REGISTERED] regex_replace | require_confirmation=False | set=FileEditingTools
+2026-04-21 05:28:23,264 - neuralcore - INFO - [ACTIONSET ADD] find_and_read_file_internal
+2026-04-21 05:28:23,264 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=8
+2026-04-21 05:28:23,264 - neuralcore - DEBUG - Added action 'find_and_read_file_internal' to index under set 'FileEditingTools'
+2026-04-21 05:28:23,264 - neuralcore - INFO - [SEQUENCED] Registered sequence 'find_and_read_file' into set 'FileEditingTools' (steps: ['search_files', 'read_file'])
+2026-04-21 05:28:23,265 - neuralcore - DEBUG - Registering set 'TerminalTools' with 0 actions
+2026-04-21 05:28:23,265 - neuralcore - DEBUG - Created new ActionSet 'TerminalTools' for decorator
+2026-04-21 05:28:23,265 - neuralcore - INFO - [ACTIONSET ADD] list_directory
+2026-04-21 05:28:23,265 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=1
+2026-04-21 05:28:23,265 - neuralcore - DEBUG - Added action 'list_directory' to index under set 'TerminalTools'
+2026-04-21 05:28:23,265 - neuralcore - INFO - [TOOL REGISTERED] list_directory | require_confirmation=False | set=TerminalTools
+2026-04-21 05:28:23,265 - neuralcore - INFO - [ACTIONSET ADD] get_current_directory
+2026-04-21 05:28:23,265 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=2
+2026-04-21 05:28:23,265 - neuralcore - DEBUG - Added action 'get_current_directory' to index under set 'TerminalTools'
+2026-04-21 05:28:23,265 - neuralcore - INFO - [TOOL REGISTERED] get_current_directory | require_confirmation=False | set=TerminalTools
+2026-04-21 05:28:23,265 - neuralcore - INFO - [ACTIONSET ADD] change_directory
+2026-04-21 05:28:23,265 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=3
+2026-04-21 05:28:23,265 - neuralcore - DEBUG - Added action 'change_directory' to index under set 'TerminalTools'
+2026-04-21 05:28:23,265 - neuralcore - INFO - [TOOL REGISTERED] change_directory | require_confirmation=False | set=TerminalTools
+2026-04-21 05:28:23,265 - neuralcore - INFO - [ACTIONSET ADD] create_directory
+2026-04-21 05:28:23,265 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=4
+2026-04-21 05:28:23,265 - neuralcore - DEBUG - Added action 'create_directory' to index under set 'TerminalTools'
+2026-04-21 05:28:23,265 - neuralcore - INFO - [TOOL REGISTERED] create_directory | require_confirmation=False | set=TerminalTools
+2026-04-21 05:28:23,265 - neuralcore - INFO - [ACTIONSET ADD] copy
+2026-04-21 05:28:23,265 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=5
+2026-04-21 05:28:23,265 - neuralcore - DEBUG - Added action 'copy' to index under set 'TerminalTools'
+2026-04-21 05:28:23,265 - neuralcore - INFO - [TOOL REGISTERED] copy | require_confirmation=False | set=TerminalTools
+2026-04-21 05:28:23,265 - neuralcore - INFO - [ACTIONSET ADD] move
+2026-04-21 05:28:23,265 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=6
+2026-04-21 05:28:23,266 - neuralcore - DEBUG - Added action 'move' to index under set 'TerminalTools'
+2026-04-21 05:28:23,266 - neuralcore - INFO - [TOOL REGISTERED] move | require_confirmation=False | set=TerminalTools
+2026-04-21 05:28:23,266 - neuralcore - INFO - [ACTIONSET ADD] delete_file
+2026-04-21 05:28:23,266 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=7
+2026-04-21 05:28:23,266 - neuralcore - DEBUG - Added action 'delete_file' to index under set 'TerminalTools'
+2026-04-21 05:28:23,266 - neuralcore - INFO - [TOOL REGISTERED] delete_file | require_confirmation=True | set=TerminalTools
+2026-04-21 05:28:23,266 - neuralcore - INFO - [ACTIONSET ADD] delete_directory
+2026-04-21 05:28:23,266 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=8
+2026-04-21 05:28:23,266 - neuralcore - DEBUG - Added action 'delete_directory' to index under set 'TerminalTools'
+2026-04-21 05:28:23,266 - neuralcore - INFO - [TOOL REGISTERED] delete_directory | require_confirmation=True | set=TerminalTools
+2026-04-21 05:28:23,266 - neuralcore - INFO - [ACTIONSET ADD] search_files
+2026-04-21 05:28:23,266 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=9
+2026-04-21 05:28:23,266 - neuralcore - DEBUG - Added action 'search_files' to index under set 'TerminalTools'
+2026-04-21 05:28:23,266 - neuralcore - INFO - [TOOL REGISTERED] search_files | require_confirmation=False | set=TerminalTools
+2026-04-21 05:28:23,266 - neuralcore - INFO - [ACTIONSET ADD] search_text
+2026-04-21 05:28:23,266 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=10
+2026-04-21 05:28:23,266 - neuralcore - DEBUG - Added action 'search_text' to index under set 'TerminalTools'
+2026-04-21 05:28:23,266 - neuralcore - INFO - [TOOL REGISTERED] search_text | require_confirmation=False | set=TerminalTools
+2026-04-21 05:28:23,266 - neuralcore - INFO - [ACTIONSET ADD] get_file_info
+2026-04-21 05:28:23,266 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=11
+2026-04-21 05:28:23,266 - neuralcore - DEBUG - Added action 'get_file_info' to index under set 'TerminalTools'
+2026-04-21 05:28:23,266 - neuralcore - INFO - [TOOL REGISTERED] get_file_info | require_confirmation=False | set=TerminalTools
+2026-04-21 05:28:23,266 - neuralcore - INFO - [ACTIONSET ADD] get_os_info
+2026-04-21 05:28:23,266 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=12
+2026-04-21 05:28:23,266 - neuralcore - DEBUG - Added action 'get_os_info' to index under set 'TerminalTools'
+2026-04-21 05:28:23,266 - neuralcore - INFO - [TOOL REGISTERED] get_os_info | require_confirmation=False | set=TerminalTools
+2026-04-21 05:28:23,267 - neuralcore - DEBUG - Registering set 'CodingTools' with 0 actions
+2026-04-21 05:28:23,267 - neuralcore - DEBUG - Created new ActionSet 'CodingTools' for decorator
+2026-04-21 05:28:23,267 - neuralcore - INFO - [ACTIONSET ADD] index_codebase
+2026-04-21 05:28:23,267 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=1
+2026-04-21 05:28:23,267 - neuralcore - DEBUG - Added action 'index_codebase' to index under set 'CodingTools'
+2026-04-21 05:28:23,267 - neuralcore - INFO - [TOOL REGISTERED] index_codebase | require_confirmation=False | set=CodingTools
+2026-04-21 05:28:23,267 - neuralcore - INFO - [ACTIONSET ADD] read_codebase
+2026-04-21 05:28:23,267 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=2
+2026-04-21 05:28:23,267 - neuralcore - DEBUG - Added action 'read_codebase' to index under set 'CodingTools'
+2026-04-21 05:28:23,267 - neuralcore - INFO - [TOOL REGISTERED] read_codebase | require_confirmation=False | set=CodingTools
+2026-04-21 05:28:23,267 - neuralcore - INFO - [ACTIONSET ADD] list_code_files
+2026-04-21 05:28:23,267 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=3
+2026-04-21 05:28:23,267 - neuralcore - DEBUG - Added action 'list_code_files' to index under set 'CodingTools'
+2026-04-21 05:28:23,267 - neuralcore - INFO - [TOOL REGISTERED] list_code_files | require_confirmation=False | set=CodingTools
+2026-04-21 05:28:23,267 - neuralcore - INFO - [ACTIONSET ADD] search_code
+2026-04-21 05:28:23,267 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=4
+2026-04-21 05:28:23,267 - neuralcore - DEBUG - Added action 'search_code' to index under set 'CodingTools'
+2026-04-21 05:28:23,267 - neuralcore - INFO - [TOOL REGISTERED] search_code | require_confirmation=False | set=CodingTools
+2026-04-21 05:28:23,267 - neuralcore - INFO - [ACTIONSET ADD] get_project_structure
+2026-04-21 05:28:23,267 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=5
+2026-04-21 05:28:23,267 - neuralcore - DEBUG - Added action 'get_project_structure' to index under set 'CodingTools'
+2026-04-21 05:28:23,267 - neuralcore - INFO - [TOOL REGISTERED] get_project_structure | require_confirmation=False | set=CodingTools
+2026-04-21 05:28:23,268 - neuralcore - INFO - [ACTIONSET ADD] git_status
+2026-04-21 05:28:23,268 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=6
+2026-04-21 05:28:23,268 - neuralcore - DEBUG - Added action 'git_status' to index under set 'CodingTools'
+2026-04-21 05:28:23,268 - neuralcore - INFO - [TOOL REGISTERED] git_status | require_confirmation=False | set=CodingTools
+2026-04-21 05:28:23,268 - neuralcore - INFO - [ACTIONSET ADD] git_diff
+2026-04-21 05:28:23,268 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=7
+2026-04-21 05:28:23,268 - neuralcore - DEBUG - Added action 'git_diff' to index under set 'CodingTools'
+2026-04-21 05:28:23,268 - neuralcore - INFO - [TOOL REGISTERED] git_diff | require_confirmation=False | set=CodingTools
+2026-04-21 05:28:23,268 - neuralcore - INFO - [ACTIONSET ADD] git_commit
+2026-04-21 05:28:23,268 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=8
+2026-04-21 05:28:23,268 - neuralcore - DEBUG - Added action 'git_commit' to index under set 'CodingTools'
+2026-04-21 05:28:23,268 - neuralcore - INFO - [TOOL REGISTERED] git_commit | require_confirmation=True | set=CodingTools
+2026-04-21 05:28:23,268 - neuralcore - INFO - [ACTIONSET ADD] git_branch
+2026-04-21 05:28:23,268 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=9
+2026-04-21 05:28:23,268 - neuralcore - DEBUG - Added action 'git_branch' to index under set 'CodingTools'
+2026-04-21 05:28:23,268 - neuralcore - INFO - [TOOL REGISTERED] git_branch | require_confirmation=False | set=CodingTools
+2026-04-21 05:28:23,387 - neuralcore - DEBUG - Registering set 'WebTools' with 0 actions
+2026-04-21 05:28:23,387 - neuralcore - DEBUG - Created new ActionSet 'WebTools' for decorator
+2026-04-21 05:28:23,387 - neuralcore - INFO - [ACTIONSET ADD] search_web
+2026-04-21 05:28:23,387 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=1
+2026-04-21 05:28:23,387 - neuralcore - DEBUG - Added action 'search_web' to index under set 'WebTools'
+2026-04-21 05:28:23,387 - neuralcore - INFO - [TOOL REGISTERED] search_web | require_confirmation=False | set=WebTools
+2026-04-21 05:28:23,387 - neuralcore - INFO - [ACTIONSET ADD] fetch_web_page
+2026-04-21 05:28:23,387 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=2
+2026-04-21 05:28:23,387 - neuralcore - DEBUG - Added action 'fetch_web_page' to index under set 'WebTools'
+2026-04-21 05:28:23,387 - neuralcore - INFO - [TOOL REGISTERED] fetch_web_page | require_confirmation=False | set=WebTools
+2026-04-21 05:28:23,387 - neuralcore - INFO - [ACTIONSET ADD] index_web_page
+2026-04-21 05:28:23,387 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=3
+2026-04-21 05:28:23,387 - neuralcore - DEBUG - Added action 'index_web_page' to index under set 'WebTools'
+2026-04-21 05:28:23,387 - neuralcore - INFO - [TOOL REGISTERED] index_web_page | require_confirmation=False | set=WebTools
+2026-04-21 05:28:23,387 - neuralcore - INFO - [ACTIONSET ADD] search_web_and_index
+2026-04-21 05:28:23,387 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=4
+2026-04-21 05:28:23,387 - neuralcore - DEBUG - Added action 'search_web_and_index' to index under set 'WebTools'
+2026-04-21 05:28:23,387 - neuralcore - INFO - [TOOL REGISTERED] search_web_and_index | require_confirmation=False | set=WebTools
+2026-04-21 05:28:23,387 - neuralcore - DEBUG - Registering set 'ResearchTools' with 0 actions
+2026-04-21 05:28:23,388 - neuralcore - DEBUG - Created new ActionSet 'ResearchTools' for decorator
+2026-04-21 05:28:23,388 - neuralcore - INFO - [ACTIONSET ADD] SearchToolResults
+2026-04-21 05:28:23,388 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=1
+2026-04-21 05:28:23,388 - neuralcore - DEBUG - Added action 'SearchToolResults' to index under set 'ResearchTools'
+2026-04-21 05:28:23,388 - neuralcore - INFO - [TOOL REGISTERED] SearchToolResults | require_confirmation=False | set=ResearchTools
+2026-04-21 05:28:23,388 - neuralcore - INFO - [ACTIONSET ADD] PerformAnalysis
+2026-04-21 05:28:23,388 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=2
+2026-04-21 05:28:23,388 - neuralcore - DEBUG - Added action 'PerformAnalysis' to index under set 'ResearchTools'
+2026-04-21 05:28:23,388 - neuralcore - INFO - [TOOL REGISTERED] PerformAnalysis | require_confirmation=False | set=ResearchTools
+2026-04-21 05:28:23,388 - neuralcore - INFO - [ACTIONSET ADD] ResearchWeb
+2026-04-21 05:28:23,388 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=3
+2026-04-21 05:28:23,388 - neuralcore - DEBUG - Added action 'ResearchWeb' to index under set 'ResearchTools'
+2026-04-21 05:28:23,388 - neuralcore - INFO - [TOOL REGISTERED] ResearchWeb | require_confirmation=False | set=ResearchTools
+2026-04-21 05:28:23,388 - neuralcore - DEBUG - DynamicActionManager initialized with agent=agent_002
+2026-04-21 05:28:23,506 - neuralcore - INFO - ✅ FastEmbed ready (model: BAAI/bge-small-en-v1.5)
+2026-04-21 05:28:23,506 - neuralcore - INFO - ✅ KnowledgeConsolidator initialized | novelty_threshold=0.82
+2026-04-21 05:28:23,506 - neuralcore - INFO - ✅ Registered workflow 'deploy_chat': Workflow: deploy_chat
+2026-04-21 05:28:23,506 - neuralcore - INFO - ✅ Registered workflow 'sub_agent_execute': Workflow: sub_agent_execute
+2026-04-21 05:28:23,506 - neuralcore - INFO - ✅ Registered workflow 'orchestrator': Workflow: orchestrator
+2026-04-21 05:28:23,506 - neuralcore - INFO - Registered external step: _loop_goal_driven_loop
+2026-04-21 05:28:23,506 - neuralcore - INFO - Registered external step: _loop_chat_tool_loop
+2026-04-21 05:28:23,506 - neuralcore - INFO - Registered external step: deploy_chat_loop
+2026-04-21 05:28:23,506 - neuralcore - INFO - Registered external step: llm_stream
+2026-04-21 05:28:23,506 - neuralcore - INFO - Registered external step: plan_microtasks
+2026-04-21 05:28:23,506 - neuralcore - INFO - Registered external step: launch_next_subtask
+2026-04-21 05:28:23,506 - neuralcore - INFO - Registered external step: wait_for_subtask
+2026-04-21 05:28:23,506 - neuralcore - INFO - Registered external step: check_orchestrator_complete
+2026-04-21 05:28:23,506 - neuralcore - INFO - ✅ Registered custom condition 'goal_achieved': no desc
+2026-04-21 05:28:23,506 - neuralcore - INFO - ✅ Registered custom condition 'subtask_complete': no desc
+2026-04-21 05:28:23,506 - neuralcore - INFO - ✅ Registered custom condition 'has_final_reply': no desc
+2026-04-21 05:28:23,506 - neuralcore - INFO - ✅ Registered custom condition 'max_tool_calls_reached': no desc
+2026-04-21 05:28:23,506 - neuralcore - INFO - ✅ Registered custom condition 'too_many_empty_loops': no desc
+2026-04-21 05:28:23,506 - neuralcore - INFO - ✅ Registered custom condition 'max_action_restarts_reached': no desc
+2026-04-21 05:28:23,506 - neuralcore - INFO - ✅ Synced loop 'goal_driven_loop' from decorator registry (max=∞)
+2026-04-21 05:28:23,506 - neuralcore - INFO - ✅ Synced loop 'chat_tool_loop' from decorator registry (max=∞)
+2026-04-21 05:28:23,506 - neuralcore - INFO - 🔄 Switched to workflow 'deploy_chat' → Workflow: deploy_chat
+2026-04-21 05:28:23,506 - neuralcore - INFO - ✅ Workflows fully loaded: deploy_chat — Workflow: deploy_chat (3 decorator workflows + 2 loops)
+2026-04-21 05:28:23,506 - neuralcore - INFO - ✅ WorkflowEngine ready
+2026-04-21 05:28:23,506 - neuralcore - INFO - [ACTIONSET ADD] FindTool
+2026-04-21 05:28:23,506 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=1
+2026-04-21 05:28:23,506 - neuralcore - INFO - ToolBrowser (FindTool) added to DynamicCore as persistent tool
+2026-04-21 05:28:23,506 - neuralcore - DEBUG - AgentState → loaded_tools cleared
+2026-04-21 05:28:23,506 - neuralcore - DEBUG - AgentState → FindTool tracking cleared
+2026-04-21 05:28:23,506 - neuralcore - DEBUG - AgentState reset complete. Goal: ''
+2026-04-21 05:28:23,506 - neuralcore - DEBUG - AgentState → loaded_tools updated: []
+2026-04-21 05:28:23,507 - neuralcore - INFO - Registered external step: _loop_goal_driven_loop
+2026-04-21 05:28:23,507 - neuralcore - INFO - 🔗 Bound step '_loop_goal_driven_loop' to engine
+2026-04-21 05:28:23,507 - neuralcore - INFO - Registered external step: _loop_chat_tool_loop
+2026-04-21 05:28:23,507 - neuralcore - INFO - 🔗 Bound step '_loop_chat_tool_loop' to engine
+2026-04-21 05:28:23,507 - neuralcore - INFO - Registered external step: deploy_chat_loop
+2026-04-21 05:28:23,507 - neuralcore - INFO - 🔗 Bound step 'deploy_chat_loop' to engine
+2026-04-21 05:28:23,507 - neuralcore - INFO - Registered external step: llm_stream
+2026-04-21 05:28:23,507 - neuralcore - INFO - 🔗 Bound step 'llm_stream' to engine
+2026-04-21 05:28:23,507 - neuralcore - INFO - Registered external step: plan_microtasks
+2026-04-21 05:28:23,507 - neuralcore - INFO - 🔗 Bound step 'plan_microtasks' to engine
+2026-04-21 05:28:23,507 - neuralcore - INFO - Registered external step: launch_next_subtask
+2026-04-21 05:28:23,507 - neuralcore - INFO - 🔗 Bound step 'launch_next_subtask' to engine
+2026-04-21 05:28:23,507 - neuralcore - INFO - Registered external step: wait_for_subtask
+2026-04-21 05:28:23,507 - neuralcore - INFO - 🔗 Bound step 'wait_for_subtask' to engine
+2026-04-21 05:28:23,507 - neuralcore - INFO - Registered external step: check_orchestrator_complete
+2026-04-21 05:28:23,507 - neuralcore - INFO - 🔗 Bound step 'check_orchestrator_complete' to engine
+2026-04-21 05:28:23,507 - neuralcore - INFO - ✅ Registered custom condition 'goal_achieved': Auto-bound from @workflow.condition
+2026-04-21 05:28:23,507 - neuralcore - INFO - ✅ Bound condition handler: 'goal_achieved' to engine
+2026-04-21 05:28:23,507 - neuralcore - INFO - ✅ Registered custom condition 'subtask_complete': Auto-bound from @workflow.condition
+2026-04-21 05:28:23,507 - neuralcore - INFO - ✅ Bound condition handler: 'subtask_complete' to engine
+2026-04-21 05:28:23,507 - neuralcore - INFO - ✅ Registered custom condition 'has_final_reply': Auto-bound from @workflow.condition
+2026-04-21 05:28:23,507 - neuralcore - INFO - ✅ Bound condition handler: 'has_final_reply' to engine
+2026-04-21 05:28:23,507 - neuralcore - INFO - ✅ Registered custom condition 'max_tool_calls_reached': Auto-bound from @workflow.condition
+2026-04-21 05:28:23,507 - neuralcore - INFO - ✅ Bound condition handler: 'max_tool_calls_reached' to engine
+2026-04-21 05:28:23,507 - neuralcore - INFO - ✅ Registered custom condition 'too_many_empty_loops': Auto-bound from @workflow.condition
+2026-04-21 05:28:23,507 - neuralcore - INFO - ✅ Bound condition handler: 'too_many_empty_loops' to engine
+2026-04-21 05:28:23,507 - neuralcore - INFO - ✅ Registered custom condition 'max_action_restarts_reached': Auto-bound from @workflow.condition
+2026-04-21 05:28:23,507 - neuralcore - INFO - ✅ Bound condition handler: 'max_action_restarts_reached' to engine
+2026-04-21 05:28:23,541 - neuralcore - INFO - ✅ Loaded LambdaMART reranker (10 features)
+2026-04-21 05:28:23,541 - neuralcore - INFO - [QUEUE LISTENER] Generic background queue listener STARTED for 'Terminal Chat Agent'
+2026-04-21 05:28:23,542 - neuralcore - DEBUG - AgentState → loaded_tools cleared
+2026-04-21 05:28:23,542 - neuralcore - DEBUG - AgentState → FindTool tracking cleared
+2026-04-21 05:28:23,542 - neuralcore - DEBUG - AgentState reset complete. Goal: ''
+2026-04-21 05:28:23,542 - neuralcore - DEBUG - AgentState → loaded_tools updated: []
+2026-04-21 05:28:23,542 - neuralcore - INFO - Agent 'Terminal Chat Agent' → CHAT mode | workflow=deploy_chat
+2026-04-21 05:28:23,542 - neuralcore - INFO - 🔄 Switched to workflow 'deploy_chat' → Workflow: deploy_chat
+2026-04-21 05:28:23,542 - neuralcore - DEBUG - AgentState → loaded_tools cleared
+2026-04-21 05:28:23,542 - neuralcore - DEBUG - AgentState → FindTool tracking cleared
+2026-04-21 05:28:23,542 - neuralcore - DEBUG - AgentState reset complete. Goal: ''
+2026-04-21 05:28:23,542 - neuralcore - DEBUG - AgentState → loaded_tools updated: []
+2026-04-21 05:28:23,542 - neuralcore - INFO - Starting run with workflow: deploy_chat
+2026-04-21 05:28:23,542 - neuralcore - INFO - Active steps: ['deploy_chat_loop']
+2026-04-21 05:28:23,542 - neuralcore - DEBUG - ContextManager → AgentState synced | messages=1 | tools=0 | tasks=0
+2026-04-21 05:28:23,542 - neuralcore - DEBUG - [CONSOLIDATE] KB stats | tokens≈0 | concepts=0 | large_item=False
+2026-04-21 05:28:23,542 - neuralcore - INFO - [CONSOLIDATE] Starting extraction | goal: general task... | trace len=1
+2026-04-21 05:28:23,542 - neuralcore - DEBUG - [CONSOLIDATE] All candidates already known — skipping distillation
+2026-04-21 05:28:23,542 - neuralcore - INFO - 🔧 Configuring tools for workflow step: 'deploy_chat_loop'
+2026-04-21 05:28:23,542 - neuralcore - INFO - Unloaded dynamic tools. Persistent protected. keep_discovered=False → 0 kept
+2026-04-21 05:28:23,542 - neuralcore - INFO - ✅ Step 'deploy_chat_loop' configured with 1 tools (toolsets=-, hidden=-, tools=-, dynamic_allowed=True)
+2026-04-21 05:28:23,542 - neuralcore - DEBUG - [QUEUE LISTENER] Already active for Agent 'Terminal Chat Agent'
+2026-04-21 05:28:23,545 - neuralcore - INFO - ✅ Loaded LambdaMART reranker (10 features)
+2026-04-21 05:28:23,545 - neuralcore - INFO - 🔄 Starting infinite loop 'chat_tool_loop' (runs until break condition or signal)
+2026-04-21 05:28:23,545 - neuralcore - DEBUG - [chat_tool_loop] iteration 1
+2026-04-21 05:28:23,545 - neuralcore - INFO - [CHAT TOOL LOOP] Outer loop started — persistent mode active
+2026-04-21 05:29:05,788 - neuralcore - DEBUG - provide_context called | query='read /home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/memory.py and /home/vold...' | chat=True | lightweight_agentic=True | research_mode=False | has_state=True | return_as_string=False
+2026-04-21 05:29:05,788 - neuralcore - DEBUG - → Entering CHAT mode
+2026-04-21 05:29:05,947 - neuralcore - DEBUG - ContextManager → AgentState synced | messages=2 | tools=0 | tasks=0
+2026-04-21 05:29:05,947 - neuralcore - DEBUG - [CONSOLIDATE] KB stats | tokens≈0 | concepts=0 | large_item=False
+2026-04-21 05:29:05,947 - neuralcore - INFO - [CONSOLIDATE] Starting extraction | goal: general task... | trace len=2
+2026-04-21 05:29:05,947 - neuralcore - DEBUG - [CONSOLIDATE] All candidates already known — skipping distillation
+2026-04-21 05:29:05,947 - neuralcore - DEBUG - Agent 'Terminal Chat Agent' ← user message posted
+2026-04-21 05:29:06,904 - neuralcore - INFO - [TASK-DRIVEN MODE] Delegating to goal_driven_loop
+2026-04-21 05:29:06,905 - neuralcore - DEBUG - [UI] PHASE_CHANGED: goal_driven
+2026-04-21 05:29:06,905 - neuralcore - DEBUG - AgentState → loaded_tools cleared
+2026-04-21 05:29:06,905 - neuralcore - DEBUG - AgentState → FindTool tracking cleared
+2026-04-21 05:29:06,905 - neuralcore - DEBUG - AgentState reset complete. Goal: 'read /home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/memory.py and /home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/consolidator.py and perfrom analysis of the code from the perspective of this book /home/user/Documents/neuroscience.pdf Save it to /home/user/Documents/report.md'
+2026-04-21 05:29:06,905 - neuralcore - INFO - Unloaded dynamic tools. Persistent protected. keep_discovered=False → 0 kept
+2026-04-21 05:29:07,862 - neuralcore - INFO - [MULTI-STEP] LLM decided → COMPLEX | Query: read /home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/memory.py and /home/vold...
+2026-04-21 05:29:07,862 - neuralcore - INFO - [MULTI-STEP] Detected → structured planning
+2026-04-21 05:29:07,862 - neuralcore - DEBUG - [UI] PHASE_CHANGED: planning
+2026-04-21 05:29:07,862 - neuralcore - INFO - [PLANNING START] _ensure_subtasks_planned called
+2026-04-21 05:29:07,862 - neuralcore - DEBUG - [UI] PHASE_CHANGED: planning
+2026-04-21 05:29:07,863 - neuralcore - DEBUG - list_all_tools returned 36 tools (include_hidden=False, agent_id=None)
+2026-04-21 05:29:13,230 - neuralcore - INFO - [PLANNING RAW] LLM returned 931 chars
+2026-04-21 05:29:13,230 - neuralcore - INFO - [TASK BUILD] Created 3 tasks from plan
+2026-04-21 05:29:13,230 - neuralcore - INFO - [PLANNING] Created 3 Task objects via build_tasks_from_plan
+2026-04-21 05:29:13,230 - neuralcore - DEBUG -   Task 0: Read the two Python source files and the PDF book to accumulate knowledge for an... | expected='Tool executed successfully and returned the content of memory.py, consolidator.py, and neuroscience.pdf' | deps=[]
+2026-04-21 05:29:13,230 - neuralcore - DEBUG -   Task 1: Perform deep analysis on the accumulated knowledge from the code files and the b... | expected='Analysis completed and results produced, ready to be written to the target file' | deps=['3de53838-d512-411e-8e0e-16f490885c8a']
+2026-04-21 05:29:13,230 - neuralcore - DEBUG -   Task 2: Write the final analysis report to the specified output file... | expected='Content was successfully written to /home/user/Documents/report.md' | deps=['c2897369-a377-4753-a459-6809dd7172d6']
+2026-04-21 05:29:13,231 - neuralcore - INFO - [PLANNING END] Planning completed successfully
+2026-04-21 05:29:13,231 - neuralcore - DEBUG - [QUEUE LISTENER] Already active for Agent 'Terminal Chat Agent'
+2026-04-21 05:29:13,243 - neuralcore - INFO - ✅ Loaded LambdaMART reranker (10 features)
+2026-04-21 05:29:13,243 - neuralcore - INFO - 🔄 Starting infinite loop 'goal_driven_loop' (runs until break condition or signal)
+2026-04-21 05:29:13,243 - neuralcore - DEBUG - [goal_driven_loop] iteration 1
+2026-04-21 05:29:13,243 - neuralcore - DEBUG - [UI] PHASE_CHANGED: thinking
+2026-04-21 05:29:13,243 - neuralcore - INFO - [TASK START] 58ed89a0 | Read the two Python source files and the PDF book to accumulate knowledge for analysis...
+2026-04-21 05:29:13,243 - neuralcore - INFO - [ACTIONSET ADD] read_multiple_files
+2026-04-21 05:29:13,243 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=2
+2026-04-21 05:29:13,243 - neuralcore - DEBUG - [ACTION BIND] read_multiple_files → Agent (agent_id=agent_002)
+2026-04-21 05:29:13,243 - neuralcore - DEBUG - [BIND ON ADD] read_multiple_files → agent bound at load time
+2026-04-21 05:29:13,243 - neuralcore - DEBUG - Added tool 'read_multiple_files' to DynamicCore (origin: FileEditingTools)
+2026-04-21 05:29:13,243 - neuralcore - INFO - Loaded 1 individual tools: read_multiple_files
+2026-04-21 05:29:13,243 - neuralcore - INFO - [TOOL MGMT] Loaded suggested tool for step: read_multiple_files
+2026-04-21 05:29:13,243 - neuralcore - DEBUG - [UI] PHASE_CHANGED: thinking
+2026-04-21 05:29:13,243 - neuralcore - DEBUG - provide_context called | query='You are executing **ONE SPECIFIC SUB-TASK ONLY**. Ignore everything else.
+
+            ORIGINAL USER...' | chat=False | lightweight_agentic=True | research_mode=False | has_state=True | return_as_string=False
+2026-04-21 05:29:13,243 - neuralcore - DEBUG - → Entering AGENTIC mode
+2026-04-21 05:29:13,243 - neuralcore - DEBUG - → Using IMPROVED LIGHTWEIGHT agentic context (long-running mode)
+2026-04-21 05:29:13,244 - neuralcore - DEBUG - ranked_retrieve: KB empty or query empty → returning ''
+2026-04-21 05:29:13,245 - neuralcore - DEBUG - → LIGHTWEIGHT MODE: skipping full conversation history
+2026-04-21 05:29:13,246 - neuralcore - DEBUG - Final context before prune → 872 tokens
+2026-04-21 05:29:13,246 - neuralcore - DEBUG - provide_context finished | messages=2 | lightweight=True | research_mode=False | return_as_string=False | tokens=872
+2026-04-21 05:29:16,722 - neuralcore - DEBUG - [ACTIONSET RESOLVE] Found executor for 'read_multiple_files'
+2026-04-21 05:29:16,722 - neuralcore - INFO - [ACTION START] read_multiple_files
+2026-04-21 05:29:16,722 - neuralcore - DEBUG - [ACTION INPUT] read_multiple_files kwargs={'files': ['/home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/memory.py', '/home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/consolidator.py', '/home/user/Documents/neuroscience.pdf'], 'summary': False}
+2026-04-21 05:29:16,722 - neuralcore - DEBUG - [ACTION AWAITING] read_multiple_files
+2026-04-21 05:29:16,722 - neuralcore - INFO - [DIRECT EXEC] Action 'read_file' not in DynamicCore → attempting auto-load
+2026-04-21 05:29:16,723 - neuralcore - INFO - [ACTIONSET ADD] read_file
+2026-04-21 05:29:16,723 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=3
+2026-04-21 05:29:16,723 - neuralcore - DEBUG - [ACTION BIND] read_file → Agent (agent_id=agent_002)
+2026-04-21 05:29:16,723 - neuralcore - DEBUG - [BIND ON ADD] read_file → agent bound at load time
+2026-04-21 05:29:16,723 - neuralcore - DEBUG - Added tool 'read_file' to DynamicCore (origin: FileEditingTools)
+2026-04-21 05:29:16,723 - neuralcore - INFO - Loaded 1 individual tools: read_file
+2026-04-21 05:29:16,723 - neuralcore - DEBUG - [DIRECT EXEC] Auto-loaded 'read_file'
+2026-04-21 05:29:16,723 - neuralcore - DEBUG - [ACTIONSET RESOLVE] Found executor for 'read_file'
+2026-04-21 05:29:16,723 - neuralcore - DEBUG - [DIRECT EXEC via DynamicManager] read_file | kwargs={'file_path': '/home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/memory.py'}
+2026-04-21 05:29:16,723 - neuralcore - INFO - [ACTION START] read_file
+2026-04-21 05:29:16,723 - neuralcore - DEBUG - [ACTION INPUT] read_file kwargs={'file_path': '/home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/memory.py'}
+2026-04-21 05:29:16,723 - neuralcore - DEBUG - [ACTION AWAITING] read_file
+2026-04-21 05:29:16,730 - neuralcore - INFO - [ACTION STREAMING] read_file → detected async iterable result
+2026-04-21 05:29:16,730 - neuralcore - INFO - 🔄 Streaming tool outcome detected: read_file
+2026-04-21 05:29:16,730 - neuralcore - INFO - 🔄 Starting streaming ingestion: read_file
+2026-04-21 05:29:16,827 - neuralcore - DEBUG - [STREAM] Added 2 chunks under parent_key=read_file_1776738556_f69fc64043af | source=tool_outcome_chunk
+2026-04-21 05:29:16,955 - neuralcore - DEBUG - [STREAM] Added 3 chunks under parent_key=read_file_1776738556_f69fc64043af | source=tool_outcome_chunk
+2026-04-21 05:29:16,955 - neuralcore - INFO - 📈 read_file streaming: 35% complete (2 batches, 12,288 chars)
+2026-04-21 05:29:17,091 - neuralcore - DEBUG - [STREAM] Added 4 chunks under parent_key=read_file_1776738556_f69fc64043af | source=tool_outcome_chunk
+2026-04-21 05:29:17,091 - neuralcore - INFO - 📈 read_file streaming: 41% complete (3 batches, 20,480 chars)
+2026-04-21 05:29:17,219 - neuralcore - DEBUG - [STREAM] Added 3 chunks under parent_key=read_file_1776738556_f69fc64043af | source=tool_outcome_chunk
+2026-04-21 05:29:17,219 - neuralcore - INFO - 📈 read_file streaming: 45% complete (4 batches, 28,672 chars)
+2026-04-21 05:29:17,349 - neuralcore - DEBUG - [STREAM] Added 3 chunks under parent_key=read_file_1776738556_f69fc64043af | source=tool_outcome_chunk
+2026-04-21 05:29:17,481 - neuralcore - DEBUG - [STREAM] Added 3 chunks under parent_key=read_file_1776738556_f69fc64043af | source=tool_outcome_chunk
+2026-04-21 05:29:17,481 - neuralcore - INFO - 📈 read_file streaming: 51% complete (6 batches, 45,056 chars)
+2026-04-21 05:29:17,615 - neuralcore - DEBUG - [STREAM] Added 4 chunks under parent_key=read_file_1776738556_f69fc64043af | source=tool_outcome_chunk
+2026-04-21 05:29:17,615 - neuralcore - WARNING - [KB GUARD] Blocked contaminated content (source=tool_outcome_chunk)
+2026-04-21 05:29:17,615 - neuralcore - INFO - 📈 read_file streaming: 55% complete (8 batches, 61,440 chars)
+2026-04-21 05:29:17,616 - neuralcore - WARNING - [KB GUARD] Blocked contaminated content (source=tool_outcome_chunk)
+2026-04-21 05:29:17,750 - neuralcore - DEBUG - [STREAM] Added 4 chunks under parent_key=read_file_1776738556_f69fc64043af | source=tool_outcome_chunk
+2026-04-21 05:29:17,875 - neuralcore - DEBUG - [STREAM] Added 3 chunks under parent_key=read_file_1776738556_f69fc64043af | source=tool_outcome_chunk
+2026-04-21 05:29:17,952 - neuralcore - DEBUG - [STREAM] Added 2 chunks under parent_key=read_file_1776738556_f69fc64043af | source=tool_outcome_chunk
+2026-04-21 05:29:18,479 - neuralcore - INFO - ✅ Added 12 clean chunks for parent_key=read_file_1776738556_f69fc64043af | source=tool_outcome
+2026-04-21 05:29:18,479 - neuralcore - INFO - ✅ Streaming completed: read_file → 1 final tool_outcome + 12 batches (90,383 characters)
+2026-04-21 05:29:18,479 - neuralcore - INFO - Tool 'read_file' executed → success=True
+2026-04-21 05:29:18,479 - neuralcore - INFO - [ACTION SUCCESS] read_file | success=True | streamed=True
+2026-04-21 05:29:18,479 - neuralcore - DEBUG - [ACTIONSET RESOLVE] Found executor for 'read_file'
+2026-04-21 05:29:18,479 - neuralcore - DEBUG - [DIRECT EXEC via DynamicManager] read_file | kwargs={'file_path': '/home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/consolidator.py'}
+2026-04-21 05:29:18,479 - neuralcore - INFO - [ACTION START] read_file
+2026-04-21 05:29:18,479 - neuralcore - DEBUG - [ACTION INPUT] read_file kwargs={'file_path': '/home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/consolidator.py'}
+2026-04-21 05:29:18,479 - neuralcore - DEBUG - [ACTION AWAITING] read_file
+2026-04-21 05:29:18,480 - neuralcore - INFO - [ACTION STREAMING] read_file → detected async iterable result
+2026-04-21 05:29:18,480 - neuralcore - INFO - 🔄 Streaming tool outcome detected: read_file
+2026-04-21 05:29:18,480 - neuralcore - INFO - 🔄 Starting streaming ingestion: read_file
+2026-04-21 05:29:18,558 - neuralcore - DEBUG - [STREAM] Added 2 chunks under parent_key=read_file_1776738558_90dcb7b6cbfc | source=tool_outcome_chunk
+2026-04-21 05:29:18,696 - neuralcore - DEBUG - [STREAM] Added 4 chunks under parent_key=read_file_1776738558_90dcb7b6cbfc | source=tool_outcome_chunk
+2026-04-21 05:29:18,696 - neuralcore - INFO - 📈 read_file streaming: 35% complete (2 batches, 12,288 chars)
+2026-04-21 05:29:18,829 - neuralcore - DEBUG - [STREAM] Added 3 chunks under parent_key=read_file_1776738558_90dcb7b6cbfc | source=tool_outcome_chunk
+2026-04-21 05:29:18,829 - neuralcore - INFO - 📈 read_file streaming: 41% complete (3 batches, 20,480 chars)
+2026-04-21 05:29:18,871 - neuralcore - DEBUG - [STREAM] Added 1 chunks under parent_key=read_file_1776738558_90dcb7b6cbfc | source=tool_outcome_chunk
+2026-04-21 05:29:19,234 - neuralcore - INFO - ✅ Added 9 clean chunks for parent_key=read_file_1776738558_90dcb7b6cbfc | source=tool_outcome
+2026-04-21 05:29:19,234 - neuralcore - INFO - ✅ Streaming completed: read_file → 1 final tool_outcome + 4 batches (22,635 characters)
+2026-04-21 05:29:19,234 - neuralcore - INFO - Tool 'read_file' executed → success=True
+2026-04-21 05:29:19,234 - neuralcore - INFO - [ACTION SUCCESS] read_file | success=True | streamed=True
+2026-04-21 05:29:19,234 - neuralcore - DEBUG - [ACTIONSET RESOLVE] Found executor for 'read_file'
+2026-04-21 05:29:19,234 - neuralcore - DEBUG - [DIRECT EXEC via DynamicManager] read_file | kwargs={'file_path': '/home/user/Documents/neuroscience.pdf'}
+2026-04-21 05:29:19,234 - neuralcore - INFO - [ACTION START] read_file
+2026-04-21 05:29:19,234 - neuralcore - DEBUG - [ACTION INPUT] read_file kwargs={'file_path': '/home/user/Documents/neuroscience.pdf'}
+2026-04-21 05:29:19,234 - neuralcore - DEBUG - [ACTION AWAITING] read_file
+2026-04-21 05:29:19,335 - neuralcore - INFO - [ACTION STREAMING] read_file → detected async iterable result
+2026-04-21 05:29:19,335 - neuralcore - INFO - 🔄 Streaming tool outcome detected: read_file
+2026-04-21 05:29:19,335 - neuralcore - INFO - 🔄 Starting streaming ingestion: read_file
+2026-04-21 05:29:19,619 - neuralcore - DEBUG - [STREAM] Added 6 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:19,619 - neuralcore - INFO - 📈 read_file streaming: 33% complete (1 batches, 10,407 chars)
+2026-04-21 05:29:20,110 - neuralcore - DEBUG - [STREAM] Added 10 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:20,110 - neuralcore - INFO - 📈 read_file streaming: 45% complete (2 batches, 29,646 chars)
+2026-04-21 05:29:20,891 - neuralcore - DEBUG - [STREAM] Added 11 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:20,891 - neuralcore - INFO - 📈 read_file streaming: 53% complete (3 batches, 55,918 chars)
+2026-04-21 05:29:21,646 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:21,646 - neuralcore - INFO - 📈 read_file streaming: 59% complete (4 batches, 86,145 chars)
+2026-04-21 05:29:22,307 - neuralcore - DEBUG - [STREAM] Added 10 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:22,307 - neuralcore - INFO - 📈 read_file streaming: 62% complete (5 batches, 110,209 chars)
+2026-04-21 05:29:23,576 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:23,576 - neuralcore - INFO - 📈 read_file streaming: 65% complete (6 batches, 142,229 chars)
+2026-04-21 05:29:24,259 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:25,243 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:25,243 - neuralcore - INFO - 📈 read_file streaming: 69% complete (8 batches, 203,031 chars)
+2026-04-21 05:29:26,232 - neuralcore - DEBUG - [STREAM] Added 11 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:26,233 - neuralcore - INFO - 📈 read_file streaming: 70% complete (9 batches, 228,518 chars)
+2026-04-21 05:29:27,775 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:29,121 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:29,121 - neuralcore - INFO - 📈 read_file streaming: 73% complete (11 batches, 291,405 chars)
+2026-04-21 05:29:30,717 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:31,747 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:31,747 - neuralcore - INFO - 📈 read_file streaming: 74% complete (13 batches, 354,139 chars)
+2026-04-21 05:29:33,125 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:33,126 - neuralcore - INFO - 📈 read_file streaming: 75% complete (14 batches, 383,102 chars)
+2026-04-21 05:29:33,906 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:34,798 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:34,798 - neuralcore - INFO - 📈 read_file streaming: 76% complete (16 batches, 446,591 chars)
+2026-04-21 05:29:35,784 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:36,591 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:36,591 - neuralcore - INFO - 📈 read_file streaming: 78% complete (18 batches, 508,656 chars)
+2026-04-21 05:29:37,670 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:39,690 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:39,690 - neuralcore - INFO - 📈 read_file streaming: 78% complete (20 batches, 568,169 chars)
+2026-04-21 05:29:40,421 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:41,300 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:41,300 - neuralcore - INFO - 📈 read_file streaming: 79% complete (22 batches, 626,949 chars)
+2026-04-21 05:29:42,151 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:42,151 - neuralcore - INFO - 📈 read_file streaming: 80% complete (23 batches, 657,775 chars)
+2026-04-21 05:29:43,351 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:44,024 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:44,024 - neuralcore - INFO - 📈 read_file streaming: 80% complete (25 batches, 718,949 chars)
+2026-04-21 05:29:45,067 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:45,760 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:45,760 - neuralcore - INFO - 📈 read_file streaming: 81% complete (27 batches, 787,811 chars)
+2026-04-21 05:29:46,804 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:47,677 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:47,677 - neuralcore - INFO - 📈 read_file streaming: 81% complete (29 batches, 848,094 chars)
+2026-04-21 05:29:48,417 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:49,048 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:49,048 - neuralcore - INFO - 📈 read_file streaming: 82% complete (31 batches, 919,431 chars)
+2026-04-21 05:29:50,153 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:51,037 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:51,037 - neuralcore - INFO - 📈 read_file streaming: 82% complete (33 batches, 975,218 chars)
+2026-04-21 05:29:51,753 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:52,503 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:52,503 - neuralcore - INFO - 📈 read_file streaming: 83% complete (35 batches, 1,035,516 chars)
+2026-04-21 05:29:53,220 - neuralcore - DEBUG - [STREAM] Added 10 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:54,381 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:54,382 - neuralcore - INFO - 📈 read_file streaming: 83% complete (37 batches, 1,090,198 chars)
+2026-04-21 05:29:55,366 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:56,374 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:56,374 - neuralcore - INFO - 📈 read_file streaming: 83% complete (39 batches, 1,146,087 chars)
+2026-04-21 05:29:57,482 - neuralcore - DEBUG - [STREAM] Added 11 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:58,559 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:29:58,559 - neuralcore - INFO - 📈 read_file streaming: 84% complete (41 batches, 1,204,336 chars)
+2026-04-21 05:29:59,380 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:00,291 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:00,291 - neuralcore - INFO - 📈 read_file streaming: 84% complete (43 batches, 1,269,129 chars)
+2026-04-21 05:30:01,461 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:02,310 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:02,310 - neuralcore - INFO - 📈 read_file streaming: 84% complete (45 batches, 1,333,660 chars)
+2026-04-21 05:30:03,445 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:05,670 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:05,670 - neuralcore - INFO - 📈 read_file streaming: 84% complete (47 batches, 1,395,625 chars)
+2026-04-21 05:30:06,571 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:07,259 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:07,259 - neuralcore - INFO - 📈 read_file streaming: 85% complete (49 batches, 1,456,320 chars)
+2026-04-21 05:30:07,942 - neuralcore - DEBUG - [STREAM] Added 11 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:08,679 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:08,679 - neuralcore - INFO - 📈 read_file streaming: 85% complete (51 batches, 1,513,248 chars)
+2026-04-21 05:30:09,289 - neuralcore - DEBUG - [STREAM] Added 11 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:10,203 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:10,204 - neuralcore - INFO - 📈 read_file streaming: 85% complete (53 batches, 1,573,431 chars)
+2026-04-21 05:30:11,306 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:12,200 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:12,201 - neuralcore - INFO - 📈 read_file streaming: 85% complete (55 batches, 1,645,953 chars)
+2026-04-21 05:30:14,055 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:14,876 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:14,877 - neuralcore - INFO - 📈 read_file streaming: 85% complete (57 batches, 1,713,176 chars)
+2026-04-21 05:30:15,845 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:16,543 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:16,544 - neuralcore - INFO - 📈 read_file streaming: 86% complete (59 batches, 1,785,665 chars)
+2026-04-21 05:30:17,813 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:18,648 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:18,649 - neuralcore - INFO - 📈 read_file streaming: 86% complete (61 batches, 1,843,752 chars)
+2026-04-21 05:30:19,559 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:20,317 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:20,318 - neuralcore - INFO - 📈 read_file streaming: 86% complete (63 batches, 1,911,006 chars)
+2026-04-21 05:30:21,349 - neuralcore - DEBUG - [STREAM] Added 10 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:22,065 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:22,065 - neuralcore - INFO - 📈 read_file streaming: 86% complete (65 batches, 1,966,801 chars)
+2026-04-21 05:30:22,860 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:23,674 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:23,674 - neuralcore - INFO - 📈 read_file streaming: 86% complete (67 batches, 2,040,034 chars)
+2026-04-21 05:30:24,404 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:25,402 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:25,402 - neuralcore - INFO - 📈 read_file streaming: 86% complete (69 batches, 2,095,065 chars)
+2026-04-21 05:30:26,704 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:27,369 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:27,369 - neuralcore - INFO - 📈 read_file streaming: 86% complete (71 batches, 2,151,603 chars)
+2026-04-21 05:30:28,331 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:28,996 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:28,997 - neuralcore - INFO - 📈 read_file streaming: 87% complete (73 batches, 2,210,729 chars)
+2026-04-21 05:30:29,661 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:30,333 - neuralcore - DEBUG - [STREAM] Added 11 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:30,333 - neuralcore - INFO - 📈 read_file streaming: 87% complete (75 batches, 2,273,339 chars)
+2026-04-21 05:30:30,980 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:31,866 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:31,866 - neuralcore - INFO - 📈 read_file streaming: 87% complete (77 batches, 2,338,994 chars)
+2026-04-21 05:30:32,592 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:33,224 - neuralcore - DEBUG - [STREAM] Added 10 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:33,224 - neuralcore - INFO - 📈 read_file streaming: 87% complete (79 batches, 2,392,695 chars)
+2026-04-21 05:30:33,992 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:33,993 - neuralcore - INFO - 📈 read_file streaming: 87% complete (80 batches, 2,432,913 chars)
+2026-04-21 05:30:34,680 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:34,680 - neuralcore - INFO - 📈 read_file streaming: 87% complete (81 batches, 2,490,508 chars)
+2026-04-21 05:30:35,411 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:35,411 - neuralcore - INFO - 📈 read_file streaming: 87% complete (82 batches, 2,554,204 chars)
+2026-04-21 05:30:36,155 - neuralcore - DEBUG - [STREAM] Added 12 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:36,155 - neuralcore - INFO - 📈 read_file streaming: 87% complete (83 batches, 2,615,559 chars)
+2026-04-21 05:30:36,377 - neuralcore - DEBUG - [STREAM] Added 5 chunks under parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome_chunk
+2026-04-21 05:30:38,154 - neuralcore - INFO - ✅ Added 12 clean chunks for parent_key=read_file_1776738559_c3062a0d691b | source=tool_outcome
+2026-04-21 05:30:38,154 - neuralcore - INFO - ✅ Streaming completed: read_file → 1 final tool_outcome + 84 batches (2,621,734 characters)
+2026-04-21 05:30:38,154 - neuralcore - INFO - Tool 'read_file' executed → success=True
+2026-04-21 05:30:38,154 - neuralcore - INFO - [ACTION SUCCESS] read_file | success=True | streamed=True
+2026-04-21 05:30:38,161 - neuralcore - INFO - ✅ Added 1 clean chunks for parent_key=tool_outcome_5154210759119175630 | source=tool_outcome
+2026-04-21 05:30:38,161 - neuralcore - INFO - Tool 'read_multiple_files' executed → success=True
+2026-04-21 05:30:38,161 - neuralcore - INFO - [ACTION SUCCESS] read_multiple_files | success=True | streamed=False
+2026-04-21 05:30:38,167 - neuralcore - INFO - [TASK COMPLETE] 58ed89a0 | outcome met: True
+2026-04-21 05:30:38,167 - neuralcore - INFO - [ADVANCE] Sub-task 1 ready → next
+2026-04-21 05:30:38,167 - neuralcore - DEBUG - [UI] PHASE_CHANGED: executing_tools
+2026-04-21 05:30:38,167 - neuralcore - DEBUG - AgentState → loop signal added: restart (target=goal_driven_loop)
+2026-04-21 05:30:38,168 - neuralcore - DEBUG - AgentState → soft_restart flag set to True
+2026-04-21 05:30:38,168 - neuralcore - DEBUG - AgentState → FindTool tracking cleared
+2026-04-21 05:30:38,168 - neuralcore - INFO - 🔄 Loop restart requested → Tool executed — advancing to next sub-task (target_loop=goal_driven_loop)
+2026-04-21 05:30:38,168 - neuralcore - DEBUG - [UI] PHASE_CHANGED: restarting_loop
+2026-04-21 05:30:38,168 - neuralcore - DEBUG - [goal_driven_loop] iteration 2
+2026-04-21 05:30:38,168 - neuralcore - DEBUG - AgentState → cleared 1 pending loop signal(s)
+2026-04-21 05:30:38,168 - neuralcore - INFO - [LOOP SIGNAL] 'restart' received for loop 'goal_driven_loop' | Tool executed — advancing to next sub-task
+2026-04-21 05:30:38,168 - neuralcore - DEBUG - AgentState → FindTool tracking cleared
+2026-04-21 05:30:38,168 - neuralcore - DEBUG - AgentState → soft_restart flag set to True
+2026-04-21 05:30:38,168 - neuralcore - DEBUG - [UI] PHASE_CHANGED: thinking
+2026-04-21 05:30:38,168 - neuralcore - INFO - [TASK START] 3de53838 | Perform deep analysis on the accumulated knowledge from the code files and the book to produce the r...
+2026-04-21 05:30:38,168 - neuralcore - DEBUG - [TOOL MGMT] Unloaded previous tool: unknown
+2026-04-21 05:30:38,168 - neuralcore - INFO - [ACTIONSET ADD] PerformAnalysis
+2026-04-21 05:30:38,168 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=4
+2026-04-21 05:30:38,168 - neuralcore - DEBUG - [ACTION BIND] PerformAnalysis → Agent (agent_id=agent_002)
+2026-04-21 05:30:38,168 - neuralcore - DEBUG - [BIND ON ADD] PerformAnalysis → agent bound at load time
+2026-04-21 05:30:38,168 - neuralcore - DEBUG - Added tool 'PerformAnalysis' to DynamicCore (origin: ResearchTools)
+2026-04-21 05:30:38,168 - neuralcore - INFO - Loaded 1 individual tools: PerformAnalysis
+2026-04-21 05:30:38,168 - neuralcore - INFO - [TOOL MGMT] Loaded suggested tool for step: PerformAnalysis
+2026-04-21 05:30:38,168 - neuralcore - DEBUG - [UI] PHASE_CHANGED: thinking
+2026-04-21 05:30:38,168 - neuralcore - DEBUG - provide_context called | query='You are executing **ONE SPECIFIC SUB-TASK ONLY**. Ignore everything else.
+
+            ORIGINAL USER...' | chat=False | lightweight_agentic=True | research_mode=False | has_state=True | return_as_string=False
+2026-04-21 05:30:38,168 - neuralcore - DEBUG - → Entering AGENTIC mode
+2026-04-21 05:30:38,168 - neuralcore - DEBUG - → Using IMPROVED LIGHTWEIGHT agentic context (long-running mode)
+2026-04-21 05:30:38,170 - neuralcore - DEBUG - [RANKED_RETRIEVE] START | query='You are executing **ONE SPECIFIC SUB-TASK ONLY**. Ignore everything else.
+
+            ORIGINAL USER...' | KB_size=1054 | max_kb_tokens=1800 | k=10 | research_mode=False | consolidator_present=True
+2026-04-21 05:30:38,170 - neuralcore - DEBUG - [BROAD] START | query='You are executing **ONE SPECIFIC SUB-TASK ONLY**. Ignore everything else.
+
+            ORIGINAL USER...' | KB_size=1054
+2026-04-21 05:30:38,457 - neuralcore - DEBUG - [BROAD] Dense ranked: 1054 items
+2026-04-21 05:30:38,913 - neuralcore - DEBUG - Rebuilt TF-IDF: (1054, 10000)
+2026-04-21 05:30:38,915 - neuralcore - DEBUG - [BROAD] Sparse ranked: 1040 items
+2026-04-21 05:30:38,915 - neuralcore - DEBUG - [BOOST] Detected mentions: ['home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/memory.py', 'home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/consolidator.py', 'home/user/Documents/neuroscience.pdf', 'home/user/Documents/report.md', 'neuralcore.utils']
+2026-04-21 05:30:38,916 - neuralcore - DEBUG - [BOOST] Applied boosts to 2 tool outcomes
+2026-04-21 05:30:38,916 - neuralcore - DEBUG - [BROAD] END → returning 53 broad candidates (top RRF score: 5.0219)
+2026-04-21 05:30:38,916 - neuralcore - DEBUG - [RANKED_RETRIEVE] Broad candidates: 53
+2026-04-21 05:30:38,916 - neuralcore - DEBUG - [RANKED_RETRIEVE] → Calling KnowledgeConsolidator.rerank() with 53 candidates
+2026-04-21 05:30:39,222 - neuralcore - DEBUG - [TRAINING DATA] Collected 53 samples | total=53 | positive=10
+2026-04-21 05:30:39,222 - neuralcore - INFO - [TRAINING] Triggering retrain with 53 samples
+2026-04-21 05:30:39,223 - neuralcore - INFO - [TRAINING] Starting retrain with 53 accumulated samples
+2026-04-21 05:30:39,223 - neuralcore - INFO - Training LambdaMART on 53 samples → /home/user/.neuralcore/models/agent_002_knowledge_consolidator_ltr.txt
+2026-04-21 05:30:39,226 - neuralcore - DEBUG - Loaded existing model for incremental training
+2026-04-21 05:30:39,376 - neuralcore - INFO - ✅ LambdaMART trained | trees=1019 | feature_importances: {'keyword_score': np.int32(152), 'content_length': np.int32(67), 'source_type_score': np.int32(551), 'is_tool_outcome': np.int32(82), 'recency_score': np.int32(16), 'dense_cosine': np.int32(0), 'cosine_x_keyword': np.int32(0), 'semantic_rescue': np.int32(0), 'kw_x_length': np.int32(480), 'tool_x_source': np.int32(0)}
+2026-04-21 05:30:39,376 - neuralcore - WARNING - dense_cosine still has 0 importance — consider removing it
+2026-04-21 05:30:39,383 - neuralcore - INFO - [TRAINING] Kept last 53 samples for future runs
+2026-04-21 05:30:39,383 - neuralcore - DEBUG - [RANKED_RETRIEVE] Reranker returned 10 items
+2026-04-21 05:30:39,387 - neuralcore - DEBUG - [RANKED_RETRIEVE] END → formatted 6,914 chars from 10 items (research_mode=False)
+2026-04-21 05:30:39,392 - neuralcore - DEBUG - → LIGHTWEIGHT MODE: skipping full conversation history
+2026-04-21 05:30:39,396 - neuralcore - DEBUG - Final context before prune → 3017 tokens
+2026-04-21 05:30:39,396 - neuralcore - DEBUG - provide_context finished | messages=3 | lightweight=True | research_mode=False | return_as_string=False | tokens=3017
+2026-04-21 05:30:44,117 - neuralcore - DEBUG - [ACTIONSET RESOLVE] Found executor for 'PerformAnalysis'
+2026-04-21 05:30:44,117 - neuralcore - INFO - [ACTION START] PerformAnalysis
+2026-04-21 05:30:44,117 - neuralcore - DEBUG - [ACTION INPUT] PerformAnalysis kwargs={'query': 'Deep analysis of memory.py and consolidation.py code from the neuroscience book perspective - synthesize findings into a comprehensive report structure'}
+2026-04-21 05:30:44,117 - neuralcore - DEBUG - [ACTION AWAITING] PerformAnalysis
+2026-04-21 05:30:44,117 - neuralcore - INFO - PerformAnalysis started | query='Deep analysis of memory.py and consolidation.py code from the neuroscience book perspective - synthe...'
+2026-04-21 05:30:44,117 - neuralcore - DEBUG - Generating multiple diverse search queries via PromptBuilder
+2026-04-21 05:30:46,818 - neuralcore - DEBUG - Received multi-query response (length=549)
+2026-04-21 05:30:46,818 - neuralcore - DEBUG - Parsed 6 queries from JSON response
+2026-04-21 05:30:46,819 - neuralcore - INFO - Generated 6 sub-queries for analysis
+2026-04-21 05:30:46,819 - neuralcore - DEBUG - Executing SearchToolResults for sub-query: "memory.py" and "consolidation.py" code review from neuroscience perspective...
+2026-04-21 05:30:46,819 - neuralcore - INFO - [DIRECT EXEC] Action 'SearchToolResults' not in DynamicCore → attempting auto-load
+2026-04-21 05:30:46,819 - neuralcore - INFO - [ACTIONSET ADD] SearchToolResults
+2026-04-21 05:30:46,819 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=5
+2026-04-21 05:30:46,819 - neuralcore - DEBUG - [ACTION BIND] SearchToolResults → Agent (agent_id=agent_002)
+2026-04-21 05:30:46,819 - neuralcore - DEBUG - [BIND ON ADD] SearchToolResults → agent bound at load time
+2026-04-21 05:30:46,819 - neuralcore - DEBUG - Added tool 'SearchToolResults' to DynamicCore (origin: ResearchTools)
+2026-04-21 05:30:46,819 - neuralcore - INFO - Loaded 1 individual tools: SearchToolResults
+2026-04-21 05:30:46,819 - neuralcore - DEBUG - [DIRECT EXEC] Auto-loaded 'SearchToolResults'
+2026-04-21 05:30:46,819 - neuralcore - DEBUG - [ACTIONSET RESOLVE] Found executor for 'SearchToolResults'
+2026-04-21 05:30:46,819 - neuralcore - DEBUG - [DIRECT EXEC via DynamicManager] SearchToolResults | kwargs={'query': '"memory.py" and "consolidation.py" code review from neuroscience perspective'}
+2026-04-21 05:30:46,819 - neuralcore - INFO - [ACTION START] SearchToolResults
+2026-04-21 05:30:46,819 - neuralcore - DEBUG - [ACTION INPUT] SearchToolResults kwargs={'query': '"memory.py" and "consolidation.py" code review from neuroscience perspective'}
+2026-04-21 05:30:46,819 - neuralcore - DEBUG - [ACTION AWAITING] SearchToolResults
+2026-04-21 05:30:46,819 - neuralcore - DEBUG - provide_context called | query='"memory.py" and "consolidation.py" code review from neuroscience perspective...' | chat=False | lightweight_agentic=True | research_mode=True | has_state=False | return_as_string=True
+2026-04-21 05:30:46,819 - neuralcore - DEBUG - → Entering AGENTIC mode
+2026-04-21 05:30:46,820 - neuralcore - DEBUG - → LIGHTWEIGHT MODE: skipping full conversation history
+2026-04-21 05:30:46,821 - neuralcore - DEBUG - Final context before prune → 292 tokens
+2026-04-21 05:30:46,821 - neuralcore - DEBUG - provide_context finished | messages=2 | lightweight=True | research_mode=True | return_as_string=True | tokens=292
+2026-04-21 05:30:46,848 - neuralcore - INFO - ✅ Added 1 clean chunks for parent_key=tool_outcome_-1648881058804899806 | source=tool_outcome
+2026-04-21 05:30:46,849 - neuralcore - INFO - Tool 'SearchToolResults' executed → success=True
+2026-04-21 05:30:46,849 - neuralcore - INFO - [ACTION SUCCESS] SearchToolResults | success=True | streamed=False
+2026-04-21 05:30:46,849 - neuralcore - DEBUG - Retrieved 1239 chars for sub-query
+2026-04-21 05:30:46,849 - neuralcore - DEBUG - Executing SearchToolResults for sub-query: "memory.py" implementation details for hippocampal-neocortical dialogue model...
+2026-04-21 05:30:46,849 - neuralcore - DEBUG - [ACTIONSET RESOLVE] Found executor for 'SearchToolResults'
+2026-04-21 05:30:46,849 - neuralcore - DEBUG - [DIRECT EXEC via DynamicManager] SearchToolResults | kwargs={'query': '"memory.py" implementation details for hippocampal-neocortical dialogue model'}
+2026-04-21 05:30:46,849 - neuralcore - INFO - [ACTION START] SearchToolResults
+2026-04-21 05:30:46,849 - neuralcore - DEBUG - [ACTION INPUT] SearchToolResults kwargs={'query': '"memory.py" implementation details for hippocampal-neocortical dialogue model'}
+2026-04-21 05:30:46,849 - neuralcore - DEBUG - [ACTION AWAITING] SearchToolResults
+2026-04-21 05:30:46,849 - neuralcore - DEBUG - provide_context called | query='"memory.py" implementation details for hippocampal-neocortical dialogue model...' | chat=False | lightweight_agentic=True | research_mode=True | has_state=False | return_as_string=True
+2026-04-21 05:30:46,849 - neuralcore - DEBUG - → Entering AGENTIC mode
+2026-04-21 05:30:46,850 - neuralcore - DEBUG - → LIGHTWEIGHT MODE: skipping full conversation history
+2026-04-21 05:30:46,851 - neuralcore - DEBUG - Final context before prune → 292 tokens
+2026-04-21 05:30:46,851 - neuralcore - DEBUG - provide_context finished | messages=2 | lightweight=True | research_mode=True | return_as_string=True | tokens=292
+2026-04-21 05:30:46,875 - neuralcore - INFO - ✅ Added 1 clean chunks for parent_key=tool_outcome_2618037940860790902 | source=tool_outcome
+2026-04-21 05:30:46,875 - neuralcore - INFO - Tool 'SearchToolResults' executed → success=True
+2026-04-21 05:30:46,875 - neuralcore - INFO - [ACTION SUCCESS] SearchToolResults | success=True | streamed=False
+2026-04-21 05:30:46,875 - neuralcore - DEBUG - Retrieved 1240 chars for sub-query
+2026-04-21 05:30:46,875 - neuralcore - DEBUG - Executing SearchToolResults for sub-query: "consolidation.py" algorithm logic for systems consolidation in computational ne...
+2026-04-21 05:30:46,875 - neuralcore - DEBUG - [ACTIONSET RESOLVE] Found executor for 'SearchToolResults'
+2026-04-21 05:30:46,875 - neuralcore - DEBUG - [DIRECT EXEC via DynamicManager] SearchToolResults | kwargs={'query': '"consolidation.py" algorithm logic for systems consolidation in computational neuroscience'}
+2026-04-21 05:30:46,875 - neuralcore - INFO - [ACTION START] SearchToolResults
+2026-04-21 05:30:46,875 - neuralcore - DEBUG - [ACTION INPUT] SearchToolResults kwargs={'query': '"consolidation.py" algorithm logic for systems consolidation in computational neuroscience'}
+2026-04-21 05:30:46,875 - neuralcore - DEBUG - [ACTION AWAITING] SearchToolResults
+2026-04-21 05:30:46,875 - neuralcore - DEBUG - provide_context called | query='"consolidation.py" algorithm logic for systems consolidation in computational neuroscience...' | chat=False | lightweight_agentic=True | research_mode=True | has_state=False | return_as_string=True
+2026-04-21 05:30:46,875 - neuralcore - DEBUG - → Entering AGENTIC mode
+2026-04-21 05:30:46,876 - neuralcore - DEBUG - → LIGHTWEIGHT MODE: skipping full conversation history
+2026-04-21 05:30:46,877 - neuralcore - DEBUG - Final context before prune → 290 tokens
+2026-04-21 05:30:46,877 - neuralcore - DEBUG - provide_context finished | messages=2 | lightweight=True | research_mode=True | return_as_string=True | tokens=290
+2026-04-21 05:30:46,900 - neuralcore - INFO - ✅ Added 1 clean chunks for parent_key=tool_outcome_4664760774235262413 | source=tool_outcome
+2026-04-21 05:30:46,901 - neuralcore - INFO - Tool 'SearchToolResults' executed → success=True
+2026-04-21 05:30:46,901 - neuralcore - INFO - [ACTION SUCCESS] SearchToolResults | success=True | streamed=False
+2026-04-21 05:30:46,901 - neuralcore - DEBUG - Retrieved 1253 chars for sub-query
+2026-04-21 05:30:46,901 - neuralcore - DEBUG - Executing SearchToolResults for sub-query: "memory.py" file structure and class hierarchy for synaptic plasticity simulatio...
+2026-04-21 05:30:46,901 - neuralcore - DEBUG - [ACTIONSET RESOLVE] Found executor for 'SearchToolResults'
+2026-04-21 05:30:46,901 - neuralcore - DEBUG - [DIRECT EXEC via DynamicManager] SearchToolResults | kwargs={'query': '"memory.py" file structure and class hierarchy for synaptic plasticity simulation'}
+2026-04-21 05:30:46,901 - neuralcore - INFO - [ACTION START] SearchToolResults
+2026-04-21 05:30:46,901 - neuralcore - DEBUG - [ACTION INPUT] SearchToolResults kwargs={'query': '"memory.py" file structure and class hierarchy for synaptic plasticity simulation'}
+2026-04-21 05:30:46,901 - neuralcore - DEBUG - [ACTION AWAITING] SearchToolResults
+2026-04-21 05:30:46,901 - neuralcore - DEBUG - provide_context called | query='"memory.py" file structure and class hierarchy for synaptic plasticity simulation...' | chat=False | lightweight_agentic=True | research_mode=True | has_state=False | return_as_string=True
+2026-04-21 05:30:46,901 - neuralcore - DEBUG - → Entering AGENTIC mode
+2026-04-21 05:30:46,902 - neuralcore - DEBUG - → LIGHTWEIGHT MODE: skipping full conversation history
+2026-04-21 05:30:46,902 - neuralcore - DEBUG - Final context before prune → 290 tokens
+2026-04-21 05:30:46,902 - neuralcore - DEBUG - provide_context finished | messages=2 | lightweight=True | research_mode=True | return_as_string=True | tokens=290
+2026-04-21 05:30:46,926 - neuralcore - INFO - ✅ Added 1 clean chunks for parent_key=tool_outcome_-908618105063162442 | source=tool_outcome
+2026-04-21 05:30:46,926 - neuralcore - INFO - Tool 'SearchToolResults' executed → success=True
+2026-04-21 05:30:46,926 - neuralcore - INFO - [ACTION SUCCESS] SearchToolResults | success=True | streamed=False
+2026-04-21 05:30:46,926 - neuralcore - DEBUG - Retrieved 1244 chars for sub-query
+2026-04-21 05:30:46,926 - neuralcore - DEBUG - Executing SearchToolResults for sub-query: "consolidation.py" integration points with "memory.py" for long-term memory form...
+2026-04-21 05:30:46,926 - neuralcore - DEBUG - [ACTIONSET RESOLVE] Found executor for 'SearchToolResults'
+2026-04-21 05:30:46,926 - neuralcore - DEBUG - [DIRECT EXEC via DynamicManager] SearchToolResults | kwargs={'query': '"consolidation.py" integration points with "memory.py" for long-term memory formation'}
+2026-04-21 05:30:46,926 - neuralcore - INFO - [ACTION START] SearchToolResults
+2026-04-21 05:30:46,926 - neuralcore - DEBUG - [ACTION INPUT] SearchToolResults kwargs={'query': '"consolidation.py" integration points with "memory.py" for long-term memory formation'}
+2026-04-21 05:30:46,926 - neuralcore - DEBUG - [ACTION AWAITING] SearchToolResults
+2026-04-21 05:30:46,926 - neuralcore - DEBUG - provide_context called | query='"consolidation.py" integration points with "memory.py" for long-term memory formation...' | chat=False | lightweight_agentic=True | research_mode=True | has_state=False | return_as_string=True
+2026-04-21 05:30:46,926 - neuralcore - DEBUG - → Entering AGENTIC mode
+2026-04-21 05:30:46,927 - neuralcore - DEBUG - → LIGHTWEIGHT MODE: skipping full conversation history
+2026-04-21 05:30:46,928 - neuralcore - DEBUG - Final context before prune → 294 tokens
+2026-04-21 05:30:46,928 - neuralcore - DEBUG - provide_context finished | messages=2 | lightweight=True | research_mode=True | return_as_string=True | tokens=294
+2026-04-21 05:30:46,952 - neuralcore - INFO - ✅ Added 1 clean chunks for parent_key=tool_outcome_8045964292568133950 | source=tool_outcome
+2026-04-21 05:30:46,952 - neuralcore - INFO - Tool 'SearchToolResults' executed → success=True
+2026-04-21 05:30:46,953 - neuralcore - INFO - [ACTION SUCCESS] SearchToolResults | success=True | streamed=False
+2026-04-21 05:30:46,953 - neuralcore - DEBUG - Retrieved 1248 chars for sub-query
+2026-04-21 05:30:46,953 - neuralcore - DEBUG - Executing SearchToolResults for sub-query: "memory.py" and "consolidation.py" parameter configurations for theta-gamma coup...
+2026-04-21 05:30:46,953 - neuralcore - DEBUG - [ACTIONSET RESOLVE] Found executor for 'SearchToolResults'
+2026-04-21 05:30:46,953 - neuralcore - DEBUG - [DIRECT EXEC via DynamicManager] SearchToolResults | kwargs={'query': '"memory.py" and "consolidation.py" parameter configurations for theta-gamma coupling'}
+2026-04-21 05:30:46,953 - neuralcore - INFO - [ACTION START] SearchToolResults
+2026-04-21 05:30:46,953 - neuralcore - DEBUG - [ACTION INPUT] SearchToolResults kwargs={'query': '"memory.py" and "consolidation.py" parameter configurations for theta-gamma coupling'}
+2026-04-21 05:30:46,953 - neuralcore - DEBUG - [ACTION AWAITING] SearchToolResults
+2026-04-21 05:30:46,953 - neuralcore - DEBUG - provide_context called | query='"memory.py" and "consolidation.py" parameter configurations for theta-gamma coupling...' | chat=False | lightweight_agentic=True | research_mode=True | has_state=False | return_as_string=True
+2026-04-21 05:30:46,953 - neuralcore - DEBUG - → Entering AGENTIC mode
+2026-04-21 05:30:46,954 - neuralcore - DEBUG - → LIGHTWEIGHT MODE: skipping full conversation history
+2026-04-21 05:30:46,954 - neuralcore - DEBUG - Final context before prune → 294 tokens
+2026-04-21 05:30:46,954 - neuralcore - DEBUG - provide_context finished | messages=2 | lightweight=True | research_mode=True | return_as_string=True | tokens=294
+2026-04-21 05:30:46,979 - neuralcore - INFO - ✅ Added 1 clean chunks for parent_key=tool_outcome_-6283338794040235037 | source=tool_outcome
+2026-04-21 05:30:46,979 - neuralcore - INFO - Tool 'SearchToolResults' executed → success=True
+2026-04-21 05:30:46,979 - neuralcore - INFO - [ACTION SUCCESS] SearchToolResults | success=True | streamed=False
+2026-04-21 05:30:46,979 - neuralcore - DEBUG - Retrieved 1247 chars for sub-query
+2026-04-21 05:30:46,979 - neuralcore - DEBUG - Combined research context length: 8101 chars
+2026-04-21 05:30:46,979 - neuralcore - DEBUG - Synthesizing final structured report via LLM
+2026-04-21 05:31:01,481 - neuralcore - INFO - PerformAnalysis completed successfully | report_length=3791 chars
+2026-04-21 05:31:01,540 - neuralcore - INFO - ✅ Added 2 clean chunks for parent_key=tool_outcome_7322598598436168114 | source=tool_outcome
+2026-04-21 05:31:01,540 - neuralcore - INFO - Tool 'PerformAnalysis' executed → success=True
+2026-04-21 05:31:01,540 - neuralcore - INFO - [ACTION SUCCESS] PerformAnalysis | success=True | streamed=False
+2026-04-21 05:31:01,546 - neuralcore - INFO - [TASK COMPLETE] 3de53838 | outcome met: True
+2026-04-21 05:31:01,547 - neuralcore - INFO - [ADVANCE] Sub-task 2 ready → next
+2026-04-21 05:31:01,547 - neuralcore - DEBUG - [UI] PHASE_CHANGED: executing_tools
+2026-04-21 05:31:01,547 - neuralcore - DEBUG - AgentState → loop signal added: restart (target=goal_driven_loop)
+2026-04-21 05:31:01,547 - neuralcore - DEBUG - AgentState → soft_restart flag set to True
+2026-04-21 05:31:01,547 - neuralcore - DEBUG - AgentState → FindTool tracking cleared
+2026-04-21 05:31:01,547 - neuralcore - INFO - 🔄 Loop restart requested → Tool executed — advancing to next sub-task (target_loop=goal_driven_loop)
+2026-04-21 05:31:01,547 - neuralcore - DEBUG - [UI] PHASE_CHANGED: restarting_loop
+2026-04-21 05:31:01,547 - neuralcore - DEBUG - [goal_driven_loop] iteration 3
+2026-04-21 05:31:01,547 - neuralcore - DEBUG - AgentState → cleared 1 pending loop signal(s)
+2026-04-21 05:31:01,547 - neuralcore - INFO - [LOOP SIGNAL] 'restart' received for loop 'goal_driven_loop' | Tool executed — advancing to next sub-task
+2026-04-21 05:31:01,547 - neuralcore - DEBUG - AgentState → FindTool tracking cleared
+2026-04-21 05:31:01,547 - neuralcore - DEBUG - AgentState → soft_restart flag set to True
+2026-04-21 05:31:01,547 - neuralcore - DEBUG - [UI] PHASE_CHANGED: thinking
+2026-04-21 05:31:01,547 - neuralcore - INFO - [TASK START] c2897369 | Write the final analysis report to the specified output file...
+2026-04-21 05:31:01,547 - neuralcore - DEBUG - [TOOL MGMT] Unloaded previous tool: unknown
+2026-04-21 05:31:01,547 - neuralcore - INFO - [ACTIONSET ADD] write_file
+2026-04-21 05:31:01,547 - neuralcore - DEBUG - [ACTIONSET STATE] total_actions=6
+2026-04-21 05:31:01,547 - neuralcore - DEBUG - [ACTION BIND] write_file → Agent (agent_id=agent_002)
+2026-04-21 05:31:01,547 - neuralcore - DEBUG - [BIND ON ADD] write_file → agent bound at load time
+2026-04-21 05:31:01,547 - neuralcore - DEBUG - Added tool 'write_file' to DynamicCore (origin: FileEditingTools)
+2026-04-21 05:31:01,547 - neuralcore - INFO - Loaded 1 individual tools: write_file
+2026-04-21 05:31:01,547 - neuralcore - INFO - [TOOL MGMT] Loaded suggested tool for step: write_file
+2026-04-21 05:31:01,547 - neuralcore - DEBUG - [UI] PHASE_CHANGED: thinking
+2026-04-21 05:31:01,547 - neuralcore - DEBUG - provide_context called | query='You are executing **ONE SPECIFIC SUB-TASK ONLY**. Ignore everything else.
+
+            ORIGINAL USER...' | chat=False | lightweight_agentic=True | research_mode=False | has_state=True | return_as_string=False
+2026-04-21 05:31:01,547 - neuralcore - DEBUG - → Entering AGENTIC mode
+2026-04-21 05:31:01,548 - neuralcore - DEBUG - → Using IMPROVED LIGHTWEIGHT agentic context (long-running mode)
+2026-04-21 05:31:01,549 - neuralcore - DEBUG - [RANKED_RETRIEVE] START | query='You are executing **ONE SPECIFIC SUB-TASK ONLY**. Ignore everything else.
+
+            ORIGINAL USER...' | KB_size=1062 | max_kb_tokens=1800 | k=10 | research_mode=False | consolidator_present=True
+2026-04-21 05:31:01,549 - neuralcore - DEBUG - [BROAD] START | query='You are executing **ONE SPECIFIC SUB-TASK ONLY**. Ignore everything else.
+
+            ORIGINAL USER...' | KB_size=1062
+2026-04-21 05:31:01,840 - neuralcore - DEBUG - [BROAD] Dense ranked: 1062 items
+2026-04-21 05:31:02,313 - neuralcore - DEBUG - Rebuilt TF-IDF: (1062, 10000)
+2026-04-21 05:31:02,315 - neuralcore - DEBUG - [BROAD] Sparse ranked: 983 items
+2026-04-21 05:31:02,315 - neuralcore - DEBUG - [BOOST] Detected mentions: ['home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/memory.py', 'home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/consolidator.py', 'home/user/Documents/neuroscience.pdf', 'home/user/Documents/report.md', 'neuralcore.utils']
+2026-04-21 05:31:02,316 - neuralcore - DEBUG - [BOOST] Applied boosts to 8 tool outcomes
+2026-04-21 05:31:02,316 - neuralcore - DEBUG - [BROAD] END → returning 59 broad candidates (top RRF score: 5.0219)
+2026-04-21 05:31:02,316 - neuralcore - DEBUG - [RANKED_RETRIEVE] Broad candidates: 59
+2026-04-21 05:31:02,316 - neuralcore - DEBUG - [RANKED_RETRIEVE] → Calling KnowledgeConsolidator.rerank() with 59 candidates
+2026-04-21 05:31:02,597 - neuralcore - DEBUG - [TRAINING DATA] Collected 59 samples | total=112 | positive=20
+2026-04-21 05:31:02,597 - neuralcore - DEBUG - [RANKED_RETRIEVE] Reranker returned 10 items
+2026-04-21 05:31:02,601 - neuralcore - DEBUG - [RANKED_RETRIEVE] END → formatted 6,914 chars from 10 items (research_mode=False)
+2026-04-21 05:31:02,605 - neuralcore - DEBUG - → LIGHTWEIGHT MODE: skipping full conversation history
+2026-04-21 05:31:02,609 - neuralcore - DEBUG - Final context before prune → 2898 tokens
+2026-04-21 05:31:02,609 - neuralcore - DEBUG - provide_context finished | messages=3 | lightweight=True | research_mode=False | return_as_string=False | tokens=2898
+2026-04-21 05:31:33,247 - neuralcore - DEBUG - [ACTIONSET RESOLVE] Found executor for 'write_file'
+2026-04-21 05:31:33,247 - neuralcore - INFO - [ACTION START] write_file
+2026-04-21 05:31:33,247 - neuralcore - DEBUG - [ACTION INPUT] write_file kwargs={'file_path': '/home/user/Documents/report.md', 'content': '# NeuralCore Code Analysis Report\n## From a Neuroscience Perspective\n\n### Overview\nThis report analyzes the `memory.py` and `consolidator.py` modules of the NeuralCore project through the lens of neuroscience principles, particularly focusing on how the code implements concepts related to memory formation, consolidation, retrieval, and long-term storage.\n\n---\n\n### 1. Memory Module Analysis (`memory.py`)\n\n#### 1.1 Chunking Strategy & Hippocampal Processing\nThe `CHUNK_SIZE_TOKENS = 768` and `CHUNK_OVERLAP_TOKENS = 128` configuration mirrors the **hippocampal chunking mechanism**:\n\n- **Chunk Size (768 tokens)**: Represents the working memory capacity before offloading to long-term storage, analogous to the hippocampus\'s limited bandwidth.\n- **Overlap (128 tokens, ~17%)**: Provides context continuity between chunks, similar to how hippocampal place cells overlap in space to create continuous spatial representations.\n\nThis balances **temporal resolution** with **contextual coherence**, much like how the brain trades off between precise event timing and stable long-term memories.\n\n#### 1.2 Topic Detection & Memory Stabilization\nThe topic detection thresholds reflect **memory stabilization processes**:\n\n- `MSG_THR = 0.55` (higher threshold): More stable topic matching → analogous to **synaptic consolidation** where only strong, consistent signals form stable engrams.\n- `NUM_MSG = 8`: Considers multiple messages for analysis → mirrors the brain\'s requirement for **repeated exposure** to stabilize memory traces.\n- `OFF_THR = 0.65` (lowered): Earlier off-topic detection → similar to **contextual gating** that prevents interference from unrelated inputs.\n\nThe **slice size of 6** provides a window for detecting semantic drift, akin to how the brain monitors ongoing activity patterns to detect memory degradation or interference.\n\n#### 1.3 Context Management & Associative Memory\nThe `ContextManager` class initializes with:\n- `max_tokens`: Working memory buffer (hippocampal short-term)\n- `embeddings`: Semantic representation (semantic memory network)\n- `fast_embedder`: Fast approximation (rapid pattern matching)\n\nThis architecture mirrors the **hippocampal-cortical dialogue**: fast embeddings provide quick access (hippocampal rapid indexing), while full embeddings enable deeper semantic integration (cortical long-term storage).\n\n---\n\n### 2. Consolidator Module Analysis (`consolidator.py`)\n\n#### 2.1 Novelty Detection & Pattern Separation\nThe `novelty_threshold = 0.85` implements **pattern separation**:\n\n- High similarity (>0.85) → skip processing (already known pattern)\n- Lower similarity → full feature extraction and consolidation\n\nThis reflects the **dentate gyrus** function of distinguishing similar inputs, preventing overwriting of existing memories while allowing new learning.\n\n#### 2.2 Feature Extraction & Multi-Modal Integration\nThe `KnowledgeConsolidator` extracts features:\n```python\nactive_features = [\n    "keyword_score",      # Semantic/lexical (language areas)\n    "content_length",     # Information density\n    "source_type_score",  # Modality-specific encoding\n    "is_tool_outcome",    # Procedural vs. declarative distinction\n    "recency_score",      # Temporal context\n    "dense_cosine",       # Semantic vector similarity\n    "cosine_x_keyword",   # Interaction term (semantic + lexical)\n    "semantic_rescue",    # Fallback for edge cases\n    "kw_x_length",        # Length-weighted semantic importance\n    "tool_x_source",      # Modality interaction\n]\n```\n\nThis multi-feature approach mirrors **distributed representation** in the brain, where different cortical areas contribute specialized features (visual, semantic, temporal) that are integrated in associative networks.\n\n#### 2.3 Reranker Model & Memory Replay\nThe LightGBM-based reranker implements **memory replay and prioritization**:\n\n- Trained on real data with `min_samples_for_training = 10`\n- Considers feature interactions to prioritize which memories to consolidate\n\nThis reflects the **sleep-dependent consolidation** process, where the brain replays and prioritizes important experiences during rest periods.\n\n#### 2.4 Debounce & Extraction Rate Limiting\nThe cooldown mechanisms (`extraction_cooldown = 8.0`, `_last_extraction_ts`) implement **metabolic rate limiting**:\n\n- Prevents over-extraction (analogous to synaptic saturation)\n- Allows recovery time between operations (synaptic refractory periods)\n\n---\n\n### 3. Neurobiological Correlates\n\n#### 3.1 Working Memory vs. Long-Term Storage\nThe architecture cleanly separates:\n- **Fast embeddings**: Working memory buffer (hippocampal rapid indexing)\n- **Full embeddings**: Long-term semantic storage (cortical integration)\n\nThis mirrors the **dual-system model** of memory formation.\n\n#### 3.2 Temporal Dynamics\n- `recency_score`: Implements time-dependent decay, similar to **synaptic tagging and capture**\n- `extraction_cooldown`: Metabolic rate limiting (energy constraints on processing)\n\n#### 3.3 Semantic Rescues & Edge Cases\nThe `semantic_rescue` feature handles ambiguous or noisy inputs, analogous to **noise-resistant pattern recognition** in the visual cortex.\n\n---\n\n### 4. Optimization Trade-offs (Best Balance for 64GB RAM)\n\n#### 4.1 Memory-Efficient Design\n- **Chunk size increase** from 512 to 768 tokens allows larger context windows without excessive fragmentation\n- **Overlap at 17%** provides sufficient context continuity without redundant computation\n- **MAX_CHUNKS_PER_ITEM = 12** prevents memory explosion for large documents\n\n#### 4.2 Computational Efficiency\n- **FastEmbed fallback**: Quick pattern matching when full embeddings aren\'t needed\n- **LightGBM reranker**: Gradient boosting trees are both interpretable and efficient\n- **Thread pool with 4 workers**: Parallelizes feature extraction without over-subscription\n\n---\n\n### 5. Conclusion: From Code to Cognition\n\nThe NeuralCore architecture demonstrates a compelling implementation of neuroscience-inspired memory systems:\n\n1. **Hierarchical Processing**: Fast approximations → Full semantic integration mirrors the hippocampal-cortical pathway\n2. **Temporal Dynamics**: Recency scores and cooldowns implement realistic time-dependent processes\n3. **Pattern Separation/Completion**: Novelty thresholds balance novelty detection with efficient reuse of existing knowledge\n4. **Metabolic Constraints**: Debounce mechanisms simulate biological energy limitations\n\nThe code successfully translates abstract neuroscience concepts into practical, optimized engineering solutions that respect both computational efficiency and cognitive realism.\n\n---\n\n### 6. Key Insights\n\n- The **768-token chunk size** represents a "sweet spot" between temporal resolution and working memory capacity\n- **0.85 novelty threshold** effectively separates novel vs. familiar patterns (similar to hippocampal pattern separation)\n- **Multi-feature extraction** with interactions captures distributed representation principles\n- **LightGBM reranker** provides interpretable, efficient prioritization of consolidation\n\nThe architecture demonstrates that modern AI systems can embody cognitive principles—working memory buffers, semantic integration, temporal dynamics, and metabolic constraints—in a unified, scalable framework.\n\n---\n\n*Report generated from analysis of `memory.py` and `consolidator.py` through the lens of neuroscience.*\n', 'append': False}
+2026-04-21 05:31:33,247 - neuralcore - DEBUG - [ACTION AWAITING] write_file
+2026-04-21 05:31:33,262 - neuralcore - INFO - ✅ Added 1 clean chunks for parent_key=tool_outcome_-495529883937813888 | source=tool_outcome
+2026-04-21 05:31:33,262 - neuralcore - INFO - Tool 'write_file' executed → success=True
+2026-04-21 05:31:33,262 - neuralcore - INFO - [ACTION SUCCESS] write_file | success=True | streamed=False
+2026-04-21 05:31:33,281 - neuralcore - INFO - [TASK COMPLETE] c2897369 | outcome met: True
+2026-04-21 05:31:33,281 - neuralcore - INFO - ✅ Goal achieved: All sub-tasks completed
+2026-04-21 05:31:33,282 - neuralcore - INFO - [GOAL ACHIEVED] Triggered | explicit=True | marker_in_reply=True | marker_in_history=False | strong_completion=True | index=2/3
+2026-04-21 05:31:33,282 - neuralcore - INFO - Loop 'goal_driven_loop' broke on condition 'goal_achieved'
+2026-04-21 05:31:33,282 - neuralcore - INFO - [TASK-DRIVEN MODE] Inner goal_driven_loop completed — back to outer chat
+2026-04-21 05:31:33,282 - neuralcore - DEBUG - AgentState → loop signal added: restart (target=chat_tool_loop)
+2026-04-21 05:31:33,282 - neuralcore - DEBUG - AgentState → soft_restart flag set to True
+2026-04-21 05:31:33,282 - neuralcore - DEBUG - AgentState → FindTool tracking cleared
+2026-04-21 05:31:33,282 - neuralcore - INFO - 🔄 Loop restart requested → Inner goal_driven_loop finished, returning to chat (target_loop=chat_tool_loop)
+2026-04-21 05:31:33,282 - neuralcore - DEBUG - [chat_tool_loop] iteration 2
+2026-04-21 05:31:33,282 - neuralcore - DEBUG - AgentState → cleared 1 pending loop signal(s)
+2026-04-21 05:31:33,282 - neuralcore - INFO - [LOOP SIGNAL] 'restart' received for loop 'chat_tool_loop' | Inner goal_driven_loop finished, returning to chat
+2026-04-21 05:31:33,282 - neuralcore - DEBUG - AgentState → FindTool tracking cleared
+2026-04-21 05:31:33,282 - neuralcore - DEBUG - AgentState → soft_restart flag set to True
+2026-04-21 05:31:33,282 - neuralcore - INFO - [CHAT TOOL LOOP] Outer loop started — persistent mode active
