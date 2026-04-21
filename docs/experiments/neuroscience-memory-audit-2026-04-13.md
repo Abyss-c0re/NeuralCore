@@ -1,3 +1,6 @@
+# Original Task Prompt
+read ../Documents/neuroscience.pdf then analyze ../Dev/AI/NeuralCore/src/neuralcore/cognition/memory.py from that perspective 
+
 # Technical Analysis Report: NeuralCore Memory Module vs Neuroscience Textbook Theory
 
 ## Executive Summary

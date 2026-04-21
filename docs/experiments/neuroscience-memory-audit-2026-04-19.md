@@ -1,3 +1,7 @@
+# Original Task Prompt
+
+analyze ../Dev/AI/NeuralCore/src/neuralcore/cognition/memory.py and ../Dev/AI/NeuralCore/src/neuralcore/cognition/consolidator.py from the perspective of this book ../Documents/neuroscience.pdf and save it to report.md
+
 # Comparative Analysis: Neuroscience Concepts vs. NeuralCore Implementation
 
 ## Executive Summary

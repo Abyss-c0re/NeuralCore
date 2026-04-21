@@ -1,10 +1,16 @@
+# Original Task Prompt
+
+Read ../Dev/AI/NeuralCore/src/neuralcore/cognition/memory.py and ../Dev/AI/NeuralCore/src/neuralcore/cognition/consolidator.py then perfrom analysis of the code from the perspective of this book ../Documents/neuroscience.pdf. 
+Reference actual sources from the book Save it to ../Documents/report.md
+
+
 # Neural Core Code Analysis Report
 ## Perspective: Neuroscience Fundamentals
 
 **Source Material:** 
-- `/home/user/Documents/neuroscience.pdf` (Neuroscience Textbook)
-- `/home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/memory.py`
-- `/home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/consolidator.py`
+- `../Documents/neuroscience.pdf` (Neuroscience Textbook)
+- `../Dev/AI/NeuralCore/src/neuralcore/cognition/memory.py`
+- `../Dev/AI/NeuralCore/src/neuralcore/cognition/consolidator.py`
 
 ---
 
@@ -496,9 +502,9 @@ Based on neuroscience principles, the following enhancements would increase biol
 
 ### Code-Specific References
 
-- `/home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/memory.py`
-- `/home/user/Dev/AI/ProjectNexus/NeuralCore/src/neuralcore/cognition/consolidator.py`
-- `/home/user/Documents/neuroscience.pdf`
+- `../Dev/AI/NeuralCore/src/neuralcore/cognition/memory.py`
+- `../Dev/AI/NeuralCore/src/neuralcore/cognition/consolidator.py`
+- `../Documents/neuroscience.pdf`
 
 ---
 

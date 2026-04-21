@@ -1,3 +1,8 @@
+# Original Task Prompt
+
+Read ../Dev/AI/NeuralCore/src/neuralcore/cognition/memory.py and ../Dev/AI/NeuralCore/src/neuralcore/cognition/consolidator.py then perfrom analysis of the code from the perspective of this book ../Documents/neuroscience.pdf. 
+Reference actual sources from the book Save it to ../Documents/report.md
+
 # NeuralCore Code Analysis Report
 ## From a Neuroscience Perspective
 
