@@ -76,8 +76,13 @@ class ActionRegistry:
         limit: int = 5,
         current_agent_id: Optional[str] = None,
         is_subagent: bool = False,
+        return_score: bool = False,
     ):
-        """Pure dynamic lexical + semantic search with per-agent and sub-agent hiding."""
+        """Pure dynamic lexical + semantic search with per-agent hiding.
+
+        When return_score=True, returns list of tuples: (score, action, set_name)
+        Otherwise returns [(action, set_name), ...] for backward compatibility.
+        """
         query = query.lower().strip()
         if not query:
             return []
@@ -100,7 +105,7 @@ class ActionRegistry:
             text = entry["text"]
             name_tokens = entry["name_tokens"]
 
-            # Core scoring (unchanged)
+            # Core scoring
             k_score = keyword_score(query_words, text) * 5.0
             f_score = fuzzy_score(query, text) * 3.0
 
@@ -122,10 +127,17 @@ class ActionRegistry:
             total_score = k_score + f_score + name_boost + bigram_bonus
 
             if total_score > 3.0:
-                results.append((total_score, action, entry["set"]))
+                if return_score:
+                    results.append((total_score, action, entry["set"]))
+                else:
+                    results.append((total_score, action, entry["set"]))
 
         results.sort(key=lambda x: x[0], reverse=True)
-        return [(a, s) for _, a, s in results[:limit]]
+
+        if return_score:
+            return results[:limit]  # (score, action, set)
+        else:
+            return [(a, s) for _, a, s in results[:limit]]
 
     # list_all_tools, debug_print_all_tools, execute unchanged...
     def list_all_tools(
