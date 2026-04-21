@@ -96,6 +96,7 @@ class Agent:
         # Light operational containers
 
         self.sub_tasks: Dict[str, Dict[str, Any]] = {}
+        self._sub_task_events: Dict[str, asyncio.Event] = {}
         self._sub_task_counter: int = 0
         self.task_context: Optional["ContextManager.TaskContext"] = None
         self.assigned_tools: Optional[List[str]] = None
@@ -433,6 +434,40 @@ class Agent:
             logger.debug(f"wait_for_incoming_message error: {e}")
             return None
 
+    async def wait_for_sub_task(
+        self,
+        task_id: str,
+        timeout: Optional[float] = None,
+        raise_on_timeout: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Wait until a sub-task reaches a terminal state.
+        Uses asyncio.Event when available (clean & efficient).
+        Falls back to polling for legacy tasks.
+        """
+        if task_id not in self.sub_tasks:
+            return {"error": f"Sub-task {task_id} not found", "status": "not_found"}
+
+        event = self._sub_task_events.get(task_id)
+
+        if event is None:
+            # Legacy fallback (polling)
+            return await self._poll_sub_task_status(task_id, timeout)
+
+        try:
+            if timeout is not None:
+                await asyncio.wait_for(event.wait(), timeout=timeout)
+            else:
+                await event.wait()
+
+            return self.sub_tasks.get(task_id, {})
+        except asyncio.TimeoutError:
+            if raise_on_timeout:
+                raise TimeoutError(
+                    f"Sub-task {task_id} did not complete within {timeout}s"
+                )
+            return {"status": "timeout", "task_id": task_id}
+
     async def _auto_sync_state(self) -> None:
         """Lightweight auto-sync with rate limiting + learning trigger."""
         now = time.time()
@@ -444,6 +479,18 @@ class Agent:
 
         # Direct call — no wrapper needed
         asyncio.create_task(self.context_manager.consolidator.extract_and_consolidate())
+
+    async def _poll_sub_task_status(
+        self, task_id: str, timeout: Optional[float] = None
+    ) -> Dict[str, Any]:
+        start = time.time()
+        while True:
+            info = self.sub_tasks.get(task_id, {})
+            if info.get("status") in ("completed", "failed", "cancelled"):
+                return info
+            if timeout and (time.time() - start) > timeout:
+                return {"status": "timeout", "task_id": task_id}
+            await asyncio.sleep(0.1)
 
     async def on_background_event(self, event: str, payload: Any) -> None:
         """Generic hook for background/headless events.
@@ -654,7 +701,7 @@ class Agent:
                 except Exception:
                     pass
         finally:
-            logger.info(f"[QUEUE LISTENER] ... STOPPED")
+            logger.info("[QUEUE LISTENER] ... STOPPED")
 
     async def start_background_queue_listener(self) -> asyncio.Task[None]:
         """Generic persistent background listener for message_queue.
@@ -1067,6 +1114,7 @@ class Agent:
     ) -> str:
         self._sub_task_counter += 1
         task_id = f"deploy_{self.agent_id}_{self._sub_task_counter:03d}"
+        self._sub_task_events[task_id] = asyncio.Event()
         display_name = user_facing_name or task_description[:65]
 
         logger.info(
@@ -1280,6 +1328,9 @@ class Agent:
 
             sub_agent.context_manager.prune_sub_agent_noise()
 
+            if task_id in self._sub_task_events:
+                self._sub_task_events[task_id].set()
+
     def get_sub_tasks(self) -> Dict[str, Dict]:
         now = asyncio.get_event_loop().time()
         return {
@@ -1382,6 +1433,48 @@ class Agent:
             return summary.strip()
         except Exception:
             return f"✅ The deployment task **{task}** has been completed successfully."
+
+    async def wait_for_sub_agent_event(
+        self,
+        task_id: str,
+        event: str = "sub_task_completed",
+        timeout: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Wait for a specific event from a particular sub-agent.
+        Always returns a dict (or None). Strings are parsed if possible.
+        """
+        if task_id not in self.sub_tasks:
+            logger.warning(f"[wait_for_sub_agent_event] task_id {task_id} not found")
+            return None
+
+        result = await self.wait_for_incoming_message(
+            timeout=timeout,
+            contains=f'"task_id": "{task_id}"',
+            return_content_only=False,
+        )
+
+        if result is None:
+            return None
+
+        if isinstance(result, dict):
+            return result
+
+        # Try to parse string as JSON
+        if isinstance(result, str):
+            try:
+                import json
+
+                parsed = json.loads(result)
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                pass
+
+            # Fallback: wrap string in a dict
+            return {"raw_message": result}
+
+        return None
 
 
 class SubAgent(Agent):
