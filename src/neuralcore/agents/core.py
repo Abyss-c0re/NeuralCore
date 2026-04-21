@@ -82,6 +82,7 @@ class Agent:
         # ====================== INFRASTRUCTURE (never goes into state) ======================
         self.manager = DynamicActionManager(self.registry, self)
         self.context_manager = ContextManager(self)
+
         self._last_sync_ts = 0.0
         # self.agent_tools = AgentActionHelper(self)
         self.workflow = WorkflowEngine(self, workflow)
@@ -140,6 +141,39 @@ class Agent:
     @status.setter
     def status(self, value: str) -> None:
         self.state.status = value
+
+    async def start_background_services(self):
+        """Start all background services after the agent is fully initialized.
+        Call this once when the agent starts running.
+        """
+        logger.info(f"🚀 Starting background services for '{self.name}'...")
+
+        try:
+            # 1. KnowledgeBase background watcher (file monitoring + reindexing)
+            if hasattr(self.context_manager, "knowledge_base") and hasattr(
+                self.context_manager.knowledge_base, "start_background_watcher"
+            ):
+                await self.context_manager.knowledge_base.start_background_watcher()
+                logger.info("   ✓ KnowledgeBase background watcher started")
+
+            # 2. Load reranker model (important for retrieval quality)
+            if hasattr(self.context_manager, "consolidator"):
+                await self.context_manager.consolidator.load_reranker()
+                logger.info("   ✓ KnowledgeConsolidator reranker loaded")
+
+            # 3. Start persistent message queue listener
+            await self.start_background_queue_listener()
+            logger.info("   ✓ Background queue listener started")
+
+            # 4. Optional: Pre-load tools if not already loaded (can be heavy)
+            if not self.manager.loaded_tools:
+                self.attach_tools()
+                logger.info("   ✓ Default tools attached")
+
+            logger.info(f"✅ All background services started for '{self.name}'")
+
+        except Exception as e:
+            logger.error(f"Failed to start background services: {e}", exc_info=True)
 
     def get_full_state_dict(self) -> Dict[str, Any]:
         """Public, generic snapshot of the entire agent for any transport layer."""
@@ -753,8 +787,7 @@ class Agent:
         self.state.status = "running_background"
 
         async def _background_consumer():
-            await self.start_background_queue_listener()
-            await self.context_manager.consolidator.load_reranker()
+            await self.start_background_services()
             try:
                 async for event, payload in self.run(
                     user_prompt=user_prompt,
@@ -798,8 +831,7 @@ class Agent:
         self, loop_name: str, initial_state: Optional[dict] = None, **kwargs
     ) -> AsyncIterator[Tuple[str, Any]]:
         """Delegate loop execution to the WorkflowEngine and yield events"""
-        await self.start_background_queue_listener()
-        await self.context_manager.consolidator.load_reranker()
+        await self.start_background_services()
         async for event, payload in self.workflow.execute_loop(
             loop_name, initial_state, **kwargs
         ):
@@ -1008,8 +1040,7 @@ class Agent:
     ) -> AsyncIterator[Tuple[str, Any]]:
         """Main agent execution loop with full built-in confirmation support."""
         stop_event = stop_event or asyncio.Event()
-        await self.context_manager.consolidator.load_reranker()
-        await self.start_background_queue_listener()
+        await self.start_background_services()
 
         system_prompt = system_prompt or self.system_prompt
         temperature = temperature if temperature is not None else self.temperature
