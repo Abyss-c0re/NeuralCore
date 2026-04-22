@@ -53,6 +53,11 @@ class AgentState:
     task_tool_assignments: Dict[int, List[str]] = field(default_factory=dict)
     task_dependencies: Dict[int, List[int]] = field(default_factory=dict)
 
+    # ==================== Investigation State ====================
+    hypotheses: List[str] = field(default_factory=list)
+    findings: List[str] = field(default_factory=list)
+    unknowns: List[str] = field(default_factory=list)
+
     # ==================== Sub-agent & Hub Coordination ====================
     sub_task_ids: List[str] = field(default_factory=list)
     task_id_map: Dict[int, str] = field(default_factory=dict)
@@ -280,7 +285,16 @@ class AgentState:
         return warnings
 
     # ==================== Core Methods ====================
-    def reset_for_new_task(self, new_task: str = "") -> None:
+    def reset_for_new_task(self, new_task: str = "", hard: bool = False) -> None:
+        """
+        Reset for a new top-level goal.
+
+        Args:
+            new_task: The new goal
+            hard: If True, also clears investigation state (hypotheses/findings/unknowns).
+                  Default = False (recommended for multi-step tasks).
+        """
+        # === Always reset planning & execution state ===
         self.planned_tasks.clear()
         self.task_expected_outcomes.clear()
         self.task_tool_assignments.clear()
@@ -289,7 +303,6 @@ class AgentState:
         self.task_id_map.clear()
         self.sub_agent_results.clear()
         self.active_sub_agents.clear()
-        self.messages.clear()
         self.tasks.clear()
         self.completed_task_ids.clear()
         self.root_task = None
@@ -301,8 +314,8 @@ class AgentState:
         self.goal_achieved = False
         self.tool_calls = None
         self.full_reply = ""
-        self.skip_manager_this_turn: bool = False
-        self.last_used_tool: Optional[str] = None
+        self.skip_manager_this_turn = False
+        self.last_used_tool = None
         self.tool_results.clear()
         self.executed_functions.clear()
         self.last_tool_success = None
@@ -337,12 +350,20 @@ class AgentState:
         self.clear_pending_loop_signals()
 
         self.start_time = time.time()
-
         self.task = new_task
         self.current_task = ""
         self.current_workflow = "default"
 
-        logger.debug(f"AgentState reset complete. Goal: '{self.task}'")
+        # === Investigation state: only clear on hard reset ===
+        if hard:
+            self.hypotheses.clear()
+            self.findings.clear()
+            self.unknowns.clear()
+            logger.info("AgentState: Investigation state cleared (hard reset)")
+        else:
+            logger.debug("AgentState: Investigation state preserved across sub-tasks")
+
+        logger.info(f"AgentState reset complete. New goal: '{self.task}' (hard={hard})")
 
     def add_tool_result(
         self, tool_name: str, result: Any, success: bool = True
@@ -517,10 +538,17 @@ class AgentState:
             if not k.startswith("_") and k not in exclude
         }
 
+        # === Limit large lists for serialization ===
         data["tool_results"] = self.tool_results[-20:]
         data["executed_functions"] = self.executed_functions[-15:]
         data["iteration_history"] = self.iteration_history[-10:]
         data["messages"] = self.messages[-20:]
+
+        # === NEW: Investigation state (keep reasonable size) ===
+        data["hypotheses"] = self.hypotheses[-15:] if self.hypotheses else []
+        data["findings"] = self.findings[-20:] if self.findings else []
+        data["unknowns"] = self.unknowns[-10:] if self.unknowns else []
+
         data["findtool_call_count"] = self.findtool_call_count
         data["last_findtool_loop"] = self.last_findtool_loop
         data["tool_calls"] = self.tool_calls or []

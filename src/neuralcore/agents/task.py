@@ -21,24 +21,21 @@ class Task:
     parent_task_id: Optional[str] = None
 
     status: str = "pending"  # pending | in_progress | completed | failed | skipped
-    dependencies: List[str] = field(default_factory=list)  # list of task_id strings
-    assigned_agent: Optional[Any] = (
-        None  # Can be actual Agent instance (for .state access)
-    )
+    dependencies: List[str] = field(default_factory=list)
+    assigned_agent: Optional[Any] = None
     expected_outcome: str = ""
 
-    # NEW: Recommended tool for this task (from planning)
     suggested_tool: str = ""
+    used_tool: str = ""
 
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
     result: Optional[Any] = None
     error: Optional[str] = None
 
-    subtasks: List["Task"] = field(default_factory=list)  # hierarchical
+    subtasks: List["Task"] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
-    # Internal fast lookup
     _dependency_set: Set[str] = field(init=False, default_factory=set)
 
     def __post_init__(self):
@@ -56,7 +53,7 @@ class Task:
         self.start_time = datetime.now()
         if agent is not None:
             self.assigned_agent = agent
-        logger.info(f"[TASK START] {self.task_id[:8]} | {self.description[:100]}...")
+        logger.info(f"[TASK START] {self.task_id[:8]} | {self.description}")
 
     def complete(self, result: Any = None, error: Optional[str] = None) -> None:
         """Mark task completed or failed."""
@@ -97,7 +94,8 @@ class Task:
             if self.assigned_agent
             else None,
             "expected_outcome": self.expected_outcome,
-            "suggested_tool": self.suggested_tool,  # ← NEW
+            "suggested_tool": self.suggested_tool,
+            "used_tool": self.used_tool,
             "start_time": self.start_time.isoformat() if self.start_time else None,
             "end_time": self.end_time.isoformat() if self.end_time else None,
             "result": str(self.result)[:1000] if self.result is not None else None,
@@ -112,5 +110,7 @@ class Task:
             if self.start_time and self.end_time
             else ""
         )
-        tool_info = f" | tool={self.suggested_tool}" if self.suggested_tool else ""
-        return f"[{self.status.upper()}] {self.task_id[:8]}… | {self.description[:90]}{tool_info}{duration}"
+        tool_info = f" | suggested={self.suggested_tool}" if self.suggested_tool else ""
+        if self.used_tool:
+            tool_info += f" | used={self.used_tool}"
+        return f"[{self.status.upper()}] {self.task_id[:8]}… | {self.description[:80]}{tool_info}{duration}"

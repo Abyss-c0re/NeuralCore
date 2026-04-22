@@ -1,3 +1,4 @@
+import time
 from typing import Any, Dict, List, Optional, Set, Union
 
 from neuralcore.actions.actions import Action, ActionSet
@@ -11,9 +12,10 @@ logger = Logger.get_logger()
 
 
 class DynamicActionManager:
-    def __init__(self, registry: "ActionRegistry", agent: Optional[Any] = None):
+    def __init__(self, registry: "ActionRegistry", agent):
         self.current_set = ActionSet("DynamicCore")
-        self._agent: Optional[Any] = agent
+        self._agent = agent
+        self._consolidator = agent.context_manager.consolidator
 
         self._loaded_tools: Set[str] = set()
         self._tool_to_set: Dict[str, str] = {}
@@ -438,6 +440,113 @@ class DynamicActionManager:
         )
         return await action(**kwargs)  # ← full Action.__call__
 
+    async def search_and_load(
+        self,
+        query: str,
+        limit: int = 5,
+        use_reranker: bool = True,
+    ) -> List[str]:
+        """
+        Enhanced tool search + load with full description + tags reranking.
+        Completely safe against None, empty tuples, and mixed return types from registry.search().
+        """
+        logger.debug(
+            f"[TOOL SEARCH] query='{query[:80]}...' | use_reranker={use_reranker} | limit={limit}"
+        )
+
+        # Step 1: Broad lexical search
+        results = self.registry.search(
+            query,
+            limit=max(limit * 4, 20),
+            current_agent_id=getattr(self._agent, "agent_id", None),
+            is_subagent=getattr(self._agent, "sub_agent", False),
+        )
+
+        if not results:
+            logger.info("ToolBrowser: no lexical matches found")
+            return []
+
+        if not use_reranker or self._consolidator is None or len(results) <= 1:
+            # SAFE FALLBACK — handle empty tuples and malformed items
+            tool_names: List[str] = []
+            for item in results[:limit]:
+                if item is None:
+                    continue
+                if isinstance(item, tuple):
+                    if (
+                        len(item) >= 1
+                        and item[0] is not None
+                        and hasattr(item[0], "name")
+                    ):
+                        tool_names.append(item[0].name)
+                elif hasattr(item, "name"):
+                    tool_names.append(item.name)
+            self.load_tools(tool_names)
+            return tool_names
+
+        # Step 2: Rich adaptation for reranker (full description + tags)
+        adapted_candidates = []
+        for action, set_name in results:
+            rich_text = f"{action.name}\n{action.description}\nTags: {', '.join(getattr(action, 'tags', []))}\nSet: {set_name}"
+
+            adapted = type(
+                "ToolCandidate",
+                (object,),
+                {
+                    "key": action.name,
+                    "content": rich_text,
+                    "source_type": "tool",
+                    "embedding": None,
+                    "timestamp": getattr(action, "last_used", time.time()),
+                    "usage_count": getattr(action, "usage_count", 0),
+                    "category_path": set_name,
+                },
+            )()
+            adapted_candidates.append(adapted)
+
+        # Step 3: Rerank with LambdaMART
+        try:
+            reranked_items = await self._consolidator.rerank(
+                query=query,
+                candidates=adapted_candidates,
+                k=limit,
+            )
+
+            name_to_action = {
+                action.name: (action, set_name) for action, set_name in results
+            }
+            results = [
+                name_to_action.get(item.key)
+                for item in reranked_items
+                if item.key in name_to_action
+            ]
+            results = [r for r in results if r is not None]
+
+            logger.debug(f"[TOOL RERANK] LambdaMART reranked → {len(results)} tools")
+        except Exception as e:
+            logger.warning(
+                f"[TOOL RERANK] Consolidator failed, falling back to lexical: {e}"
+            )
+            results = results[:limit]
+
+        # Step 4: Safe tool name extraction (final guard)
+        tool_names: List[str] = []
+        for item in results:
+            if item is None:
+                continue
+            if isinstance(item, tuple):
+                if len(item) >= 1 and item[0] is not None and hasattr(item[0], "name"):
+                    tool_names.append(item[0].name)
+            elif hasattr(item, "name"):
+                tool_names.append(item.name)
+
+        self.load_tools(tool_names)
+
+        logger.info(
+            f"ToolBrowser: loaded {len(tool_names)} tools (reranked) → {tool_names}"
+        )
+        return tool_names
+
     @property
     def actions(self):
         return self.current_set.actions
@@ -486,33 +595,25 @@ class ToolBrowser(Action):
         logger.info("ToolBrowser (FindTool) added to DynamicCore as persistent tool")
 
     async def _search(self, query: str):
+        """Simple thin wrapper around DynamicActionManager.search_and_load"""
         logger.info(f"ToolBrowser search executed: query='{query}'")
 
-        # === Detect current agent context ===
-        current_agent_id = None
-        is_subagent = False
-        if self.manager and getattr(self.manager, "_agent", None):
-            agent = self.manager._agent
-            current_agent_id = getattr(agent, "agent_id", None)
-            is_subagent = getattr(
-                agent, "sub_agent", False
-            )  # ← uses the flag from your Agent class
-
-        results = self.registry.search(
-            query, limit=3, current_agent_id=current_agent_id, is_subagent=is_subagent
+        loaded_names = await self.manager.search_and_load(
+            query=query,
+            limit=3,
+            use_reranker=True,
         )
 
-        if not results:
+        if not loaded_names:
             logger.info("ToolBrowser: no matches found")
             return {
                 "status": "no_matches",
                 "message": "No tools found matching your request.",
             }
 
-        self.manager.load_tools([a.name for a, _ in results])
-        logger.info(f"ToolBrowser: loaded {len(results)} tools")
+        logger.info(f"ToolBrowser: loaded {len(loaded_names)} tools → {loaded_names}")
         return {
             "status": "tools_loaded",
-            "loaded_tools": [a.name for a, _ in results],
-            "message": f"Found and loaded {len(results)} relevant tools.",
+            "loaded_tools": loaded_names,
+            "message": f"Found and loaded {len(loaded_names)} relevant tools (reranked with LambdaMART).",
         }
