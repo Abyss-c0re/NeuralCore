@@ -798,6 +798,7 @@ class PromptBuilder:
         - Use natural language and light emojis if appropriate
         - Keep it easy to read"""
 
+
     @staticmethod
     def abstract_concept_extraction(
         goal: str,
@@ -806,35 +807,39 @@ class PromptBuilder:
         relevant_items: List[Any],
         existing_concepts: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """Strict prompt designed to minimize hallucinations and force grounded abstraction."""
+        """High-precision prompt for extracting grounded, high-dimensional abstractions."""
 
         hyp_text = "\n".join(f"- {h}" for h in hypotheses) if hypotheses else "None"
         find_text = "\n".join(f"- {f}" for f in findings) if findings else "None"
 
+        # Show more context but keep it focused
         items_text = "\n\n".join(
-            f"ITEM {i + 1} [source: {getattr(item, 'source_type', 'unknown')}]\n"
-            f"Content preview: {getattr(item, 'content', '')[:1300]}..."
-            for i, item in enumerate(relevant_items[:10])
+            f"ITEM {i + 1} [source: {getattr(item, 'source_type', 'unknown')} | category: {getattr(item, 'category_path', 'N/A')}]\n"
+            f"{getattr(item, 'content', '')[:1600]}"
+            for i, item in enumerate(relevant_items[:12])
         )
 
         existing_text = ""
         if existing_concepts and len(existing_concepts) > 0:
             existing_text = (
-                "\nEXISTING CONCEPTS (refine or link to these when appropriate):\n"
+                "\n\nEXISTING CONCEPTS (you MUST prefer refining or extending these when possible):\n"
                 + "\n".join(
-                    f"- {name}: {concept.get('description', '')[:250]}"
-                    for name, concept in list(existing_concepts.items())[:10]
+                    f"- {name}: {concept.get('description', '')[:280]}"
+                    for name, concept in list(existing_concepts.items())[:8]
                 )
             )
 
-        return f"""You are a strict computational neuroscientist. Your task is to extract 5-8 high-quality abstract concepts by comparing the provided code artifacts with neuroscience theory from Purves et al.
+        return f"""You are a precise computational neuroscientist and systems thinker.
 
-        STRICT RULES:
-        - Base EVERY concept ONLY on the actual content in the items below. Do not invent classes, methods, or mechanisms that are not present.
-        - Use the Goal, Hypotheses, and Findings as strong guidance for relevance.
-        - Prefer refining or linking to EXISTING concepts when they fit.
-        - Each concept must be a genuine higher-dimensional abstraction (e.g. "LambdaMART reranking as attentional modulation" is good; generic fluff is bad).
-        - Output ONLY a valid JSON array. No explanations, no markdown.
+        Your job is to extract **5–7 high-quality, higher-dimensional abstract concepts** that genuinely connect the provided artifacts with neuroscience principles from Purves et al.
+
+        CRITICAL RULES (strictly enforced):
+        - ONLY extract a concept if there is **clear, direct evidence** in the items below.
+        - Never invent mechanisms, classes, or processes that are not explicitly present.
+        - Prefer **refining or extending** existing concepts over creating new ones.
+        - Focus on **cross-domain abstractions** (e.g. "LambdaMART reranking as a computational analogue of attentional gain modulation").
+        - Each concept must feel like a genuine intellectual bridge, not surface-level description.
+        - Output **ONLY** a valid JSON array. No explanations, no markdown, no extra text.
 
         Goal: {goal}
 
@@ -843,20 +848,19 @@ class PromptBuilder:
 
         Findings:
         {find_text}
-
         {existing_text}
 
-        RELEVANT CODE & BOOK EXCERPTS:
+        RELEVANT ARTIFACTS (code + theory excerpts):
         {items_text}
 
         Output format (JSON array only):
         [
         {{
-            "name": "short precise name",
-            "description": "1-2 sentence grounded mapping",
-            "type": "mechanism | strategy | principle | analogy",
+            "name": "Short, precise, evocative name",
+            "description": "1-2 sentence mapping that feels intellectually deep",
+            "type": "mechanism | strategy | principle | analogy | architecture",
             "score": 0.0-1.0,
-            "links_to": ["existing_concept_name_if_relevant"]
+            "links_to": ["existing_concept_name"] or []
         }}
         ]
         """
