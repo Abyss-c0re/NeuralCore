@@ -378,7 +378,7 @@ class PromptBuilder:
     @staticmethod
     def context_summary_instruction() -> str:
         """Instruction for how to use the context summary block."""
-        return "→ Use this context to stay aware. Never repeat the summary."
+        return "→ Use this context to stay aware."
 
     @staticmethod
     def recent_logs_section(log_lines: list) -> str:
@@ -922,21 +922,26 @@ class PromptBuilder:
 
     @staticmethod
     def analysis_multi_query_generation(analysis_query: str) -> str:
-        """Generates 4-6 diverse search queries to thoroughly investigate the analysis topic
-        using tool outcomes / accumulated knowledge."""
+        """Generates 4-6 diverse and effective search queries for any given topic."""
         return f"""
-        You are an expert research assistant. Given the following analysis goal, generate 4-6 diverse, specific search queries 
-        that will help retrieve the most relevant tool outcomes and findings from previous executions.
+    You are an expert research strategist. 
 
-        Rules:
-        - Make queries focused on different angles (technical details, errors, results, comparisons, timelines, etc.).
-        - Use precise terminology that might appear in tool outputs (command names, file paths, error messages, etc.).
-        - Include variations in scope: broad overview, specific components, potential issues.
-        - Return ONLY a valid JSON array of strings, e.g. ["query1", "query2", ...]
-        - Do not add explanations, numbering, or any text outside the JSON.
+    Given the following topic or analysis goal, generate **4 to 6 diverse, high-quality search queries** 
+    that will help retrieve the most relevant and useful information from a knowledge base.
 
-        Analysis goal: {analysis_query}
-        """.strip()
+    **Rules:**
+    - Make the queries cover different angles and aspects of the topic.
+    - Include a mix of broad exploratory queries and very specific, targeted ones.
+    - Use precise terminology that is likely to appear in documents, code, tool outputs, or reports.
+    - Vary the scope: conceptual, practical, comparative, problem-oriented, etc.
+    - Return **ONLY** a valid JSON array of strings. No explanations, no extra text, no markdown.
+
+    **Topic / Analysis Goal:**
+    {analysis_query}
+
+    **Output (JSON array only):**
+    ["query one here", "query two here", "query three here", ...]
+    """.strip()
 
     @staticmethod
     def analysis_report_synthesis(original_query: str, combined_research: str) -> str:
