@@ -290,6 +290,9 @@ class AgentState:
         self.sub_agent_results.clear()
         self.active_sub_agents.clear()
         self.messages.clear()
+        self.tasks.clear()
+        self.completed_task_ids.clear()
+        self.root_task = None
 
         self.phase = None
         self.status = "idle"
@@ -561,12 +564,14 @@ class AgentState:
             expected = step.get("expected_outcome", "") or "Tool executed successfully"
 
             # NEW: prefer "suggested_tool", fallback to old "suggested_tool_category"
-            suggested_tool = step.get("suggested_tool") or step.get("suggested_tool_category", "")
+            suggested_tool = step.get("suggested_tool") or step.get(
+                "suggested_tool_category", ""
+            )
 
             t = Task(
                 description=step.get("description", f"Step {i + 1}"),
                 expected_outcome=expected,
-                suggested_tool=suggested_tool,                    # ← NEW
+                suggested_tool=suggested_tool,  # ← NEW
                 metadata={
                     "original_index": i,
                     "suggested_tool_category": step.get("suggested_tool_category"),

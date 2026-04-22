@@ -1,5 +1,5 @@
 import json
-from typing import AsyncIterator, Any, Tuple, Optional
+from typing import AsyncIterator, Any, Tuple, List, Dict, Optional
 
 from neuralcore.agents.state import AgentState
 from neuralcore.agents.task import Task
@@ -10,24 +10,35 @@ from neuralcore.utils.prompt_builder import PromptBuilder
 logger = Logger.get_logger()
 
 
-async def is_multi_step_task(agent, query: str) -> bool:
-    prompt = PromptBuilder.is_multi_step_task(query)
+async def classify_intent(agent, query: str) -> str:
+    if not query or not query.strip():
+        return "CASUAL"
     try:
-        result = await agent.client.chat(prompt, temperature=0.0, max_tokens=10)
-        result_upper = result.strip().upper()
-        is_complex = "COMPLEX" in result_upper
-        logger.info(
-            f"[MULTI-STEP] LLM decided → {'COMPLEX' if is_complex else 'SIMPLE'} | Query: {query[:100]}..."
+        result = await agent.client.chat(
+            PromptBuilder.classify_intent(query), temperature=0.0, max_tokens=50
         )
-        return is_complex
-    except Exception:
-        return False
+        cleaned = result.strip().upper()
+        return "CASUAL" if "CASUAL" in cleaned else "TASK"
+    except Exception as e:
+        logger.warning(f"classify_intent failed, falling back: {e}")
+        return "CASUAL" if len(query.split()) < 25 else "TASK"
 
 
-async def ensure_subtasks_planned(
-    agent, state: AgentState
+async def plan_tasks_unified(
+    agent, state: "AgentState"
 ) -> AsyncIterator[Tuple[str, Any]]:
-    logger.info("[PLANNING START] _ensure_subtasks_planned called")
+    """
+    UNIFIED PLANNING METHOD (combines task_decomposition + is_multi_step_task logic).
+
+    Always performs structured planning via LLM.
+    Then decides SINGLE vs MULTI based on the **size** (len(steps)) of the generated plan:
+    - len(steps) <= 1  → treat as singular / simple task
+    - len(steps) >= 2  → treat as multi-step with dependencies
+
+    This replaces the previous two-LLM-call approach (is_multi_step_task + separate planning)
+    with a single, more efficient LLM call. The plan itself is the source of truth for complexity.
+    """
+    logger.info("[PLANNING START] Unified plan_tasks_unified called")
     yield ("phase_changed", {"phase": "planning"})
 
     planning_prompt = PromptBuilder.task_decomposition(state.task)
@@ -40,9 +51,13 @@ async def ensure_subtasks_planned(
         logger.info(f"[PLANNING RAW] LLM returned {len(plan_text)} chars")
 
         plan = json.loads(plan_text.strip())
-        steps = plan.get("steps", [])
+        steps: List[Dict] = plan.get("steps", [])
 
-        # Ensure expected_outcome is always a safe non-empty string before building
+        logger.info(
+            f"[PLANNING] LLM proposed {len(steps)} step(s) for query: {state.task[:80]}..."
+        )
+
+        # === Normalize expected_outcome for safety (used in both branches) ===
         for step in steps:
             expected = step.get("expected_outcome", "")
             if not expected or not str(expected).strip():
@@ -50,21 +65,60 @@ async def ensure_subtasks_planned(
                     "Step completed successfully (file located/analyzed/tool added)"
                 )
 
-        # === CENTRALIZED: use AgentState.build_tasks_from_plan for consistency ===
-        state.build_tasks_from_plan(steps)
-        state.current_task_index = 0
+        if len(steps) <= 1:
+            # ── SINGLE-STEP PATH (based on plan size) ──
+            if steps:
+                step0 = steps[0]
+                description = step0.get("description", state.task or "Single-step goal")
+                expected_outcome = step0.get(
+                    "expected_outcome", "Task completed successfully"
+                )
+            else:
+                description = state.task or "Single-step goal"
+                expected_outcome = "Task completed successfully"
 
-        logger.info(
-            f"[PLANNING] Created {len(state.tasks)} Task objects via build_tasks_from_plan"
-        )
+            simple_task = Task(
+                description=description,
+                expected_outcome=expected_outcome,
+            )
+            state.tasks = [simple_task]
+            state.root_task = Task(description=state.task or "Root task")
+            state.root_task.add_subtask(simple_task)
+            state.planned_tasks = [description]
+            state.task_expected_outcomes = [expected_outcome]
+            state.current_task_index = 0
 
-        for i, task in enumerate(state.tasks):
-            logger.debug(
-                f"  Task {i}: {task.description[:80]}... | expected='{task.expected_outcome}' | deps={task.dependencies}"
+            logger.info("[SINGLE-STEP] Plan size=1 → initialized single Task object")
+            yield (
+                "planning_complete",
+                {
+                    "planned_tasks": state.planned_tasks,
+                    "is_single_step": True,
+                    "num_steps": 1,
+                },
             )
 
-        yield ("planning_complete", {"planned_tasks": state.planned_tasks})
-        logger.info("[PLANNING END] Planning completed successfully")
+        else:
+            state.build_tasks_from_plan(steps)
+            state.current_task_index = 0
+
+            logger.info(
+                f"[MULTI-STEP] Plan size={len(steps)} → created {len(state.tasks)} Task objects via build_tasks_from_plan"
+            )
+            for i, task in enumerate(state.tasks):
+                logger.debug(
+                    f"  Task {i}: {task.description[:80]}... | expected='{task.expected_outcome}' | deps={task.dependencies}"
+                )
+
+            yield (
+                "planning_complete",
+                {
+                    "planned_tasks": state.planned_tasks,
+                    "is_single_step": False,
+                    "num_steps": len(steps),
+                },
+            )
+            logger.info("[PLANNING END] Planning completed successfully")
 
     except json.JSONDecodeError as e:
         logger.error(f"Planning JSON parse failed: {e}")
@@ -77,7 +131,10 @@ async def ensure_subtasks_planned(
         state.planned_tasks = [state.task]
         state.task_expected_outcomes = ["Task completed successfully"]
         state.current_task_index = 0
-        yield ("planning_fallback", {"reason": "JSON parse error"})
+        yield (
+            "planning_fallback",
+            {"reason": "JSON parse error", "is_single_step": True},
+        )
 
     except Exception as e:
         logger.error(f"Planning failed: {e}", exc_info=True)
@@ -90,43 +147,15 @@ async def ensure_subtasks_planned(
         state.planned_tasks = [state.task]
         state.task_expected_outcomes = ["Task completed successfully"]
         state.current_task_index = 0
-        yield ("planning_fallback", {"reason": str(e)})
-
-
-async def classify_intent(agent, query: str) -> str:
-    if not query or not query.strip():
-        return "CASUAL"
-    try:
-        context_messages = await agent.context_manager.provide_context(
-            query=query,
-            max_input_tokens=8000,
-            reserved_for_output=512,
-            system_prompt="You are an expert at classifying user intent precisely and quickly.",
-            lightweight_agentic=True,
-            state=getattr(agent, "state", None),
-            include_logs=True,
-            chat=True,
-        )
-        classification_prompt = PromptBuilder.classify_intent(query)
-        if context_messages and context_messages[-1]["role"] == "user":
-            context_messages[-1]["content"] = classification_prompt
-        else:
-            context_messages.append({"role": "user", "content": classification_prompt})
-
-        result = await agent.client.chat(
-            context_messages, temperature=0.0, max_tokens=20
-        )
-        cleaned = result.strip().upper()
-        return "CASUAL" if "CASUAL" in cleaned else "TASK"
-    except Exception as e:
-        logger.warning(f"classify_intent failed, falling back: {e}")
-        return "CASUAL" if len(query.split()) < 25 else "TASK"
+        yield ("planning_fallback", {"reason": str(e), "is_single_step": True})
 
 
 async def goal_driven_task_loop(
     agent, state: AgentState, target_loop: str
 ) -> AsyncIterator[Tuple[str, Any]]:
-    """Robust multi-step loop with persistent tool management + reliable final synthesis."""
+    """Robust multi-step loop with persistent tool management + reliable final synthesis.
+    NOTE: This generator is driven externally (e.g. chat_tool_loop). Only AgentState persists
+    across iterations. All local variables are reset on every call."""
     is_multi_step = len(state.tasks) > 1
     marker = PromptBuilder.FINAL_ANSWER_MARKER
     state.increment_loop()
@@ -165,7 +194,7 @@ async def goal_driven_task_loop(
                         f"[TOOL MGMT] Could not pre-load {suggested_tool}: {e}"
                     )
 
-        # Rich previous-results context
+        # Rich previous-results context (from persisted state.tool_results)
         previous_results_context = ""
         if state.tool_results:
             file_contents = []
@@ -244,14 +273,9 @@ async def goal_driven_task_loop(
         query=current_query,
         max_input_tokens=agent.max_tokens,
         reserved_for_output=12000,
-        system_prompt=PromptBuilder.agent_objective_reminder(state)
-        + "\n\n"
-        + PromptBuilder.sub_task_execution_system_prompt()
-        + f"\n\nWhen you finish the current sub-task and expected_outcome is verified, output exactly: {marker}",
         include_logs=True,
         chat=False,
         lightweight_agentic=True,
-        state=state,
     )
 
     queue = await agent.client.stream_with_tools(
@@ -316,7 +340,7 @@ async def goal_driven_task_loop(
         result = state.tool_results[-1].get("result") if state.tool_results else None
         state.mark_current_task_complete(result=result)
 
-        # === LAST STEP → set goal reached but DO NOT return yet ===
+        # === LAST STEP → set goal reached + RETURN (let outer loop do synthesis) ===
         if not is_multi_step or state.current_task_index >= len(state.tasks) - 1:
             state.full_reply = f"Task completed successfully. {marker}"
             state.is_complete = True
@@ -328,24 +352,22 @@ async def goal_driven_task_loop(
                 {"full_reply": state.full_reply, "tool_calls": [], "is_complete": True},
             )
             yield ("phase_changed", {"phase": "completed"})
-            # DO NOT return here — fall through to final synthesis
+            state.goal_achieved = True
+
         else:
             state.current_task_index += 1
             if hasattr(state, "advance_to_next_ready_task"):
                 state.advance_to_next_ready_task()
 
             logger.info(f"[ADVANCE] Sub-task {state.current_task_index} ready → next")
-            yield ("phase_changed", {"phase": "executing_tools"})
+            yield ("phase_changed", {"phase": "restarting_loop"})
             state.request_loop_restart(
                 reason="Tool executed — advancing to next sub-task",
                 target_loop=target_loop,
             )
-            yield ("phase_changed", {"phase": "restarting_loop"})
-            return
 
     # ====================== LLM VALIDATION (multi-step only) ======================
     if is_multi_step and strong_completion and current_task and not state.goal_reached:
-        # ... (validation block unchanged) ...
         logger.info(
             f"[STEP VALIDATION] Starting LLM validation for step {state.current_task_index + 1}"
         )
@@ -367,11 +389,9 @@ async def goal_driven_task_loop(
                 query=validation_query,
                 max_input_tokens=agent.max_tokens,
                 reserved_for_output=2500,
-                system_prompt=PromptBuilder.validation_system_prompt(),
                 include_logs=True,
                 chat=False,
                 lightweight_agentic=False,
-                state=state,
             )
             validation_result = await agent.client.chat(
                 validation_messages, temperature=0.0, max_tokens=20
@@ -386,12 +406,11 @@ async def goal_driven_task_loop(
                 f"[STEP VALIDATION FAILED] Step {state.current_task_index} not met."
             )
             state.increment_empty_loop()
+            yield ("phase_changed", {"phase": "restarting_loop"})
             state.request_loop_restart(
                 reason="LLM validation failed — outcome not met",
                 target_loop=target_loop,
             )
-            yield ("phase_changed", {"phase": "restarting_loop"})
-            return
 
         logger.info(
             f"[STEP VALIDATION PASSED] Step {state.current_task_index + 1} validated"
@@ -400,18 +419,19 @@ async def goal_driven_task_loop(
 
         if state.current_task_index >= len(state.tasks):
             state.mark_goal_achieved("All planned sub-tasks completed and validated")
+            state.goal_achieved = True
         else:
             if hasattr(state, "advance_to_next_ready_task"):
                 state.advance_to_next_ready_task()
             state.empty_loops = 0
             state.action_restarts = 0
+            yield ("phase_changed", {"phase": "restarting_loop"})
+
             state.request_loop_restart(
                 reason="Sub-task validated → advancing",
                 target_loop=target_loop,
                 reset_counters=False,
             )
-            yield ("phase_changed", {"phase": "restarting_loop"})
-            return
 
     # ====================== SAFE ANTI-REPEAT / ACTION / EMPTY LOOP ======================
     if tools_called_this_turn and is_multi_step and not strong_completion:
@@ -419,11 +439,10 @@ async def goal_driven_task_loop(
             f"[ANTI-REPEAT] Tool called on step {state.current_task_index} but no strong completion."
         )
         state.increment_empty_loop()
+        yield ("phase_changed", {"phase": "restarting_loop"})
         state.request_loop_restart(
             reason="Tool called but no strong completion.", target_loop=target_loop
         )
-        yield ("phase_changed", {"phase": "restarting_loop"})
-        return
 
     action_restart_triggered = False
     action_continuation = None
@@ -445,15 +464,15 @@ async def goal_driven_task_loop(
         state.increment_action_restart()
         if state.action_restarts > 3:
             state.mark_goal_achieved("Max action restarts reached")
+            yield ("phase_changed", {"phase": "restarting_loop"})
             state.request_loop_stop(
                 reason="Max action restarts reached", target_loop=target_loop
             )
         else:
+            yield ("phase_changed", {"phase": "restarting_loop"})
             state.request_loop_restart(
                 reason="Action restart requested", target_loop=target_loop
             )
-            yield ("phase_changed", {"phase": "restarting_loop"})
-            return
 
     if not tools_called_this_turn and not has_marker and not action_restart_triggered:
         state.increment_empty_loop()
@@ -463,11 +482,18 @@ async def goal_driven_task_loop(
                 reason="Forced completion after empty loops", target_loop=target_loop
             )
         else:
+            yield ("phase_changed", {"phase": "restarting_loop"})
             state.request_loop_restart(
                 reason="Empty loop continuation", target_loop=target_loop
             )
-            yield ("phase_changed", {"phase": "restarting_loop"})
-            return
+
     else:
         state.empty_loops = 0
 
+    # If we somehow reached the end without goal_achieved or explicit restart, force restart
+    if not state.goal_reached:
+        logger.warning("Loop iteration ended without goal_achieved — forcing restart")
+        state.request_loop_restart(
+            reason="Loop ended without goal", target_loop=target_loop
+        )
+        yield ("phase_changed", {"phase": "restarting_loop"})
