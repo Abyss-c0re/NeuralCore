@@ -55,6 +55,7 @@ class KnowledgeBase:
         self._last_reindex = 0.0
 
         self._load_index_sync()
+        self._reindex_lock = asyncio.Lock()
 
         logger.info(
             f"✅ KnowledgeBase initialized | root={self.base_folder} | "
@@ -63,23 +64,29 @@ class KnowledgeBase:
 
     # ====================== START BACKGROUND WATCHER (MISSING BEFORE) ======================
     async def start_background_watcher(self):
-        """Start the background reindex watcher with immediate first scan."""
+        """Start the background reindex watcher with non-blocking first scan."""
         if not (self.enabled and self.auto_reindex):
             logger.info("KnowledgeBase auto-reindex is disabled")
             return
 
-        # === IMMEDIATE FIRST SCAN ===
-        logger.info("🔄 Performing initial reindex scan...")
+        # === NON-BLOCKING FIRST SCAN ===
+        logger.info("🔄 Performing initial reindex scan (background)...")
+        asyncio.create_task(self._run_initial_reindex())   # ← Run in background
+
+        # Start periodic watcher
+        asyncio.create_task(self._background_watcher())
+        logger.info("🔄 Background reindex watcher started (periodic every 5 min)")
+
+    async def _run_initial_reindex(self):
+        """Run the first reindex in background without blocking UI."""
         try:
             count = await self.reindex_changed_files()
             if count > 0:
                 logger.info(f"✅ Initial reindex completed — {count} files indexed")
+            else:
+                logger.debug("Initial reindex completed — no changes")
         except Exception as e:
-            logger.error(f"Initial reindex failed: {e}")
-
-        # Then start the periodic watcher
-        asyncio.create_task(self._background_watcher())
-        logger.info("🔄 Background reindex watcher started (periodic every 5 min)")
+            logger.error(f"Initial reindex failed: {e}", exc_info=True)
 
     # ====================== INDEX MANAGEMENT ======================
     def _load_index_sync(self):
@@ -172,8 +179,6 @@ class KnowledgeBase:
         await self._trigger_consolidation()
         return key
 
-
-
     async def _index_single_file(
         self, file_path: Path, category_path: str, source: str = "file"
     ) -> Optional[str]:
@@ -186,14 +191,17 @@ class KnowledgeBase:
         item_folder.mkdir(parents=True, exist_ok=True)
 
         try:
-            content_or_stream = await _read_file(self.agent, str(file_path))
+            # === Offload heavy file reading to thread ===
+            content_or_stream = await asyncio.to_thread(
+                lambda: asyncio.run(_read_file(self.agent, str(file_path)))
+            )
         except Exception as e:
             logger.error(f"Failed to read {file_path}: {e}")
             return None
 
-        # === PROPERLY HANDLE STRING vs STREAMING ===
+        # === Consume stream or string (lightweight) ===
         if isinstance(content_or_stream, AsyncIterable):
-            logger.info(f"📄 Streaming PDF/DOCX detected — consuming full content...")
+            logger.info("📄 Streaming PDF/DOCX detected — consuming full content...")
             content_parts = []
             async for chunk in content_or_stream:
                 content_parts.append(chunk)
@@ -206,53 +214,40 @@ class KnowledgeBase:
             logger.warning(f"Very little or no text extracted from {file_path.name}")
             return None
 
-        # === CHUNKING (same as ContextManager) ===
-        if len(content_str) < 1500:
-            chunks = [content_str]
-        else:
-            if hasattr(self.context_manager, "tokenizer") and self.context_manager.tokenizer:
-                chunks = self.context_manager.tokenizer.split_text_into_chunks(
-                    content_str, max_tokens=768, overlap=128
-                )
-                chunks = chunks[:20]
-            else:
-                chunk_size = 3000
-                overlap = 400
-                chunks = []
-                start = 0
-                while start < len(content_str):
-                    end = start + chunk_size
-                    chunks.append(content_str[start:end])
-                    start = end - overlap
-                chunks = chunks[:20]
+        # === REUSE _chunk_text (lightweight) ===
+        chunk_items = self.context_manager._chunk_text(
+            content_str, key, "file", merge=True
+        )
 
-        chunks = [c.strip() for c in chunks if c.strip()]
-
-        if not chunks:
-            logger.warning(f"No valid chunks after processing {file_path.name}")
+        if not chunk_items:
+            logger.warning(f"No valid content after processing {file_path.name}")
             return None
 
-        logger.info(f"📄 {file_path.name} → {len(chunks)} chunks")
+        merged_item = chunk_items[0]
+        final_content = merged_item.content
+        total_original_chunks = merged_item.metadata.get("total_chunks", 1)
 
-        # === EMBEDDINGS + SAVE (same as before) ===
-        embeddings_list = []
-        content_lines = []
-        for i, chunk in enumerate(chunks):
-            emb = await self.context_manager.fetch_embedding(chunk, prefix="passage")
-            if emb.size > 0:
-                embeddings_list.append(emb)
-            content_lines.append(json.dumps({"chunk_index": i, "text": chunk}))
+        logger.info(f"📄 {file_path.name} → 1 merged item ({total_original_chunks} original chunks)")
 
-        if not embeddings_list:
-            logger.warning(f"No embeddings generated for {file_path}")
+        # === Offload heavy embedding to thread pool ===
+        emb = await asyncio.to_thread(
+            lambda: asyncio.run(
+                self.context_manager.fetch_embedding(final_content, prefix="passage")
+            )
+        )
+
+        if emb.size == 0:
+            logger.warning(f"No embedding generated for {file_path}")
             return None
 
+        # === Save as SINGLE item (lightweight) ===
         content_path = item_folder / "content.jsonl"
         async with aiofiles.open(content_path, "w", encoding="utf-8") as f:
-            await f.write("\n".join(content_lines))
+            await f.write(json.dumps({"chunk_index": 0, "text": final_content}))
 
-        emb_dict = {f"chunk_{i}": emb for i, emb in enumerate(embeddings_list)}
-        await asyncio.to_thread(np.savez_compressed, item_folder / "embeddings.npz", **emb_dict)
+        await asyncio.to_thread(
+            np.savez_compressed, item_folder / "embeddings.npz", chunk_0=emb
+        )
 
         meta = {
             "key": key,
@@ -263,10 +258,12 @@ class KnowledgeBase:
             "hash": hashlib.md5(open(file_path, "rb").read()).hexdigest(),
             "mtime": file_path.stat().st_mtime,
             "size_bytes": file_path.stat().st_size,
-            "chunk_count": len(chunks),
-            "embedding_dim": len(embeddings_list[0]) if embeddings_list else 0,
+            "chunk_count": 1,
+            "embedding_dim": len(emb),
             "source": source,
             "added_at": datetime.now().isoformat(),
+            "is_merged": True,
+            "original_chunk_count": total_original_chunks,
         }
         async with aiofiles.open(item_folder / "meta.json", "w", encoding="utf-8") as f:
             await f.write(json.dumps(meta, indent=2))
@@ -278,17 +275,17 @@ class KnowledgeBase:
             "hash": meta["hash"],
             "mtime": meta["mtime"],
             "size_bytes": meta["size_bytes"],
-            "chunk_count": len(chunks),
+            "chunk_count": 1,
             "embedding_dim": meta["embedding_dim"],
             "archived": False,
             "source": source,
             "added_at": meta["added_at"],
+            "is_merged": True,
         }
 
         self._update_stats()
-        logger.info(f"✅ Indexed {file_path.name} → {category_path} ({len(chunks)} chunks)")
+        logger.info(f"✅ Indexed {file_path.name} → {category_path} (1 merged item)")
         return key
-
     # ====================== RETRIEVAL ======================
     async def retrieve(
         self, query: str, k: int = 12, categories: Optional[List[str]] = None,
@@ -371,57 +368,58 @@ class KnowledgeBase:
         if not self.enabled:
             return 0
 
-        logger.info("🔄 Starting incremental reindex scan...")
-        indexed_count = 0
+        async with self._reindex_lock:           # ← Prevent double runs
+            logger.info("🔄 Starting incremental reindex scan...")
+            indexed_count = 0
 
-        SKIP_FILES = {"content.jsonl", "embeddings.npz", "meta.json", "index.json"}
-        skip_dirs = {"_manual", "_archive", "__pycache__", "items"}
+            SKIP_FILES = {"content.jsonl", "embeddings.npz", "meta.json", "index.json"}
+            skip_dirs = {"_manual", "_archive", "__pycache__", "items"}
 
-        for root, dirs, files in os.walk(self.base_folder):
-            dirs[:] = [d for d in dirs if d not in skip_dirs]
-            if "items" in Path(root).parts:
-                continue
-
-            for filename in files:
-                if filename.startswith(".") or filename in SKIP_FILES:
+            for root, dirs, files in os.walk(self.base_folder):
+                dirs[:] = [d for d in dirs if d not in skip_dirs]
+                if "items" in Path(root).parts:
                     continue
 
-                file_path = Path(root) / filename
-                if any(part.startswith("kb_") for part in file_path.parts):
-                    continue
-
-                try:
-                    rel_path = file_path.relative_to(self.base_folder)
-                    category_path = str(rel_path.parent) if rel_path.parent != Path(".") else "general"
-
-                    existing = None
-                    for key, meta in self.index.get("items", {}).items():
-                        if meta.get("original_path") == str(file_path):
-                            existing = meta
-                            break
-
-                    current_mtime = file_path.stat().st_mtime
-                    current_size = file_path.stat().st_size
-
-                    if existing and existing.get("mtime") == current_mtime and existing.get("size_bytes") == current_size:
+                for filename in files:
+                    if filename.startswith(".") or filename in SKIP_FILES:
                         continue
 
-                    await self._index_single_file(file_path, category_path, source="auto")
-                    indexed_count += 1
+                    file_path = Path(root) / filename
+                    if any(part.startswith("kb_") for part in file_path.parts):
+                        continue
 
-                except Exception as e:
-                    logger.warning(f"Failed to process {file_path}: {e}")
+                    try:
+                        rel_path = file_path.relative_to(self.base_folder)
+                        category_path = str(rel_path.parent) if rel_path.parent != Path(".") else "general"
 
-        await self._save_index()
+                        existing = None
+                        for key, meta in self.index.get("items", {}).items():
+                            if meta.get("original_path") == str(file_path):
+                                existing = meta
+                                break
 
-        if indexed_count > 0:
-            logger.info(f"✅ Reindex complete — {indexed_count} files updated")
-            await self._trigger_consolidation()
-        else:
-            logger.debug("Reindex complete — no changes detected")
+                        current_mtime = file_path.stat().st_mtime
+                        current_size = file_path.stat().st_size
 
-        return indexed_count
+                        if existing and existing.get("mtime") == current_mtime and existing.get("size_bytes") == current_size:
+                            continue
 
+                        await self._index_single_file(file_path, category_path, source="auto")
+                        indexed_count += 1
+                        await asyncio.sleep(0)
+
+                    except Exception as e:
+                        logger.warning(f"Failed to process {file_path}: {e}")
+
+            await self._save_index()
+
+            if indexed_count > 0:
+                logger.info(f"✅ Reindex complete — {indexed_count} files updated")
+                await self._trigger_consolidation()
+            else:
+                logger.debug("Reindex complete — no changes detected")
+
+            return indexed_count
     # ====================== TRAINING TRIGGER ======================
     async def _trigger_consolidation(self):
         try:
