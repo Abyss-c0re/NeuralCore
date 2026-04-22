@@ -16,29 +16,21 @@ from neuralcore.agents.state import AgentState
 from neuralcore.cognition.items import KnowledgeItem, Topic
 from neuralcore.cognition.consolidator import KnowledgeConsolidator
 from neuralcore.cognition.knowledge import KnowledgeBase
-
-# scikit-learn for sparse vectors
 from sklearn.feature_extraction.text import TfidfVectorizer
-
 from fastembed import TextEmbedding
-
 
 # ─────────────────────────────────────────────────────────────
 # TOPIC & OFF-TOPIC DETECTION
 # ─────────────────────────────────────────────────────────────
-MSG_THR = 0.55  # Slightly higher → more stable topic matching
-NUM_MSG = 8  # More messages considered for analysis
-OFF_THR = 0.65  # Lowered a bit → catches drifting conversation earlier
+MSG_THR = 0.55  #
+NUM_MSG = 8
+OFF_THR = 0.65
 OFF_FREQ = 4
-SLICE_SIZE = 6  # Bigger window for off-topic detection
+SLICE_SIZE = 6
 
-# ─────────────────────────────────────────────────────────────
-# CHUNKING STRATEGY (Best balance for 64GB RAM)
-# ─────────────────────────────────────────────────────────────
-CHUNK_SIZE_TOKENS = 768  # ← Recommended increase from 512
-CHUNK_OVERLAP_TOKENS = 128  # ~17% overlap (good sweet spot)
-TOOL_OUTCOME_NO_CHUNK_THRESHOLD = 1500  # Only chunk very large tool outputs
-
+CHUNK_SIZE_TOKENS = 768
+CHUNK_OVERLAP_TOKENS = 128  # ~17% overlap
+TOOL_OUTCOME_NO_CHUNK_THRESHOLD = 1500  #
 logger = Logger.get_logger()
 
 
@@ -52,13 +44,9 @@ class ContextManager:
         clients = get_clients()
         self.client = clients.get("main")
         self.embeddings = clients.get("embeddings")
-
         loader = get_loader()
         embed_config = loader.get_client_config("embeddings") or {}
-
         self.fast_embedder = self._init_fastembed(embed_config)
-
-        # Tokenizer setup (unchanged)
         self.tokenizer = None
         try:
             self.tokenizer = TextTokenizer.get_instance()
@@ -70,44 +58,29 @@ class ContextManager:
                 if not tokenizer_source:
                     raise ValueError("Tokenizer not found in main client config")
                 self.tokenizer = TextTokenizer(tokenizer_source)
-
         if self.client and not getattr(self.client, "tokenizer", None):
             self.client.tokenizer = self.tokenizer
         if self.embeddings and not getattr(self.embeddings, "tokenizer", None):
             self.embeddings.tokenizer = self.tokenizer
-
         self.similarity_threshold = MSG_THR
         self.topics: List[Topic] = []
         self.current_topic = Topic("Initial topic")
         self.short_term_mem: Dict[str, KnowledgeItem] = {}
         self.embedding_cache: Dict[str, np.ndarray] = {}
-
         # Sparse index (TF-IDF) – now lazy + async
         self.tfidf_vectorizer: TfidfVectorizer | None = None
         self.tfidf_matrix = None
         self.kb_keys_ordered: List[str] = []
         self._sparse_index_dirty = True
         self._last_rebuild_size = 0
-
         self.fs_state = {"cwd": ".", "known_folders": [], "negative_findings": []}
-
         self.action_log: List[Dict[str, Any]] = []
         self.files_checked: set[str] = set()
-        self.tools_executed: List[str] = []
         self.context_stats = {
             "kb_added": 0,
             "messages_added": 0,
             "topics_switched": 0,
             "prunes": 0,
-        }
-        self.investigation_state = {
-            "goal": "",
-            "subtasks": [],
-            "completed": [],
-            "pending": [],
-            "findings": [],
-            "hypotheses": [],
-            "unknowns": [],
         }
 
         self.mode: str = "chat"
@@ -122,43 +95,34 @@ class ContextManager:
     def _init_fastembed(self, embed_config: dict):
         """Helper method to initialize FastEmbed with full path handling."""
         model_name = embed_config.get("fastembed_model", "BAAI/bge-small-en-v1.5")
-
         local_path = embed_config.get("fastembed_local_path")
         cache_dir = embed_config.get("fastembed_cache_dir")
         local_files_only = embed_config.get("fastembed_local_files_only", False)
-
         init_kwargs = {"model_name": model_name}
-
         # === Handle tilde expansion for local_path ===
         if local_path:
-            # Expand ~, ~user, and environment variables
             expanded_local = os.path.expanduser(local_path)
-            expanded_local = os.path.expandvars(
-                expanded_local
-            )  # in case someone uses $HOME
+            expanded_local = os.path.expandvars(expanded_local)
             expanded_local = os.path.abspath(expanded_local)  # make it absolute
-
             if os.path.isdir(expanded_local):
                 init_kwargs["specific_model_path"] = expanded_local
                 logger.info(f"✅ FastEmbed: Loading from local path → {expanded_local}")
             else:
                 logger.warning(
-                    f"⚠️  fastembed_local_path '{local_path}' (resolved to '{expanded_local}') does not exist. "
+                    f"⚠️ fastembed_local_path '{local_path}' (resolved to '{expanded_local}') does not exist. "
                     f"Falling back to Hugging Face cache/download."
                 )
-
-        # === Cache directory (also expand ~) ===
+        # === Cache directory===
         if cache_dir:
             expanded_cache = os.path.abspath(
                 os.path.expanduser(os.path.expandvars(cache_dir))
             )
             init_kwargs["cache_dir"] = expanded_cache
-            logger.info(f"   FastEmbed cache directory: {expanded_cache}")
-
+            logger.info(f" FastEmbed cache directory: {expanded_cache}")
         # === Offline mode ===
         if local_files_only:
             init_kwargs["local_files_only"] = True
-            logger.info("   FastEmbed: local_files_only=True (strict offline mode)")
+            logger.info(" FastEmbed: local_files_only=True (strict offline mode)")
             # Initialize
         return TextEmbedding(**init_kwargs)
 
@@ -172,28 +136,22 @@ class ContextManager:
 
     def reset(self, hard: bool = True) -> None:
         """Reset ContextManager to a clean state.
-
         Args:
-            hard: If True (default), clears embedding cache and sparse index completely.
-                  If False, keeps cache for faster re-initialization.
+            hard: If True (default), clears **everything** including embedding cache and short-term memory.
+                  If False, preserves some caches (e.g. embeddings) so it survives across sub-tasks.
         """
         logger.info(f"ContextManager.reset() called — hard={hard}")
-
-        # Core identity & mode
         self.mode = "chat"
         self.current_topic = Topic("Initial topic")
         self.topics.clear()
-
-        # Knowledge Base & embeddings
         self.short_term_mem.clear()
-        self.embedding_cache.clear() if hard else None
+        if hard:
+            self.embedding_cache.clear()
         self._sparse_index_dirty = True
         self.tfidf_matrix = None
         self.kb_keys_ordered.clear()
         self._last_rebuild_size = 0
-        self.tfidf_vectorizer = None  # will be re-created on next use
-
-        # Histories & topics
+        self.tfidf_vectorizer = None
         self.pure_chat_history.clear()
         for topic in self.topics:
             topic.history.clear()
@@ -204,27 +162,10 @@ class ContextManager:
         self.current_topic.archived_history.clear()
         self.current_topic.history_tokens.clear()
         self.current_topic.history_embeddings.clear()
-
-        # Tool & action tracking
         self.tools_executed.clear()
         self.tool_call_history.clear()
         self.action_log.clear()
         self.files_checked.clear()
-
-        # Investigation & task state
-        self.investigation_state = {
-            "goal": "",
-            "subtasks": [],
-            "completed": [],
-            "pending": [],
-            "findings": [],
-            "hypotheses": [],
-            "unknowns": [],
-        }
-        if hasattr(self, "_task_contexts"):
-            self._task_contexts.clear()
-
-        # Stats & FS state
         self.context_stats = {
             "kb_added": 0,
             "messages_added": 0,
@@ -232,12 +173,9 @@ class ContextManager:
             "prunes": 0,
         }
         self.fs_state = {"cwd": ".", "known_folders": [], "negative_findings": []}
-
-        # Clear any pending locks if needed (but _mode_lock stays alive)
         logger.info(
             f"ContextManager reset complete. "
-            f"KB cleared: {len(self.short_term_mem)} items remaining. "
-            f"Mode: {self.mode}"
+            f"KB items: {len(self.short_term_mem)} | Mode: {self.mode}"
         )
 
     def clear_tool_history(self) -> None:
@@ -289,37 +227,24 @@ class ContextManager:
             self.important_files.add(filepath)
             self.parent.files_checked.add(filepath)
 
-        def add_finding(self, finding: str):
-            cleaned = finding[:400]
-            self.findings.append(cleaned)
-            self.parent.add_finding(cleaned)
-
-        def add_hypothesis(self, hypothesis: str):
-            self.hypotheses.append(hypothesis[:300])
-
         def get_context(self, max_tokens: int = 3500) -> str:
             lines = [PromptBuilder.task_context_header(self.name)]
-
             if self.important_files:
                 lines.append(
                     PromptBuilder.task_context_important_files_section(
                         list(self.important_files)
                     )
                 )
-
             if self.key_results:
                 lines.append(
                     PromptBuilder.task_context_key_results_section(self.key_results)
                 )
-
             if self.findings:
                 lines.append(PromptBuilder.task_context_findings_section(self.findings))
-
             if self.hypotheses:
                 lines.append(
                     PromptBuilder.task_context_hypotheses_section(self.hypotheses)
                 )
-
             text = "\n".join(lines)
             return text[: max_tokens * 4]
 
@@ -328,7 +253,6 @@ class ContextManager:
             self._task_contexts: Dict[str, ContextManager.TaskContext] = {}
         if task_name not in self._task_contexts:
             self._task_contexts[task_name] = self.TaskContext(task_name, self)
-            self.add_subtask(task_name)
             logger.info(f"Created new task context: {task_name}")
         return self._task_contexts[task_name]
 
@@ -343,17 +267,13 @@ class ContextManager:
     ) -> np.ndarray:
         if not text or not text.strip():
             return np.array([])
-
         prefix_str = prefix or "default"
         cache_key = hashlib.md5(
             f"{prefix_str}:{text[:1000]}".encode("utf-8")
         ).hexdigest()
-
         if cache_key in self.embedding_cache:
             return self.embedding_cache[cache_key]
-
         emb = np.array([])
-
         if self.fast_embedder is not None:
             try:
 
@@ -373,16 +293,13 @@ class ContextManager:
                 emb = await asyncio.to_thread(_embed_sync)
             except Exception as e:
                 logger.warning(f"FastEmbed failed: {e}")
-
         elif self.embeddings is not None:
             try:
                 emb = await self.embeddings.fetch_embedding(text, size)
             except Exception as e:
                 logger.warning(f"Fallback embeddings failed: {e}")
-
         if emb.size > 0 and np.isfinite(emb).all():
             self.embedding_cache[cache_key] = emb
-
         return emb
 
     def _log_action(
@@ -408,7 +325,7 @@ class ContextManager:
         """Lightweight extraction of likely file paths, filenames, IDs from query."""
         if not query:
             return []
-        # Simple but effective: paths, filenames with extensions, quoted strings, etc.
+
         patterns = [
             r'["\']([^"\']+\.(?:py|js|ts|json|txt|md|log|csv|yaml|yml|toml))["\']',  # common extensions
             r'["\']([/\\][^"\']+)["\']',  # paths
@@ -417,7 +334,7 @@ class ContextManager:
         mentions = []
         for pat in patterns:
             mentions.extend(re.findall(pat, query))
-        # Also plain words that might be filenames/IDs (fallback)
+
         words = re.findall(r"\b\w{3,}\b", query)
         mentions.extend([w for w in words if "." in w or "/" in w or "\\" in w])
         return list(dict.fromkeys(mentions))  # dedup preserve order
@@ -439,27 +356,22 @@ class ContextManager:
                 f"[{msg['role'].upper()}] {msg['content'][:120]}..." for msg in recent
             )
             return "\n".join(lines)
-
         # ── Calculate budget split ─────────────────────────────────────
         msg_budget = int(max_chars * 0.40)  # 40% → messages
         tools_budget = max_chars - msg_budget  # 60% → tools + other sections
 
-        # ── Build base sections (files, tools, kb, tokens, topic) ─────
         files = sorted(list(self.files_checked))
         tools_executed = self.tools_executed
         recent_messages = self.current_topic.history[-max_messages:]
-
         message_summaries = [
             f"[{msg['role'].upper()}] {msg['content'][:200]}{'...' if len(msg['content']) > 200 else ''}"
             for msg in recent_messages
         ]
-
         total_tokens = (
             sum(self.current_topic.history_tokens)
             if self.current_topic.history_tokens
             else 0
         )
-
         lines = [
             PromptBuilder.context_summary_header(),
             PromptBuilder.context_summary_files_section(files),
@@ -471,59 +383,39 @@ class ContextManager:
             PromptBuilder.context_summary_last_messages_header(),
         ]
 
-        # Add messages — but respect msg_budget
         msg_section = "\n".join(message_summaries)
         if len(msg_section) > msg_budget:
             msg_section = (
                 msg_section[:msg_budget].rsplit("\n", 1)[0] + "\n…(messages truncated)"
             )
-
         lines.extend([msg_section, ""])
 
-        # ── Investigation state (keep as before) ───────────────────────
-        inv = self.investigation_state
-        inv_block = PromptBuilder.context_summary_investigation_block(
-            goal=inv["goal"], pending=inv["pending"], completed=inv["completed"]
-        )
-        lines.extend(
-            [PromptBuilder.context_summary_investigation_header(), inv_block, ""]
-        )
-
-        # ── Add last 4 tool outcomes (using the remaining budget) ───────
         try:
-            # We run this synchronously via asyncio.run_coroutine_threadsafe or to_thread
-            # but since get_context_summary is sync, we use to_thread for safety
             recent_tools = asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: asyncio.run(
                     self._get_recent_tool_outcomes(
                         limit=4,
-                        max_tokens_per_result=800,  # per tool limit
+                        max_tokens_per_result=800,
                         max_total_tokens=tools_budget,
                     )
                 ),
             )
-            # Wait for result (this is safe inside agent context as it's short)
             recent_tools = (
                 asyncio.get_event_loop().run_until_complete(recent_tools)
                 if asyncio.get_event_loop().is_running()
                 else ""
             )
-
             if recent_tools and recent_tools.strip():
                 lines.append(PromptBuilder.context_summary_recent_tools_header())
                 lines.append(recent_tools)
         except Exception as e:
             logger.warning(f"Failed to fetch recent tool outcomes for summary: {e}")
-
-        # ── Final truncation safety ─────────────────────────────────────
         full_summary = "\n".join(lines)
-
         if len(full_summary) > max_chars:
             cutoff = max_chars - 60
             summary_lines = full_summary[:cutoff].rsplit("\n", 1)[0]
             full_summary = summary_lines + "\n…(summary truncated)"
-
         logger.debug(
             f"get_context_summary generated {len(full_summary)} chars "
             f"(~40% messages, ~60% tools+metadata)"
@@ -569,34 +461,15 @@ class ContextManager:
             logger.info(f"[PRUNE] Sub-agent noise cleaned: {pruned} messages removed")
             self.context_stats["prunes"] += 1
 
-    def set_goal(self, goal: str):
-        self.investigation_state["goal"] = goal
-
-    def add_subtask(self, task: str):
-        if task not in self.investigation_state["subtasks"]:
-            self.investigation_state["subtasks"].append(task)
-            self.investigation_state["pending"].append(task)
-
-    def complete_subtask(self, task: str):
-        if task in self.investigation_state["pending"]:
-            self.investigation_state["pending"].remove(task)
-            self.investigation_state["completed"].append(task)
-
-    def add_finding(self, finding: str):
-        self.investigation_state["findings"].append(finding[:500])
-
-    def add_unknown(self, unknown: str):
-        self.investigation_state["unknowns"].append(unknown[:300])
-
     # ─────────────────────────────────────────────────────────────
-    # CHUNKING (improved – uses real tokenizer when available)
+    # CHUNKING
     # ─────────────────────────────────────────────────────────────
     def _chunk_text(
         self,
         text: str,
         parent_key: str,
         source_type: str,
-        merge: bool = False,  # ← NEW: default = True (always one file)
+        merge: bool = False,
     ) -> List[KnowledgeItem]:
         """Chunk text.
         If merge=True → always return exactly ONE KnowledgeItem with full content.
@@ -619,16 +492,12 @@ class ContextManager:
                     chunks.append(text[start:end])
                     start = end - overlap
                 chunk_texts = chunks
-
         if not chunk_texts:
             return []
-
         if merge:
-            # === NEW BEHAVIOR: Always one file ===
             full_content = "\n\n".join(chunk_texts)
             content_hash = hashlib.md5(full_content.encode("utf-8")).hexdigest()[:12]
             item_key = f"{parent_key}_full_{content_hash}"
-
             metadata = {
                 "parent_key": parent_key,
                 "total_chunks": len(chunk_texts),
@@ -638,7 +507,6 @@ class ContextManager:
             }
             return [KnowledgeItem(item_key, source_type, full_content, metadata)]
         else:
-            # === OLD BEHAVIOR: Multiple items (for streaming tool outcomes) ===
             items = []
             for i, chunk_content in enumerate(chunk_texts):
                 if not chunk_content.strip():
@@ -671,13 +539,11 @@ class ContextManager:
         """Add a batch of accumulated text as one proper chunk."""
         if not accumulated_text.strip():
             return
-
         chunk_content = (
             f"Tool: {tool_name} (streaming batch {chunk_index})\n"
             f"Executed: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp))}\n\n"
             f"{accumulated_text}"
         )
-
         chunk_meta = {
             "tool": tool_name,
             "timestamp": timestamp,
@@ -687,7 +553,6 @@ class ContextManager:
             "is_large_item": True,
             **metadata,
         }
-
         await self.add_external_content(
             source_type="tool_outcome_chunk",
             content=chunk_content,
@@ -696,9 +561,8 @@ class ContextManager:
         )
 
     # ─────────────────────────────────────────────────────────────
-    # ADD EXTERNAL CONTENT (now lazy, does NOT rebuild immediately)
+    # ADD EXTERNAL CONTENT (lazy, does NOT rebuild immediately)
     # ─────────────────────────────────────────────────────────────
-
     async def add_external_content(
         self,
         source_type: str,
@@ -707,20 +571,16 @@ class ContextManager:
         silent: bool = False,
     ) -> str | None:
         """Add content to knowledge base.
-
         - Streaming chunks (tool_outcome_chunk) are allowed MULTIPLE times under the same parent_key.
         - Normal items keep strict deduplication.
         """
         if not content or len(content.strip()) < 15:
             return None
-
         metadata = metadata or {}
         content_lower = content.lower()
-
         # Contamination guard
         forbidden = PromptBuilder.contamination_forbidden_phrases()
         is_contaminated = any(phrase.lower() in content_lower for phrase in forbidden)
-
         if is_contaminated:
             if source_type in ("tool_outcome", "task_result"):
                 for phrase in forbidden:
@@ -735,7 +595,6 @@ class ContextManager:
                     f"[KB GUARD] Blocked contaminated content (source={source_type})"
                 )
                 return None
-
         # Parent key
         parent_key = metadata.get("parent_key") or (
             metadata.get("path")
@@ -743,18 +602,13 @@ class ContextManager:
             or f"{source_type}_{hash(content[:300])}"
         )
         parent_key = str(parent_key)
-
-        # === CRITICAL FIX FOR STREAMING ===
         is_streaming_chunk = source_type == "tool_outcome_chunk"
-
         # Strict deduplication ONLY for normal (non-streaming) items
         if not is_streaming_chunk and parent_key in self.files_checked:
             logger.debug(f"→ Skipped duplicate under parent_key: {parent_key}")
             return None
-
         # Process chunks / content
         chunk_items = self._chunk_text(content, parent_key, source_type)
-
         added = 0
         for item in chunk_items:
             if item.key in self.short_term_mem:
@@ -763,11 +617,9 @@ class ContextManager:
             item.embedding = await self.fetch_embedding(item.content, prefix="passage")
             self.short_term_mem[item.key] = item
             added += 1
-
         if added > 0:
             self._sparse_index_dirty = True
             self.context_stats["kb_added"] += added
-
             if not silent:
                 logger.info(
                     f"✅ Added {added} clean chunks for parent_key={parent_key} | source={source_type}"
@@ -778,18 +630,15 @@ class ContextManager:
                 )
         else:
             logger.debug(f"→ Skipped duplicate content for parent_key={parent_key}")
-
         # ONLY mark as seen for NON-streaming items
         if not is_streaming_chunk:
             self.files_checked.add(parent_key)
-
         if not silent:
             self._log_action(
                 "add_knowledge",
                 f"Added {source_type} → {parent_key} ({added} chunks)",
                 metadata,
             )
-
         return parent_key
 
     # ─────────────────────────────────────────────────────────────
@@ -803,17 +652,15 @@ class ContextManager:
             return
         texts = [item.content for item in self.short_term_mem.values()]
         self.kb_keys_ordered = list(self.short_term_mem.keys())
-
         if self.tfidf_vectorizer is None:
             self.tfidf_vectorizer = TfidfVectorizer(
                 lowercase=True,
                 stop_words="english",
-                min_df=1,  # ← critical
+                min_df=1,
                 max_df=0.98,
                 ngram_range=(1, 2),
                 max_features=10000,
             )
-
         try:
             self.tfidf_matrix = self.tfidf_vectorizer.fit_transform(texts)
             logger.debug(f"Rebuilt TF-IDF: {getattr(self.tfidf_matrix, 'shape', None)}")
@@ -845,12 +692,11 @@ class ContextManager:
         return self.consolidator
 
     # ─────────────────────────────────────────────────────────────
-    # SPARSE RETRIEVAL - FIXED TF-IDF CRASH
+    # SPARSE RETRIEVAL
     # ─────────────────────────────────────────────────────────────
     async def _sparse_retrieve(self, query: str) -> Dict[str, float]:
         """Safe sparse retrieval with aggressive type handling for Pyright."""
         await self._ensure_sparse_index()
-
         if self.tfidf_matrix is None or self.tfidf_vectorizer is None:
             logger.debug("TF-IDF index not ready")
             return {}
@@ -859,8 +705,6 @@ class ContextManager:
             try:
                 if self.tfidf_vectorizer is None:
                     return {}
-
-                # Force refit if necessary
                 if (
                     not hasattr(self.tfidf_vectorizer, "vocabulary_")
                     or len(self.tfidf_vectorizer.vocabulary_) == 0
@@ -871,26 +715,19 @@ class ContextManager:
                         self.tfidf_matrix = self.tfidf_vectorizer.fit_transform(texts)
                     else:
                         return {}
-
                 query_vec = self.tfidf_vectorizer.transform([query])
                 matrix = self.tfidf_matrix
                 vec = query_vec
-
-                # Use .dot() with explicit transpose
                 if hasattr(vec, "T"):
                     scores_matrix = matrix.dot(vec.T)  # type: ignore[attr-defined]
                 else:
                     scores_matrix = matrix.dot(vec.transpose())  # type: ignore[attr-defined]
-
                 scores = scores_matrix.toarray().flatten()  # type: ignore[attr-defined]
-
                 result: Dict[str, float] = {}
                 for idx, score in enumerate(scores):
                     if score > 1e-8 and idx < len(self.kb_keys_ordered):
                         result[self.kb_keys_ordered[idx]] = float(score)
-
                 return result
-
             except Exception as e:
                 logger.warning(f"Sparse retrieval failed: {e}", exc_info=False)
                 return {}
@@ -908,18 +745,14 @@ class ContextManager:
                 "retrieve_relevant_knowledge: KB empty or query empty → returning ''"
             )
             return ""
-
         logger.debug(
             f"[RETRIEVE] START (legacy path) | query='{query[:100]}...' | "
             f"KB_size={len(self.short_term_mem)} | max_tokens={max_kb_tokens}"
         )
-
         # Use centralized prompt for embedding query
         embedding_query = PromptBuilder.knowledge_retrieval_embedding_query(query)
         query_emb = await self.fetch_embedding(embedding_query, prefix="query")
-
         sparse_scores = await self._sparse_retrieve(query)
-
         # Dense ranking
         dense_ranked = []
         if query_emb.size > 0:
@@ -932,17 +765,14 @@ class ContextManager:
                     dense_ranked.append((sim, key))
             dense_ranked.sort(reverse=True)
             dense_ranked = dense_ranked[:50]
-
         # Sparse ranking
         sparse_ranked = sorted(
             [(score, key) for key, score in sparse_scores.items() if score > 0],
             reverse=True,
         )[:50]
-
         logger.debug(
             f"[RETRIEVE] Dense candidates: {len(dense_ranked)} | Sparse candidates: {len(sparse_ranked)}"
         )
-
         # RRF fusion
         rrf_scores: Dict[str, float] = {}
         k = 60
@@ -950,7 +780,6 @@ class ContextManager:
             rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (rank + k)
         for rank, (_, key) in enumerate(sparse_ranked, start=1):
             rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (rank + k)
-
         # ── PARAMETER/FILE BOOST ──
         file_mentions = self._extract_potential_file_or_param_mentions(query)
         if file_mentions:
@@ -965,7 +794,6 @@ class ContextManager:
                     item.metadata.get("args", {}), ensure_ascii=False
                 ).lower()
                 content_lower = item.content.lower()
-
                 for mention in file_mentions:
                     m_lower = mention.lower()
                     if (
@@ -980,16 +808,13 @@ class ContextManager:
                         if len(word) > 2
                     ):
                         boost += 2.0
-
                 if boost > 0:
                     current = rrf_scores.get(key, 0.0)
                     rrf_scores[key] = current + boost
                     boosted += 1
                     logger.debug(f"[BOOST] +{boost:.1f} to {key} (tool_outcome)")
-
             if boosted > 0:
                 logger.debug(f"[BOOST] Applied boosts to {boosted} tool outcomes")
-
         # Final scored list
         scored = sorted(
             [
@@ -998,24 +823,18 @@ class ContextManager:
             ],
             reverse=True,
         )
-
         logger.debug(f"[RETRIEVE] Final scored items before formatting: {len(scored)}")
-
         parts: List[str] = []
         used = 0
         tool_outcome_count = 0
         blocked_count = 0
-
         forbidden_phrases = PromptBuilder.contamination_forbidden_phrases()
-
         for score, key, item in scored[:40]:
             if any(forbidden in item.content for forbidden in forbidden_phrases):
                 blocked_count += 1
                 continue
-
             if item.source_type == "tool_outcome":
                 tool_outcome_count += 1
-
             meta_str = ", ".join(f"{k}={v}" for k, v in item.metadata.items() if v)
             header = PromptBuilder.knowledge_block_header(
                 source_type=item.source_type,
@@ -1025,24 +844,19 @@ class ContextManager:
             block = (
                 f"{header}{item.content}\n{PromptBuilder.knowledge_block_separator()}"
             )
-
             block_tokens = (
                 self.tokenizer.count_tokens(block)
                 if self.tokenizer
                 else len(block) // 4
             )
-
             if used + block_tokens > max_kb_tokens:
                 logger.debug(
                     f"[TOKEN] Budget reached ({used}/{max_kb_tokens}) — stopping at item {key}"
                 )
                 break
-
             parts.append(block)
             used += block_tokens
-
         result = "".join(parts)
-
         logger.debug(
             PromptBuilder.retrieve_relevant_knowledge_summary(
                 returned_chars=len(result),
@@ -1054,7 +868,6 @@ class ContextManager:
         logger.debug(
             f"[RETRIEVE] END — returned {len(result)} chars, {tool_outcome_count} tool outcomes"
         )
-
         return result
 
     async def _get_broad_candidates(self, query: str) -> List[KnowledgeItem]:
@@ -1063,16 +876,13 @@ class ContextManager:
         if not self.short_term_mem:
             logger.debug("[BROAD] KB empty → returning []")
             return []
-
         logger.debug(
             f"[BROAD] START | query='{query[:100]}...' | KB_size={len(self.short_term_mem)}"
         )
-
         # Dense ranking
         query_emb = await self.fetch_embedding(
             PromptBuilder.knowledge_retrieval_embedding_query(query), prefix="query"
         )
-
         dense_ranked = []
         if query_emb.size > 0:
             for key, item in self.short_term_mem.items():
@@ -1080,18 +890,14 @@ class ContextManager:
                 if emb is not None and emb.size > 0:
                     sim = cosine_sim(query_emb, emb)
                     dense_ranked.append((sim, key, item))
-
         logger.debug(f"[BROAD] Dense ranked: {len(dense_ranked)} items")
-
         # Sparse ranking
         sparse_scores = await self._sparse_retrieve(query)
         sparse_ranked = []
         for key, score in sparse_scores.items():
             if score > 0 and key in self.short_term_mem:
                 sparse_ranked.append((score, key, self.short_term_mem[key]))
-
         logger.debug(f"[BROAD] Sparse ranked: {len(sparse_ranked)} items")
-
         # RRF fusion
         rrf_scores: Dict[str, float] = {}
         k = 60
@@ -1099,7 +905,6 @@ class ContextManager:
             rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (rank + k)
         for rank, (_, key, _) in enumerate(sparse_ranked[:50], start=1):
             rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (rank + k)
-
         # File/param boosting
         file_mentions = self._extract_potential_file_or_param_mentions(query)
         if file_mentions:
@@ -1114,7 +919,6 @@ class ContextManager:
                     item.metadata.get("args", {}), ensure_ascii=False
                 ).lower()
                 content_lower = item.content.lower()
-
                 for mention in file_mentions:
                     m_lower = mention.lower()
                     if (
@@ -1129,15 +933,12 @@ class ContextManager:
                         if len(word) > 2
                     ):
                         boost += 2.0
-
                 if boost > 0:
                     current = rrf_scores.get(key, 0.0)
                     rrf_scores[key] = current + boost
                     boosted += 1
-
             if boosted > 0:
                 logger.debug(f"[BOOST] Applied boosts to {boosted} tool outcomes")
-
         # Final candidates - always (score, item) for safe sorting
         scored = [
             (rrf_scores.get(key, 0.0), item)
@@ -1145,9 +946,7 @@ class ContextManager:
             if key in rrf_scores
         ]
         scored.sort(key=lambda x: x[0], reverse=True)
-
         candidates = [item for score, item in scored[:100]]
-
         logger.debug(
             f"[BROAD] END → returning {len(candidates)} broad candidates (top RRF score: {scored[0][0] if scored else 0:.4f})"
         )
@@ -1167,15 +966,12 @@ class ContextManager:
         """
         if not query.strip():
             return ""
-
         logger.debug(
             f"[RANKED_RETRIEVE] START | query='{query[:80]}...' | "
             f"k={k} | research={research_mode} | budget={max_kb_tokens}"
         )
-
-        # 1. Get candidates (now respects k)
+        # 1. Get candidates
         short_term = await self._get_broad_candidates(query)
-
         long_term = []
         if getattr(self.knowledge_base, "enabled", False):
             try:
@@ -1185,7 +981,6 @@ class ContextManager:
                 logger.debug(f"Persistent KB returned {len(long_term)} chunk items")
             except Exception as e:
                 logger.warning(f"KB retrieve failed: {e}")
-
         # 2. Deduplicate
         all_candidates = short_term + long_term
         seen = set()
@@ -1195,7 +990,6 @@ class ContextManager:
             if key not in seen:
                 seen.add(key)
                 unique.append(item)
-
         if research_mode:
             unique = [
                 item
@@ -1205,30 +999,24 @@ class ContextManager:
             if not unique:
                 logger.debug("[RANKED_RETRIEVE] No research-mode candidates")
                 return ""
-
         if not unique:
             logger.debug("[RANKED_RETRIEVE] No candidates")
             return ""
-
         # 3. Rerank (now uses k)
         rerank_k = min(len(unique), max(k * 2, 30))
         if self.consolidator:
             reranked = await self.consolidator.rerank(query, unique, k=rerank_k)
         else:
             reranked = unique[:rerank_k]
-
         # 4. Greedy selection within strict token budget
         parts = []
         remaining = max_kb_tokens
         used_tokens = 0
-
         for item in reranked:
             content = getattr(item, "content", "").strip()
             if not content:
                 continue
-
             item_tokens = self.count_tokens([{"role": "user", "content": content}])
-
             if item_tokens <= remaining:
                 parts.append(content)
                 remaining -= item_tokens
@@ -1242,9 +1030,7 @@ class ContextManager:
                         [{"role": "user", "content": truncated}]
                     )
                 break
-
         result = "\n\n---\n\n".join(parts).strip()
-
         logger.debug(
             f"[RANKED_RETRIEVE] END → {len(result):,} chars / ~{used_tokens} tokens "
             f"from {len(parts)} chunks (k={k}, budget={max_kb_tokens})"
@@ -1258,13 +1044,11 @@ class ContextManager:
         Uses last 8 entries for deduplication window."""
         if not self.tool_call_history or len(self.tool_call_history) < 2:
             return False
-
         # Normalize current args for comparisons
         try:
             current_key = json.dumps(clean_args, sort_keys=True, ensure_ascii=False)
         except Exception:
             current_key = str(clean_args)
-
         # Check last N calls (excluding the one we just added)
         for entry in reversed(
             self.tool_call_history[:-1][-8:]
@@ -1277,10 +1061,8 @@ class ContextManager:
                 )
             except Exception:
                 entry_key = str(entry["args"])
-
             if entry_key == current_key:
                 return True
-
         return False
 
     async def add_message(
@@ -1293,7 +1075,6 @@ class ContextManager:
             if self.tokenizer
             else len(message) // 4
         )
-
         if self.mode == "chat":
             self.pure_chat_history.append({"role": role, "content": message})
             if len(self.pure_chat_history) > 30:
@@ -1302,7 +1083,6 @@ class ContextManager:
                 "add_message", f"{role} (chat) ({len(message)} chars)", {"role": role}
             )
             return
-
         topic = await self._match_topic(embedding, exclude_topic=self.current_topic)
         if topic:
             await self.switch_topic(topic)
@@ -1315,7 +1095,7 @@ class ContextManager:
         )
 
     # ─────────────────────────────────────────────────────────────
-    # SWITCH / MATCH TOPIC (unchanged)
+    # SWITCH / MATCH TOPIC
     # ─────────────────────────────────────────────────────────────
     async def switch_topic(self, topic: Topic) -> None:
         async with asyncio.Lock():
@@ -1347,7 +1127,7 @@ class ContextManager:
         return best_topic
 
     # ─────────────────────────────────────────────────────────────
-    # HISTORY ANALYSIS (unchanged except topic generator)
+    # HISTORY ANALYSIS
     # ─────────────────────────────────────────────────────────────
     async def _score_messages_by_relevance(
         self, messages: list, ref_emb: np.ndarray
@@ -1428,11 +1208,9 @@ class ContextManager:
                 if not isinstance(response, str):
                     attempt += 1
                     continue
-
                 clean = re.sub(
                     r"^```(?:json)?|```$", "", response, flags=re.IGNORECASE
                 ).strip()
-
                 # JSON-first parsing
                 try:
                     data = json.loads(clean)
@@ -1442,7 +1220,6 @@ class ContextManager:
                         return name, desc
                 except json.JSONDecodeError:
                     pass
-
                 # fallback regex
                 matches = re.findall(r':\s*"([^"]+)"', clean)
                 name = matches[0] if matches else "unknown"
@@ -1475,22 +1252,18 @@ class ContextManager:
     ) -> List[Dict[str, Any]] | str:
         messages: List[Dict[str, Any]] = []
         state = self.agent.state
-
         logger.debug(
             f"provide_context called | query='{query[:100]}...' | chat={chat} | "
             f"lightweight_agentic={lightweight_agentic} | research_mode={research_mode} | "
             f"has_state={state is not None} | return_as_string={return_as_string}"
         )
-
         if chat:
-            # ── RICH CHAT MODE (unchanged) ──
+            # ── RICH CHAT MODE  ──
             logger.debug("→ Entering CHAT mode")
-
             if self.pure_chat_history:
                 recent = self.pure_chat_history[-12:]
                 for msg in recent:
                     messages.append({"role": msg["role"], "content": msg["content"]})
-
             if query.strip() and self.short_term_mem:
                 kb_text = await self.ranked_retrieve(
                     query, max_kb_tokens // 2, research_mode=False
@@ -1504,14 +1277,12 @@ class ContextManager:
                             ),
                         }
                     )
-
             messages.append(
                 {
                     "role": "user",
                     "content": query.strip() or "[AUTONOMOUS CONTINUATION]",
                 }
             )
-
             total_tokens = self.count_tokens(messages)
             if total_tokens > max_input_tokens - reserved_for_output:
                 self.prune_to_fit_context(
@@ -1523,7 +1294,6 @@ class ContextManager:
                     assistant_role="assistant",
                     tool_role="tool",
                 )
-
             if return_as_string:
                 formatted = []
                 for msg in messages:
@@ -1531,42 +1301,33 @@ class ContextManager:
                     content = str(msg.get("content", "")).strip()
                     formatted.append(f"{role}:\n{content}")
                 context = "\n\n".join(formatted)
-                #logger.debug(f"Context provided: {context}")
+                # logger.debug(f"Context provided: {context}")
                 return context
-
             return messages
-
         # ── AGENTIC MODE ──
         logger.debug("→ Entering AGENTIC mode")
-
         tokens_used = 0
-
         if lightweight_agentic and state is not None:
-            # ── IMPROVED LIGHTWEIGHT PATH FOR LONG-RUNNING LOOPS ──
+            # ── LIGHTWEIGHT PATH FOR LONG-RUNNING LOOPS ──
             logger.debug(
                 "→ Using IMPROVED LIGHTWEIGHT agentic context (long-running mode)"
             )
-
             # Validate state integrity
             warnings = state.validate_state_integrity()
             if warnings:
                 logger.warning(
                     f"AgentState integrity warnings before lightweight context: {warnings}"
                 )
-
             # Build context using PromptBuilder helper only
             full_context = PromptBuilder.lightweight_agentic_context(state)
-
             messages.append({"role": "system", "content": full_context})
             tokens_used = self.count_tokens(messages)
-
         else:
-            # ── ORIGINAL RICH AGENTIC MODE ──
+            # ── RICH AGENTIC MODE ──
             summary = self.get_context_summary()
             full_system = (
                 f"\n\n{summary}\n\n{PromptBuilder.context_summary_instruction()}"
             )
-
             if include_logs:
                 try:
                     log_lines = Logger.get_log_data(level="info", max_entries=100)
@@ -1576,12 +1337,9 @@ class ContextManager:
                         )
                 except Exception:
                     pass
-
             messages.append({"role": "system", "content": full_system})
             tokens_used = self.count_tokens(messages)
-
         # ── COMMON FINAL STEPS ──
-
         query_tokens = (
             self.count_tokens([{"role": "user", "content": query}])
             if query.strip()
@@ -1589,17 +1347,14 @@ class ContextManager:
         )
         target = max_input_tokens - reserved_for_output
         remaining = max(0, target - tokens_used - query_tokens)
-
         if research_mode:
             kb_tokens = min(18000, max(4000, remaining // 2))  # much more aggressive
         else:
             kb_tokens = (
                 min(max_kb_tokens, remaining // 3) if not lightweight_agentic else 1800
             )
-
         # ── Collect external context (KB) ──
         context_parts: List[str] = []
-
         # In research_mode ONLY provide relevant context (KB), skip conversation history
         if query.strip():
             # ── NEW: In research mode, embed executed tools (names + args only) into the query for better embedding/retrieval
@@ -1610,17 +1365,15 @@ class ContextManager:
                     args = func.get("args", {})
                     if args:
                         args_str = ", ".join(
-                            f"{k}={v}" for k, v in list(args.items())[:5]
+                            f"{k}={v}" for k, k, v in list(args.items())[:5]
                         )
-                        executed_tools_summary.append(f"{name}({args_str})")
+                        executed_tools_summary.append(f"Name{name} Args{args_str}")
                     else:
                         executed_tools_summary.append(name)
-
                 tools_str = " | ".join(executed_tools_summary)
                 enriched_query = f"{query} [EXECUTED TOOLS: {tools_str}]"
             else:
                 enriched_query = query
-
             kb_text = await self.ranked_retrieve(
                 enriched_query if research_mode else query,
                 kb_tokens,
@@ -1630,7 +1383,6 @@ class ContextManager:
                 context_parts.append(
                     PromptBuilder.relevant_external_context_section(kb_text)
                 )
-
         # ── HISTORY HANDLING ──
         if lightweight_agentic:
             logger.debug("→ LIGHTWEIGHT MODE: skipping full conversation history")
@@ -1650,26 +1402,19 @@ class ContextManager:
                 recent_msgs.insert(0, msg)
                 history_budget -= t
                 tokens_used += t
-
             messages.extend(recent_msgs)
-
         # ── FINAL USER MESSAGE: query + all external context (no more spamming system messages) ──
         provided_context = (
             "\n\n---\n\n".join(context_parts)
             if context_parts
             else "[No additional external context]"
         )
-
         user_query_text = query.strip() or "[AUTONOMOUS CONTINUATION]"
         user_content = f"""{user_query_text}
-
         {provided_context}"""
-
         messages.append({"role": "user", "content": user_content})
-
         final_tokens = self.count_tokens(messages)
         logger.debug(f"Final context before prune → {final_tokens} tokens")
-
         if final_tokens > target:
             removed, pruned_turns = self.prune_to_fit_context(
                 messages,
@@ -1683,13 +1428,11 @@ class ContextManager:
             if pruned_turns and not lightweight_agentic:
                 self.current_topic.archived_history.extend(pruned_turns)
             logger.debug(f"Pruned {removed} turns to fit token limit")
-
         logger.debug(
             f"provide_context finished | messages={len(messages)} | "
             f"lightweight={lightweight_agentic} | research_mode={research_mode} | "
             f"return_as_string={return_as_string} | tokens={final_tokens}"
         )
-
         if return_as_string:
             formatted = []
             for msg in messages:
@@ -1697,9 +1440,8 @@ class ContextManager:
                 content = str(msg.get("content", "")).strip()
                 formatted.append(f"{role}:\n{content}")
             context = "\n\n".join(formatted)
-            #logger.debug(f"Context provided: {context}")
+            # logger.debug(f"Context provided: {context}")
             return context
-
         return messages
 
     def prune_to_fit_context(
@@ -1726,19 +1468,16 @@ class ContextManager:
         current = count_list(messages)
         if current <= max_tokens:
             return 0, []
-
         protected = 0
         for i, m in enumerate(messages):
             if m.get("role") == system_role:
                 protected = i + 1
             elif m.get("role") == user_role and i == len(messages) - 1:
                 protected = max(protected, i + 1)
-
         pruned_turns: List[Dict[str, str]] = []
         i = protected
         removed = 0
         effective_max = max_tokens - 256
-
         while current > effective_max and i < len(messages) - min_keep_messages:
             turn_start = i
             while i < len(messages) and messages[i].get("role") not in (
@@ -1761,7 +1500,6 @@ class ContextManager:
             removed += turn_end - turn_start
             current = count_list(messages)
             i = turn_start
-
             if current > effective_max:
                 for j in range(turn_start - 1, turn_start - 10, -1):
                     if j >= 0 and messages[j].get("role") in (
@@ -1774,7 +1512,6 @@ class ContextManager:
                         current = count_list(messages)
                         i = j
                         break
-
         if removed > 0:
             self._log_action(
                 "prune", f"Pruned {removed} turns", {"kept": len(messages)}
@@ -1832,8 +1569,7 @@ class ContextManager:
         metadata = metadata or {}
         timestamp = time.time()
         args = metadata.get("args", {}) or {}
-
-        # Lightweight call history (unchanged)
+        # Lightweight call history
         clean_args = {k: v for k, v in args.items() if k not in ("agent", "self")}
         call_entry = {
             "tool": tool_name,
@@ -1843,18 +1579,16 @@ class ContextManager:
         self.tool_call_history.append(call_entry)
         if len(self.tool_call_history) > 20:
             self.tool_call_history.pop(0)
-
         # ── STREAMING PATH ─────────────────────────────────────────────────────
         if result is not None and hasattr(result, "__aiter__"):
             logger.info(f"🔄 Streaming tool outcome detected: {tool_name}")
             await self._record_streaming_tool_outcome(
                 tool_name=tool_name,
                 chunk_stream=result,
-                metadata=metadata,  # pass full metadata
+                metadata=metadata,
                 timestamp=timestamp,
             )
             return
-
         # ── FULL RESULT PATH ───────────────────────────────────────────────────
         if isinstance(result, (dict, list, tuple)):
             try:
@@ -1863,7 +1597,6 @@ class ContextManager:
                 result_str = str(result)
         else:
             result_str = str(result) if result is not None else ""
-
         # Short results → still finalize for consistency
         if len(result_str) < 30:
             self._finalize_tool_recording(
@@ -1873,12 +1606,10 @@ class ContextManager:
                 metadata=metadata,
             )
             return
-
         is_large = len(result_str) > 800
         content = self._build_tool_content(
             tool_name, timestamp, len(result_str), is_large, result_str
         )
-
         await self.add_external_content(
             source_type="tool_outcome",
             content=content,
@@ -1892,7 +1623,6 @@ class ContextManager:
                 **metadata,
             },
         )
-
         # <<< FINALIZE with metadata >>>
         self._finalize_tool_recording(
             tool_name=tool_name,
@@ -1904,19 +1634,17 @@ class ContextManager:
     async def _get_recent_tool_outcomes(
         self,
         limit: int = 4,
-        max_tokens_per_result: int = 2000,  # now properly used
+        max_tokens_per_result: int = 2000,
         max_total_tokens: int = 5000,
     ) -> str:
         """Return the most recent tool outcomes (full results).
-
         Only real 'tool_outcome' entries are considered (streaming chunks are ignored).
         Respects per-result token limit for very large outputs.
         """
         if not self.short_term_mem:
             logger.debug("No entries in short_term_mem")
             return ""
-
-        # Only consider final consolidated tool_outcomes (not individual chunks)
+        # Only consider final consolidated tool_outcomes
         tool_items = [
             (
                 item.metadata.get("timestamp", 0),
@@ -1927,51 +1655,42 @@ class ContextManager:
             )
             for key, item in self.short_term_mem.items()
             if item.source_type == "tool_outcome"
-            and item.metadata.get("streamed", False) is not True  # safety
-            and not str(key).startswith("tool_outcome_chunk")  # extra safety
+            and item.metadata.get("streamed", False) is not True
+            and not str(key).startswith("tool_outcome_chunk")
         ]
-
-        # Sort by timestamp descending (newest first)
+        # Sort by timestamp descending
         tool_items.sort(reverse=True)
-
         parts: List[str] = []
         used_tokens = 0
-
         for ts, key, item, tool_name, size in tool_items[:limit]:
             timestamp_str = (
                 f"Executed: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts))}\n"
                 if ts > 0
                 else ""
             )
-
-            # Truncate content per result if it's too large
+            # Truncate content per result
             content = item.content
             if len(content) > max_tokens_per_result * 4:  # rough char → token estimate
                 content = content[: max_tokens_per_result * 4] + "\n... [truncated]"
-
             block = PromptBuilder.latest_tool_block(
                 tool_name=tool_name,
                 timestamp_str=timestamp_str,
                 size=size,
                 content=content,
             )
-
             block_tokens = (
                 self.tokenizer.count_tokens(block)
                 if self.tokenizer
                 else len(block) // 4
             )
-
             # Respect total token budget across all recent outcomes
             if used_tokens + block_tokens > max_total_tokens:
                 logger.debug(
                     f"Token budget reached in _get_recent_tool_outcomes ({used_tokens}/{max_total_tokens})"
                 )
                 break
-
             parts.append(block)
             used_tokens += block_tokens
-
         result = "\n".join(parts) if parts else ""
         logger.debug(
             f"_get_recent_tool_outcomes returned {len(result)} chars from {len(parts)} tool outcomes"
@@ -1988,34 +1707,27 @@ class ContextManager:
         """Accumulate text into ~768-token batches and report meaningful progress.
         Now uses adaptive + logarithmic-style progress when total size is unknown."""
         logger.info(f"🔄 Starting streaming ingestion: {tool_name}")
-
         full_content: List[str] = []
         accumulated: List[str] = []
         accumulated_tokens = 0
         batch_index = 0
-
         parent_key = (
             f"{tool_name}_"
             f"{int(timestamp)}_"
             f"{hashlib.md5(str(metadata.get('args', {})).encode()).hexdigest()[:12]}"
         )
-
-        # Hints from tool (especially useful for PDFs)
+        # Hints from tool
         total_pages = metadata.get("total_pages") or 0
         estimated_total_chars = metadata.get("estimated_total_chars", 0)
-
         last_reported_percent = 0
         chars_at_last_report = 0
-
         try:
             async for chunk in chunk_stream:
                 if not chunk or not chunk.strip():
                     continue
-
                 full_content.append(chunk)
                 accumulated.append(chunk)
                 accumulated_tokens += len(chunk) // 4
-
                 # Flush batch when we reach target size (~768 tokens)
                 if accumulated_tokens >= CHUNK_SIZE_TOKENS or len(accumulated) >= 8:
                     batch_text = "".join(accumulated)
@@ -2030,10 +1742,8 @@ class ContextManager:
                     batch_index += 1
                     accumulated.clear()
                     accumulated_tokens = 0
-
                 # === IMPROVED PROGRESS REPORTING ===
                 current_chars = len("".join(full_content))
-
                 if total_pages > 0:
                     # Best case: real page count from PDF tool
                     progress = min(
@@ -2057,7 +1767,6 @@ class ContextManager:
                                 + 85 * (1 - (1 / (1 + (current_chars / 50000) ** 0.6)))
                             ),
                         )
-
                 # Report only when we cross a new 5% threshold (or every ~30-50k chars after 50%)
                 if progress >= 10 and (
                     progress // 5 > last_reported_percent // 5
@@ -2069,7 +1778,6 @@ class ContextManager:
                     )
                     last_reported_percent = progress
                     chars_at_last_report = current_chars
-
             # Final batch flush
             if accumulated:
                 batch_text = "".join(accumulated)
@@ -2081,16 +1789,13 @@ class ContextManager:
                     metadata=metadata,
                     timestamp=timestamp,
                 )
-                batch_index += 1  # for final log
-
+                batch_index += 1
         except Exception as e:
             logger.error(f"Error during streaming of {tool_name}: {e}", exc_info=True)
-
         # === FINAL CONSOLIDATED ENTRY ===
         if full_content:
             full_result = "".join(full_content)
             total_chars = len(full_result)
-
             await self.add_external_content(
                 source_type="tool_outcome",
                 content=self._build_tool_content(
@@ -2108,7 +1813,6 @@ class ContextManager:
                     **metadata,
                 },
             )
-
             logger.info(
                 f"✅ Streaming completed: {tool_name} → "
                 f"1 final tool_outcome + {batch_index} batches "
@@ -2120,7 +1824,6 @@ class ContextManager:
                 f"Streaming completed but no content received for {tool_name}"
             )
             preview = ""
-
         self._finalize_tool_recording(
             tool_name=tool_name,
             preview=preview,
@@ -2154,23 +1857,18 @@ class ContextManager:
     ) -> None:
         """Original lines preserved + moved add_tool_result logic.
         Now properly receives metadata when available."""
-
         metadata = metadata or {}
-
-        # === YOUR ORIGINAL LINES (kept 100% unchanged) ===
+        # === YOUR ORIGINAL LINES ===
         self.tools_executed.append(tool_name)
         logger.debug(f"tool_outcome {tool_name} → {preview}...")
         self._log_action("tool_outcome", f"{tool_name} → {preview}...", {})
-
-        # === MOVED state.add_tool_result LOGIC (after result is finished) ===
         if self.agent is not None and hasattr(self.agent, "state"):
             try:
                 self.agent.state.add_tool_result(
                     tool_name=tool_name,
-                    result=preview,  # short preview as before
+                    result=preview,
                     success=success,
                 )
-
                 # Update last_tool_success with full context
                 self.agent.state.last_tool_success = {
                     "tool_name": tool_name,
@@ -2193,24 +1891,19 @@ class ContextManager:
 
     async def sync_to_agent_state(self, state: "AgentState") -> None:
         """Automatically populate AgentState from ContextManager (single source of truth).
-        Called after every significant change. Keeps state lightweight and in sync.
+        investigation_state removed — planning now lives only in agent.state + _task_contexts.
         """
-        # 1. Messages (light mirror - only recent + count)
+        # 1. Messages (light mirror)
         if self.mode == "chat":
-            state.messages = self.pure_chat_history[-20:]  # keep last 20 only
+            state.messages = self.pure_chat_history[-20:]
         else:
-            # Agentic: use current topic history (most relevant)
             recent = (
                 self.current_topic.history[-15:] if self.current_topic.history else []
             )
-            state.messages = [
-                msg.copy() for msg in recent
-            ]  # shallow copy to avoid mutation issues
-
+            state.messages = [msg.copy() for msg in recent]
         state.message_count = len(state.messages)
         state.last_message_time = time.time()
-
-        # 2. Tool tracking (lightweight only)
+        # 2. Tool tracking
         state.tool_results = [
             {
                 "name": entry.get("tool", "unknown"),
@@ -2219,48 +1912,31 @@ class ContextManager:
                 "success": True,
                 "timestamp": entry.get("timestamp", time.time()),
             }
-            for entry in self.tool_call_history[-12:]  # only last 12, compact
+            for entry in self.tool_call_history[-12:]
         ]
         state.executed_functions = [
             {"name": t, "timestamp": time.time()} for t in self.tools_executed[-20:]
         ]
-
-        # 3. Investigation / Planning state sync (bidirectional safe)
-        inv = self.investigation_state
-        state.task = inv.get("goal", state.task or "")
-
-        # Planned tasks from investigation + task contexts
+        # 3. Investigation / Planning state
         if hasattr(self, "_task_contexts") and self._task_contexts:
             state.planned_tasks = list(self._task_contexts.keys())
             state.task_expected_outcomes = [
                 f"Complete task: {name}" for name in state.planned_tasks
             ]
-        else:
-            state.planned_tasks = inv.get("subtasks", state.planned_tasks or [])
-            state.task_expected_outcomes = inv.get(
-                "pending", state.task_expected_outcomes or []
-            )
-
+        # else: leave whatever is already in state (from build_tasks_from_plan etc.)
         if state.planned_tasks and isinstance(state.current_task_index, int):
             if 0 <= state.current_task_index < len(state.planned_tasks):
                 state.current_task = state.planned_tasks[state.current_task_index]
-
-        # 4. Sub-task / deployment awareness
+        # 4. Sub-task awareness
         state.sub_task_ids = (
-            list(self._task_contexts.keys()) if hasattr(self, "_task_contexts") else []
+            list(getattr(self, "_task_contexts", {}).keys())
+            if hasattr(self, "_task_contexts")
+            else state.sub_task_ids or []
         )
         state.active_sub_agents = [f"task_{k}" for k in state.sub_task_ids]
-
-        # 5. Status & metrics from context stats
-        state.loop_count = (
-            self.context_stats.get("messages_added", 0) // 2
-        )  # rough proxy
+        # 5. Metrics
+        state.loop_count = self.context_stats.get("messages_added", 0) // 2
         state.total_tool_calls = len(self.tools_executed)
-
-        # 6. Waiting / confirmation state (already in state - leave as primary there)
-        # ContextManager does NOT own waiting/confirmation - that's orchestration
-
         logger.debug(
-            f"ContextManager → AgentState synced | messages={len(state.messages)} | "
-            f"tools={len(state.tool_results)} | tasks={len(state.planned_tasks)}"
+            f"ContextManager → AgentState synced | tasks={len(state.planned_tasks)}"
         )

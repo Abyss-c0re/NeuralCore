@@ -39,7 +39,7 @@ class Agent:
         self.app_root = app_root
         self.registry = action_registry
 
-        # ====================== STATE IS NOW THE SOURCE OF TRUTH ======================
+        # ====================== STATE - THE SOURCE OF TRUTH ======================
         self.state: AgentState = AgentState(agent_id=agent_id)
 
         # ====================== CONFIG HANDLING ======================
@@ -79,13 +79,12 @@ class Agent:
             getattr(self.client, "system_prompt", ""),
         )
 
-        # ====================== INFRASTRUCTURE (never goes into state) ======================
-        
+        # ====================== INFRASTRUCTURE ======================
+
         self.context_manager = ContextManager(self)
         self.manager = DynamicActionManager(self.registry, self)
 
         self._last_sync_ts = 0.0
-        # self.agent_tools = AgentActionHelper(self)
         self.workflow = WorkflowEngine(self, workflow)
         ToolBrowser(self.registry, self.manager)
 
@@ -219,7 +218,6 @@ class Agent:
             "total_tool_calls": self.state.total_tool_calls,
             "error_count": self.state.error_count,
             "sub_tasks_count": len(self.sub_tasks),
-            # Waiting state
             "waiting": getattr(self.state, "waiting", False),
             "wait_type": getattr(self.state, "wait_type", None),
             "wait_elapsed": wait_elapsed,  # ← now type-safe
@@ -236,7 +234,7 @@ class Agent:
     def _reset_state(self) -> None:
         """Reset everything through the state object."""
         self.state.reset_for_new_task()
-        self.message_queue = asyncio.Queue()  # fresh queue
+        self.message_queue = asyncio.Queue()
         self._input_event.clear()
         self._input_counter = 0
         self.sub_tasks.clear()
@@ -392,7 +390,7 @@ class Agent:
         timeout: float | None = None,
         role: Optional[str] = None,  # filter by role ("user", "system", etc.)
         contains: Optional[str] = None,  # filter by substring in content
-        return_content_only: bool = False,  # ← new optional flag
+        return_content_only: bool = False,
     ) -> Optional[Union[dict, str]]:
         """Wait for an incoming message with optional filtering and output format.
 
@@ -430,7 +428,7 @@ class Agent:
                 if not self.message_queue.empty():
                     msg = self.message_queue.get_nowait()
 
-                    # === SELECTIVE FILTERING (unchanged) ===
+                    # === SELECTIVE FILTERING ===
                     if role is not None:
                         if isinstance(msg, dict) and msg.get("role") != role:
                             continue
@@ -444,7 +442,6 @@ class Agent:
                         if contains not in content_str:
                             continue
 
-                    # === NEW OUTPUT FORMAT LOGIC ===
                     if return_content_only:
                         # Return clean content string only
                         if isinstance(msg, dict):
@@ -584,7 +581,7 @@ class Agent:
                 "status": self.state.status,
                 "phase": self.state.phase,
                 "duration": round(self.state.duration, 1),
-                # === Waiting State - fully exposed for NeuralHub / VR / dashboards ===
+                # === Waiting State - fully exposed  ===
                 "waiting": getattr(self.state, "waiting", False),
                 "wait_type": getattr(self.state, "wait_type", None),
                 "wait_prompt": getattr(self.state, "wait_prompt", ""),
@@ -1107,7 +1104,7 @@ class Agent:
                     yield event, payload
 
             # ====================== CONTROL MESSAGE LOOP ======================
-            # (handles confirmation responses + your existing controls)
+            # (handles confirmation responses + existing controls)
             while not stop_event.is_set():
                 try:
                     msg = await asyncio.wait_for(self.message_queue.get(), timeout=0.2)
@@ -1267,7 +1264,7 @@ class Agent:
                 ):
                     sub_agent.manager.load_tools([core])
 
-            # === 3. SYSTEM PROMPT — RELOCATED TO PROMPTBUILDER (NeuralCore) ===
+            # === 3. SYSTEM PROMPT ===
             sub_system = getattr(sub_agent, "system_prompt", "")
             if not sub_system or "precise sub-agent" not in sub_system.lower():
                 sub_system = PromptBuilder.sub_agent_system_prompt(

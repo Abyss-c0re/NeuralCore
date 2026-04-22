@@ -801,16 +801,11 @@ class PromptBuilder:
     @staticmethod
     def abstract_concept_extraction(
         goal: str,
-        hypotheses: List[str],
-        findings: List[str],
         relevant_items: List[Any],
         existing_concepts: Optional[Dict[str, Any]] = None,
         max_concepts: int = 7,
     ) -> str:
         """High-precision prompt for extracting grounded, high-dimensional abstractions."""
-
-        hyp_text = "\n".join(f"- {h}" for h in hypotheses) if hypotheses else "None"
-        find_text = "\n".join(f"- {f}" for f in findings) if findings else "None"
 
         items_text = "\n\n".join(
             f"ITEM {i + 1} [source: {getattr(item, 'source_type', 'unknown')} | category: {getattr(item, 'category_path', 'N/A')}]\n"
@@ -842,11 +837,9 @@ class PromptBuilder:
 
         Goal: {goal}
 
-        Hypotheses:
-        {hyp_text}
+    
 
         Findings:
-        {find_text}
         {existing_text}
 
         RELEVANT ARTIFACTS:
@@ -862,89 +855,6 @@ class PromptBuilder:
             "links_to": ["existing_concept_name"] or []
         }}
         ]
-        """
-
-    @staticmethod
-    def investigation_state_extraction(
-        goal: str,
-        relevant_items: List[Any],
-        existing_hypotheses: List[str],
-        existing_findings: List[str],
-        existing_unknowns: List[str],
-        rich_context: str = "",
-    ) -> str:
-        """Prompt to extract structured investigation elements from current context.
-
-        The LLM is explicitly told to:
-        - Create NEW items if the existing lists are empty
-        - Refine or extend existing items when they are present
-        """
-
-        items_text = (
-            "\n\n".join(
-                f"ITEM {i + 1} [{getattr(item, 'source_type', 'unknown')}]\n"
-                f"{getattr(item, 'content', '')[:1200]}"
-                for i, item in enumerate(relevant_items[:15])
-            )
-            if relevant_items
-            else "No relevant items available."
-        )
-
-        hyp_text = (
-            "\n".join(f"- {h}" for h in existing_hypotheses)
-            if existing_hypotheses
-            else "None (create new ones)"
-        )
-        find_text = (
-            "\n".join(f"- {f}" for f in existing_findings)
-            if existing_findings
-            else "None (create new ones)"
-        )
-        unk_text = (
-            "\n".join(f"- {u}" for u in existing_unknowns)
-            if existing_unknowns
-            else "None (create new ones)"
-        )
-
-        context_section = (
-            f"\n\nRELEVANT CONTEXT FROM TOOLS, OBSERVATIONS AND HISTORY:\n{rich_context}"
-            if rich_context.strip()
-            else ""
-        )
-
-        return f"""You are an expert investigator and knowledge synthesizer.
-
-        Current goal: {goal}
-
-        Existing Hypotheses:
-        {hyp_text}
-
-        Existing Findings:
-        {find_text}
-
-        Existing Unknowns:
-        {unk_text}
-
-        TOP RERANKED KNOWLEDGE BASE ITEMS (filtered by reranker):
-        {items_text}
-        {context_section}
-
-        Your task is to analyze the context and do the following:
-
-        1. **Create new hypotheses** if none exist, or **refine/extend** existing ones.
-        2. **Create new findings** if none exist, or **add new evidence** to existing ones.
-        3. **Create new unknowns** if none exist, or **refine** existing open questions.
-
-        CRITICAL RULES:
-        - If "None (create new ones)" is shown, you MUST create fresh items from the context.
-        - If existing items are listed, prefer to refine or build upon them rather than duplicate.
-        - Keep each list short and high-quality (max 6–8 items total per category).
-        - Output ONLY valid JSON with this exact structure. No markdown, no explanations.
-
-        Example of correct output:
-        {{"hypotheses": ["New hypothesis 1", "Refined hypothesis 2"], "findings": ["Finding A", "Finding B"], "unknowns": ["Open question X"]}}
-
-        Return nothing else.
         """
 
     @staticmethod

@@ -1,4 +1,3 @@
-import re
 import json
 from typing import AsyncIterator, Any, Tuple, List, Dict, Optional
 
@@ -23,111 +22,6 @@ async def classify_intent(agent, query: str) -> str:
     except Exception as e:
         logger.warning(f"classify_intent failed, falling back: {e}")
         return "CASUAL" if len(query.split()) < 25 else "TASK"
-
-
-async def generate_or_refine_investigation_state(agent):
-    """
-    Extracts/refines hypotheses, findings and unknowns from the current investigation.
-    Fully async and safe against missing await in caller.
-    """
-    goal = getattr(agent.state, "task", None)
-    if not goal:
-        return
-
-    cm = agent.context_manager
-    inv = getattr(cm, "investigation_state", {})
-
-    hypotheses = inv.get("hypotheses", [])[:15]
-    findings = inv.get("findings", [])[:20]
-    unknowns = inv.get("unknowns", [])[:12]
-
-    try:
-        relevant_items = await cm.consolidator._get_novel_relevant(goal)
-        # === MUCH SMALLER, FASTER PROMPT ===
-        rich_context: str = await cm.provide_context(
-            query=goal,
-            max_input_tokens=6000,
-            reserved_for_output=6000,
-            research_mode=True,
-            lightweight_agentic=False,
-            return_as_string=True,
-        )
-
-        extraction_prompt = PromptBuilder.investigation_state_extraction(
-            goal=goal,
-            relevant_items=relevant_items,
-            existing_hypotheses=hypotheses,
-            existing_findings=findings,
-            existing_unknowns=unknowns,
-            rich_context=rich_context,
-        )
-
-        # === CRITICAL: Much lower max_tokens for stability ===
-        response = await agent.client.chat(
-            extraction_prompt, temperature=0.22, max_tokens=18000
-        )
-
-        # logger.debug(f"[DISTIL] Raw output from chat {response}")
-
-        # === Bulletproof JSON repair ===
-        cleaned = response.strip()
-        cleaned = re.sub(
-            r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.IGNORECASE
-        ).strip()
-
-        # Find last complete JSON object
-        json_match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-        if json_match:
-            cleaned = json_match.group(0)
-
-        # Aggressive repair
-        cleaned = re.sub(r",\s*([}\]])", r"\1", cleaned)
-        cleaned = re.sub(r"([}\]])\s*([{\[])", r"\1,\2", cleaned)
-        cleaned = re.sub(r"[\x00-\x1F\x7F]", "", cleaned)
-
-        # Final safety: truncate to last complete object if still broken
-        if not cleaned.endswith("}"):
-            last_brace = cleaned.rfind("}")
-            if last_brace > 0:
-                cleaned = cleaned[: last_brace + 1]
-
-        try:
-            extracted_data = json.loads(cleaned)
-        except json.JSONDecodeError as json_err:
-            logger.warning(
-                f"[DISTILL] JSON decode failed after repair: {json_err} — skipping this round"
-            )
-            extracted_data = {"hypotheses": [], "findings": [], "unknowns": []}
-
-        # Merge (deduplicated)
-        added_h = 0
-        for h in extracted_data.get("hypotheses", []):
-            if h and isinstance(h, str) and h.strip() and h not in hypotheses:
-                cm.add_hypothesis(h)
-                added_h += 1
-
-        added_f = 0
-        for f in extracted_data.get("findings", []):
-            if f and isinstance(f, str) and f.strip() and f not in findings:
-                cm.add_finding(f)
-                added_f += 1
-
-        added_u = 0
-        for u in extracted_data.get("unknowns", []):
-            if u and isinstance(u, str) and u.strip() and u not in unknowns:
-                cm.add_unknown(u)
-                added_u += 1
-
-        logger.info(
-            f"[INVESTIGATION] Merged → "
-            f"hypotheses +{added_h} | findings +{added_f} | unknowns +{added_u}"
-        )
-
-    except Exception as e:
-        logger.warning(
-            f"[INVESTIGATION] Extraction failed: {type(e).__name__}: {e}",
-            exc_info=False,
-        )
 
 
 async def plan_tasks_unified(
@@ -281,7 +175,6 @@ async def goal_driven_task_loop(
     if current_task:
         if current_task.status == "pending":
             current_task.start(agent)
-            await generate_or_refine_investigation_state(agent)
 
         task_desc = current_task.description
         suggested_tool = current_task.suggested_tool or ""

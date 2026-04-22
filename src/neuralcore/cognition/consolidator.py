@@ -28,11 +28,13 @@ class KnowledgeConsolidator:
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
         self.concept_graph: Dict[str, Any] = {}
 
-        # ====================== NOVELTY DETECTION ======================
+        # ====================== CONFIG ======================
         app_config = getattr(getattr(self.agent, "loader", None), "config", {}).get(
             "app", {}
         )
         cognition_config = app_config.get("cognition", {})
+
+        self.reranker_enabled: bool = cognition_config.get("reranker_enabled", True)
         self.novelty_threshold: float = cognition_config.get("novelty_threshold", 0.85)
 
         # Training data
@@ -55,55 +57,74 @@ class KnowledgeConsolidator:
             "semantic_rescue",
             "kw_x_length",
             "tool_x_source",
-            "category_score",  # NEW: helps the model prefer certain categories
+            "category_score",
         ]
 
-        logger.info(
-            f"✅ KnowledgeConsolidator initialized | novelty_threshold={self.novelty_threshold}"
-        )
+        if self.reranker_enabled:
+            logger.info(
+                f"✅ KnowledgeConsolidator initialized | "
+                f"reranker=ENABLED (lazy load) | novelty_threshold={self.novelty_threshold}"
+            )
+        else:
+            logger.info(
+                "⚠️  KnowledgeConsolidator initialized | reranker=DISABLED (hybrid only)"
+            )
 
-    # ====================== NEW: Get candidates from both sources ======================
+    # ====================== Get candidates from both sources ======================
     def _get_all_candidates(self) -> List[Any]:
         """Combine short-term memory + persistent KnowledgeBase items."""
         candidates: List[Any] = []
 
-        # 1. Short-term memory (existing behavior)
-        short_term = getattr(self.agent.context_manager, "knowledge_base", {})
-        if isinstance(short_term, dict):
-            candidates.extend(list(short_term.values()))
+        cm = self.agent.context_manager
+        if hasattr(cm, "short_term_mem") and isinstance(cm.short_term_mem, dict):
+            candidates.extend(list(cm.short_term_mem.values()))
 
-        # 2. Persistent long-term KnowledgeBase (NEW)
-        kb = getattr(self.agent.context_manager, "knowledge_base", None)
+        kb = getattr(cm, "knowledge_base", None)
         if kb and getattr(kb, "enabled", False) and hasattr(kb, "index"):
             for key, meta in kb.index.get("items", {}).items():
-                # Create lightweight object compatible with feature extraction
                 item = type(
-                    "obj",
+                    "KBItemProxy",
                     (object,),
                     {
                         "key": key,
-                        "content": "",  # content loaded lazily if needed
+                        "content": "",
                         "source_type": "file",
                         "embedding": None,
                         "metadata": meta,
                         "category_path": meta.get("category_path", ""),
+                        "timestamp": meta.get("added_at", time.time()),
                     },
                 )()
                 candidates.append(item)
 
+        logger.debug(
+            f"[CONSOLIDATE] Loaded {len(candidates)} total candidates "
+            f"(short-term + persistent)"
+        )
         return candidates
 
     # ====================== FEATURE EXTRACTION ======================
-    def _extract_features_sync(
+    async def _extract_features(
         self,
         query: str,
         candidates: List[Any],
-        investigation_state: Dict,
         query_emb: Optional[np.ndarray] = None,
     ) -> pd.DataFrame:
+        """Fully async feature extraction with proper embedding."""
         rows = []
         query_words = re.findall(r"\b\w+\b", query.lower())
 
+        # === 2. Fetch query embedding if not provided ===
+        if query_emb is None:
+            try:
+                query_emb = await self.agent.context_manager.fetch_embedding(
+                    query, prefix="query"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to embed query: {e}")
+                query_emb = None
+
+        # === 3. Extract features for each candidate ===
         for item in candidates:
             recency_seconds = time.time() - getattr(item, "timestamp", time.time())
             recency_hours = recency_seconds / 3600.0
@@ -118,7 +139,6 @@ class KnowledgeConsolidator:
             emb = getattr(item, "embedding", None)
             dense = self._safe_cosine(query_emb, emb) if query_emb is not None else 0.0
 
-            # NEW: Category awareness
             category = getattr(item, "category_path", "") or getattr(
                 item, "metadata", {}
             ).get("category_path", "")
@@ -135,7 +155,7 @@ class KnowledgeConsolidator:
                 "semantic_rescue": dense * 2.0 if kw < 4.6 else 0.0,
                 "kw_x_length": kw * np.log1p(length) * 1.1,
                 "tool_x_source": is_tool * source_score * 2.2,
-                "category_score": category_score,  # NEW FEATURE
+                "category_score": category_score,
             }
             rows.append(row)
 
@@ -158,11 +178,72 @@ class KnowledgeConsolidator:
         mapping = {
             "extracted_concept": 3.0,
             "tool_outcome": 2.0,
+            "tool": 2.2,
             "agent_trace": 2.5,
             "raw_knowledge": 1.0,
             "file": 1.8,
         }
         return mapping.get(str(st).lower(), 1.0)
+
+    async def _distill_concepts(
+        self,
+        relevant_items: List[Any],
+        goal: str,
+        existing_concepts: Optional[Dict[str, Any]] = None,
+        max_concepts: int = 7,
+        temperature: float = 0.28,
+    ) -> List[Dict]:
+        if not relevant_items:
+            logger.debug("[DISTILL] No relevant items — skipping")
+            return []
+
+        prompt = PromptBuilder.abstract_concept_extraction(
+            goal=goal,
+            relevant_items=relevant_items,
+            existing_concepts=existing_concepts,
+            max_concepts=max_concepts,
+        )
+
+        try:
+            response = await self.agent.client.ask(
+                prompt, temperature=temperature, max_tokens=5000
+            )
+
+            # Robust JSON extraction
+            cleaned = re.sub(
+                r"^```(?:json)?\s*|\s*```$", "", response.strip(), flags=re.IGNORECASE
+            )
+            cleaned = cleaned.strip()
+
+            # Try to find JSON array even if there's extra text
+            json_match = re.search(r"\[.*\]", cleaned, re.DOTALL)
+            if json_match:
+                cleaned = json_match.group(0)
+
+            concepts = json.loads(cleaned)
+
+            if isinstance(concepts, list):
+                # Filter out low-quality concepts
+                valid_concepts = [
+                    c
+                    for c in concepts
+                    if c.get("name")
+                    and c.get("description")
+                    and c.get("score", 0) > 0.4
+                ]
+
+                logger.info(
+                    f"[DISTILL] Successfully extracted {len(valid_concepts)} abstract concepts "
+                    f"(requested {max_concepts})"
+                )
+                return valid_concepts[:max_concepts]
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"[DISTILL] JSON parsing failed: {e}")
+        except Exception as e:
+            logger.error(f"[DISTILL] LLM extraction failed: {e}")
+
+        return []
 
     # ====================== RERANKING ======================
     async def rerank(
@@ -177,57 +258,61 @@ class KnowledgeConsolidator:
         if len(candidates) <= k:
             return candidates[:k]
 
-        fetch_emb = getattr(self.agent.context_manager, "fetch_embedding", None)
-        query_emb = await fetch_emb(query, prefix="query") if fetch_emb else None
+        if self.reranker_enabled and self.reranker_model is None:
+            await self.load_reranker()
 
-        features_df = await asyncio.to_thread(
-            self._extract_features_sync,
-            query,
-            candidates,
-            self.state.__dict__ if hasattr(self.state, "__dict__") else {},
-            query_emb,
-        )
+        features_df = await self._extract_features(query, candidates)
 
-        if self.reranker_model is not None:
-            scores_raw = await asyncio.to_thread(
-                self.reranker_model.predict, features_df
-            )
-            scores = np.asarray(scores_raw, dtype=np.float64).flatten()
+        # ====================== ML RERANKING (if enabled & model loaded) ======================
+        if self.reranker_enabled and self.reranker_model is not None:
+            try:
+                scores_raw = await asyncio.to_thread(
+                    self.reranker_model.predict, features_df
+                )
+                scores = np.asarray(scores_raw, dtype=np.float64).flatten()
+                logger.debug("[RERANK] Using LambdaMART model")
+            except Exception as e:
+                logger.warning(
+                    f"[RERANK] Model prediction failed: {e} → falling back to hybrid"
+                )
+                scores = self._hybrid_score(features_df)
         else:
-            kw = np.array(features_df.get("keyword_score", 0.0))
-            length = np.array(features_df.get("content_length", 0.0))
-            source = np.array(features_df.get("source_type_score", 0.0))
-            tool = np.array(features_df.get("is_tool_outcome", 0.0))
-            dense = np.array(features_df.get("dense_cosine", 0.0))
-            cat = np.array(features_df.get("category_score", 1.0))
-
-            scores = (
-                kw * 0.40
-                + np.log1p(length) * 0.18
-                + source * 0.12
-                + tool * 0.08
-                + dense * 0.15
-                + cat * 0.07  # NEW: category influence in fallback
-            )
+            scores = self._hybrid_score(features_df)
 
         scored_items = list(zip(candidates, scores))
         ranked = sorted(scored_items, key=lambda x: float(x[1]), reverse=True)
         reranked_items = [item for item, _ in ranked[:k]]
 
-        self._collect_training_sample(query, candidates, reranked_items)
+        await self._collect_training_sample(query, candidates, reranked_items)
         return reranked_items
 
-    def _collect_training_sample(
+    def _hybrid_score(self, features_df: pd.DataFrame) -> np.ndarray:
+        kw = np.array(features_df.get("keyword_score", 0.0))
+        length = np.array(features_df.get("content_length", 0.0))
+        source = np.array(features_df.get("source_type_score", 0.0))
+        tool = np.array(features_df.get("is_tool_outcome", 0.0))
+        dense = np.array(features_df.get("dense_cosine", 0.0))
+        cat = np.array(features_df.get("category_score", 1.0))
+
+        return (
+            kw * 0.35
+            + np.log1p(length) * 0.15
+            + source * 0.10
+            + tool * 0.08
+            + dense * 0.15
+            + cat * 0.07
+        )
+
+    async def _collect_training_sample(
         self, query: str, candidates: List[Any], chosen_items: List[Any]
     ):
+        if not getattr(self, "reranker_enabled", True):
+            return
+
         if len(self.training_data) > 1200:
             return
 
-        features_df = self._extract_features_sync(
-            query,
-            candidates,
-            self.state.__dict__ if hasattr(self.state, "__dict__") else {},
-        )
+        features_df = await self._extract_features(query, candidates)
 
         chosen_ids = {id(item) for item in chosen_items}
         new_samples = []
@@ -239,15 +324,11 @@ class KnowledgeConsolidator:
 
         self.training_data.extend(new_samples)
 
+        # Keep training buffer size under control
         if len(self.training_data) > 900:
             self.training_data = self.training_data[-700:]
 
-        pos = sum(1 for _, label in self.training_data if label > 0)
-        logger.debug(
-            f"[TRAINING DATA] Collected {len(new_samples)} samples | "
-            f"total={len(self.training_data)} | positive={pos}"
-        )
-
+        # Auto-trigger training
         now = time.time()
         if len(self.training_data) >= self.min_samples_for_training:
             if now - getattr(self, "_last_training_ts", 0.0) > 60.0:
@@ -266,37 +347,26 @@ class KnowledgeConsolidator:
             return
         self._last_extraction_ts = now
 
-        if trace is None or len(trace) == 0:
-            trace = (
-                getattr(self.agent.context_manager, "tool_call_history", [])[-30:]
-                + getattr(self.agent.context_manager, "action_log", [])[-30:]
-            )
+        cm = self.agent.context_manager
 
+        goal = getattr(self.agent.state, "task", None) or task_goal or "general task"
+
+        if not trace or len(trace) == 0:
+            trace = (
+                getattr(cm, "tool_call_history", [])[-25:]
+                + getattr(cm, "action_log", [])[-25:]
+            )
         if not trace:
             return
 
-        goal = getattr(self.agent.state, "task", None) or task_goal or "general task"
-        hypotheses = getattr(self.agent.state, "hypotheses", []) or getattr(
-            self.agent.context_manager, "investigation_state", {}
-        ).get("hypotheses", [])
-        findings = getattr(self.agent.state, "findings", []) or getattr(
-            self.agent.context_manager, "investigation_state", {}
-        ).get("findings", [])
-
-        logger.info(f"[CONSOLIDATE] Starting extraction | goal: {goal[:80]}...")
-
-        # === NEW: Use both short-term and persistent KnowledgeBase ===
-        candidates = self._get_all_candidates()
-        relevant = await self.rerank(goal, candidates, k=60)
-
-        novel_relevant = self._filter_novel_items(relevant)
+        novel_relevant = await self._get_novel_relevant(goal)
 
         if not novel_relevant:
-            logger.debug("[CONSOLIDATE] All candidates already known — skipping")
             return
 
+        # Abstract concepts
         extracted = await self._distill_concepts(
-            novel_relevant, goal, hypotheses, findings, self.concept_graph
+            novel_relevant, goal, self.concept_graph
         )
 
         added = 0
@@ -311,18 +381,16 @@ class KnowledgeConsolidator:
                     "goal": goal,
                 },
             )
-
-            if hasattr(self.agent.context_manager, "fetch_embedding"):
-                item.embedding = await self.agent.context_manager.fetch_embedding(
+            if hasattr(cm, "fetch_embedding"):
+                item.embedding = await cm.fetch_embedding(
                     concept.get("description", ""), prefix="passage"
                 )
-
-            self.agent.context_manager.knowledge_base[item.key] = item
+            cm.short_term_mem[item.key] = item
             added += 1
 
         if added > 0:
-            if hasattr(self.agent.context_manager, "_sparse_index_dirty"):
-                self.agent.context_manager._sparse_index_dirty = True
+            if hasattr(cm, "_sparse_index_dirty"):
+                cm._sparse_index_dirty = True
             logger.info(f"✅ Stored {added} new abstract concepts")
 
         self._update_concept_graph(extracted)
@@ -330,7 +398,107 @@ class KnowledgeConsolidator:
         if added >= 1:
             asyncio.create_task(self._schedule_training())
 
-    # ====================== NOVELTY FILTER (unchanged) ======================
+    # ====================== LLM SUGGESTION TRAINING SIGNAL ======================
+    async def record_llm_suggested_tool(self, query: str, tool_name: str):
+        """Record high-quality training signal from LLM planning stage."""
+        if not tool_name or not query or len(self.training_data) > 950:
+            return
+
+        if not getattr(self, "reranker_enabled", True):
+            return
+
+        # Prevent flooding with too many synthetic tool samples
+        existing_tool_samples = sum(
+            1 for row, _ in self.training_data if row.get("tool_x_source", 0) > 0.5
+        )
+        if existing_tool_samples > 140:
+            return
+
+        tool_item = type(
+            "LLMToolSuggestion",
+            (object,),
+            {
+                "key": tool_name,
+                "content": f"LLM recommended for: {query}",
+                "source_type": "tool",
+                "embedding": None,
+                "timestamp": time.time(),
+                "usage_count": 1,
+                "category_path": "llm_suggested",
+            },
+        )()
+
+        features_df = await self._extract_features(query, [tool_item])
+
+        if not features_df.empty:
+            row = features_df.iloc[0].to_dict()
+            self.training_data.append((row, 2))
+
+            logger.info(
+                f"[LLM SUGGESTION] Recorded positive sample | tool='{tool_name}' | query='{query[:55]}...'"
+            )
+
+            # Auto-trigger training
+            if len(self.training_data) >= self.min_samples_for_training:
+                now = time.time()
+                if now - getattr(self, "_last_training_ts", 0.0) > 45.0:
+                    self._last_training_ts = now
+                    asyncio.create_task(self._schedule_training())
+
+    async def record_actual_tool_usage(
+        self, query: str, tool_name: str, success: bool = True
+    ):
+        """Even stronger signal — tool was actually executed successfully."""
+        if not tool_name or not query or len(self.training_data) > 950:
+            return
+
+        if not getattr(self, "reranker_enabled", True):
+            return
+
+        existing_tool_samples = sum(
+            1 for row, _ in self.training_data if row.get("tool_x_source", 0) > 0.5
+        )
+        if existing_tool_samples > 160:
+            return
+
+        tool_item = type(
+            "ActualToolUsage",
+            (object,),
+            {
+                "key": tool_name,
+                "content": f"Actually used for: {query}",
+                "source_type": "tool_outcome",
+                "embedding": None,
+                "timestamp": time.time(),
+                "usage_count": 5,
+                "category_path": "actual_usage",
+            },
+        )()
+
+        features_df = await self._extract_features(query, [tool_item])
+
+        if not features_df.empty:
+            row = features_df.iloc[0].to_dict()
+            label = 2 if success else 0
+            self.training_data.append((row, label))
+
+            logger.info(
+                f"[ACTUAL USAGE] Recorded {'positive' if success else 'negative'} sample | tool='{tool_name}'"
+            )
+
+            # Auto-trigger training
+            if len(self.training_data) >= self.min_samples_for_training:
+                now = time.time()
+                if now - getattr(self, "_last_training_ts", 0.0) > 45.0:
+                    self._last_training_ts = now
+                    asyncio.create_task(self._schedule_training())
+
+    # ====================== NOVELTY FILTER ======================
+    async def _get_novel_relevant(self, goal: str):
+        candidates = self._get_all_candidates()
+        relevant = await self.rerank(goal, candidates, k=50)
+        return self._filter_novel_items(relevant)
+
     def _filter_novel_items(self, candidates: List[Any]) -> List[Any]:
         if not self.concept_graph or not candidates:
             return candidates
@@ -357,66 +525,37 @@ class KnowledgeConsolidator:
 
         return novel
 
-    async def _distill_concepts(
-        self,
-        relevant_items: List[Any],
-        goal: str,
-        hypotheses: List,
-        findings: List,
-        existing_concepts: Optional[Dict[str, Any]] = None,
-    ) -> List[Dict]:
-        if not relevant_items:
-            return []
-
-        prompt = PromptBuilder.abstract_concept_extraction(
-            goal=goal,
-            hypotheses=hypotheses,
-            findings=findings,
-            relevant_items=relevant_items,
-            existing_concepts=existing_concepts,
-        )
-
-        try:
-            response = await self.agent.client.ask(
-                prompt, temperature=0.28, max_tokens=1400
-            )
-            cleaned = re.sub(
-                r"^```(?:json)?\s*|\s*```$", "", response.strip(), flags=re.IGNORECASE
-            )
-            concepts = json.loads(cleaned)
-            if isinstance(concepts, list):
-                logger.info(
-                    f"[DISTILL] Successfully extracted {len(concepts)} abstract concepts"
-                )
-                return concepts
-        except Exception as e:
-            logger.error(f"[DISTILL] LLM extraction failed: {e}")
-
-        return []
-
+    # ====================== UPDATE CONCEPT GRAPH (FIXED) ======================
     def _update_concept_graph(self, concepts: List[Dict]):
         for c in concepts:
             name = c.get("name")
-            if name:
-                description = str(c.get("description") or "").strip()
-                matching_item = next(
-                    (
-                        item
-                        for item in self.agent.context_manager.knowledge_base.values()
-                        if getattr(item, "key", "").startswith("concept_")
+            if not name:
+                continue
+
+            description = str(c.get("description") or "").strip()
+            matching_item = None
+
+            # Safe lookup in short-term memory only (avoid .values() on KnowledgeBase object)
+            cm = self.agent.context_manager
+            if hasattr(cm, "short_term_mem"):
+                for item in cm.short_term_mem.values():
+                    if (
+                        getattr(item, "key", "").startswith("concept_")
                         and description in str(getattr(item, "content", "")).strip()
-                    ),
-                    None,
-                )
-                if (
-                    matching_item
-                    and getattr(matching_item, "embedding", None) is not None
-                ):
-                    c["embedding"] = matching_item.embedding
-                self.concept_graph[name] = c
+                    ):
+                        matching_item = item
+                        break
+
+            if matching_item and getattr(matching_item, "embedding", None) is not None:
+                c["embedding"] = matching_item.embedding
+
+            self.concept_graph[name] = c
 
     # ====================== TRAINING ======================
     async def _schedule_training(self):
+        if not self.reranker_enabled:
+            return
+
         current_samples = len(self.training_data)
         if current_samples < self.min_samples_for_training:
             return
@@ -446,7 +585,7 @@ class KnowledgeConsolidator:
         return str(path / f"{agent_id}_knowledge_consolidator_ltr.txt")
 
     async def train_reranker(self, X: pd.DataFrame, y: np.ndarray, groups: List[int]):
-        if len(X) < 10:
+        if not self.reranker_enabled or len(X) < 10:
             return
 
         model_path = self._get_model_path()
@@ -468,7 +607,7 @@ class KnowledgeConsolidator:
                 "ndcg_eval_at": [5, 10],
                 "learning_rate": 0.035,
                 "num_leaves": 32,
-                "min_data_in_leaf": 4,
+                "min_data_in_leaf": 8,
                 "feature_fraction": 0.88,
                 "bagging_fraction": 0.82,
                 "bagging_freq": 3,
@@ -504,9 +643,16 @@ class KnowledgeConsolidator:
             logger.error(f"Failed to train reranker: {e}", exc_info=True)
 
     async def load_reranker(self):
+        if not self.reranker_enabled:
+            self.reranker_model = None
+            return
+
         model_path = self._get_model_path()
         try:
             if not os.path.exists(model_path):
+                logger.info(
+                    f"No trained model at {model_path}. Will use hybrid scoring."
+                )
                 self.reranker_model = None
                 return
 
@@ -522,6 +668,9 @@ class KnowledgeConsolidator:
             self.reranker_model = None
 
     def reset_model(self, keep_graph: bool = True):
+        if not self.reranker_enabled:
+            return
+
         logger.info("🔄 Resetting LambdaMART model")
         self.training_data.clear()
         self.reranker_model = None

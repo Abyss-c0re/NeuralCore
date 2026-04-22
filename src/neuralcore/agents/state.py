@@ -53,11 +53,6 @@ class AgentState:
     task_tool_assignments: Dict[int, List[str]] = field(default_factory=dict)
     task_dependencies: Dict[int, List[int]] = field(default_factory=dict)
 
-    # ==================== Investigation State ====================
-    hypotheses: List[str] = field(default_factory=list)
-    findings: List[str] = field(default_factory=list)
-    unknowns: List[str] = field(default_factory=list)
-
     # ==================== Sub-agent & Hub Coordination ====================
     sub_task_ids: List[str] = field(default_factory=list)
     task_id_map: Dict[int, str] = field(default_factory=dict)
@@ -285,7 +280,7 @@ class AgentState:
         return warnings
 
     # ==================== Core Methods ====================
-    def reset_for_new_task(self, new_task: str = "", hard: bool = False) -> None:
+    def reset_for_new_task(self, new_task: str = "") -> None:
         """
         Reset for a new top-level goal.
 
@@ -353,17 +348,6 @@ class AgentState:
         self.task = new_task
         self.current_task = ""
         self.current_workflow = "default"
-
-        # === Investigation state: only clear on hard reset ===
-        if hard:
-            self.hypotheses.clear()
-            self.findings.clear()
-            self.unknowns.clear()
-            logger.info("AgentState: Investigation state cleared (hard reset)")
-        else:
-            logger.debug("AgentState: Investigation state preserved across sub-tasks")
-
-        logger.info(f"AgentState reset complete. New goal: '{self.task}' (hard={hard})")
 
     def add_tool_result(
         self, tool_name: str, result: Any, success: bool = True
@@ -544,11 +528,6 @@ class AgentState:
         data["iteration_history"] = self.iteration_history[-10:]
         data["messages"] = self.messages[-20:]
 
-        # === NEW: Investigation state (keep reasonable size) ===
-        data["hypotheses"] = self.hypotheses[-15:] if self.hypotheses else []
-        data["findings"] = self.findings[-20:] if self.findings else []
-        data["unknowns"] = self.unknowns[-10:] if self.unknowns else []
-
         data["findtool_call_count"] = self.findtool_call_count
         data["last_findtool_loop"] = self.last_findtool_loop
         data["tool_calls"] = self.tool_calls or []
@@ -591,7 +570,6 @@ class AgentState:
         for i, step in enumerate(steps):
             expected = step.get("expected_outcome", "") or "Tool executed successfully"
 
-            # NEW: prefer "suggested_tool", fallback to old "suggested_tool_category"
             suggested_tool = step.get("suggested_tool") or step.get(
                 "suggested_tool_category", ""
             )
