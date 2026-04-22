@@ -142,7 +142,6 @@ class PromptBuilder:
         # ── Build clean, readable tools section (grouped by set) ──
         tools_section = ""
         if available_tools:
-            # Sort by set_name then name for logical grouping
             sorted_tools = sorted(
                 available_tools,
                 key=lambda t: (t.get("set_name", ""), t.get("name", "")),
@@ -159,51 +158,48 @@ class PromptBuilder:
 
             tools_text = "\n".join(tools_list)
             tools_section = f"""
-        CURRENTLY AVAILABLE TOOLS (full list — use these exact tools whenever possible):
+    CURRENTLY AVAILABLE TOOLS (full list — use these exact tools whenever possible):
 
-        {tools_text}
+    {tools_text}
 
-        You MUST prefer these real tools. Only suggest a step that cannot be fulfilled by any of them if absolutely necessary.
-        """
+    You MUST prefer these real tools. Only suggest a step that cannot be fulfilled by any of them if absolutely necessary.
+    """
         else:
             tools_section = "\nNo tools are currently registered in the system."
 
         return f"""You are a pragmatic task decomposition expert.
 
-        USER REQUEST: {original_query}
+    USER REQUEST: {original_query}
 
-        {tools_section}
+    {tools_section}
 
-        Break this request into the **minimal number of clear, actionable steps** required to complete the goal.
+    Break this request into the **minimal number of clear, actionable steps** required to complete the goal.
 
-        Core Rules (strict):
-        - **SINGULAR vs MULTI DECISION IS BASED ON YOUR OUTPUT SIZE**: If the request is simple and can be fulfilled with **one tool call or one action**, output **EXACTLY 1 step**. Only create 2 or more steps when there are genuine dependencies, multiple distinct capabilities, or sequential phases that cannot be combined.
-        - Use as few steps as possible. If one tool call can fulfill the request, return exactly 1 step.
-        - Only create multiple steps when there are real dependencies or different capabilities needed.
-        - Each step should correspond to what a single tool execution can realistically achieve.
-        - For "suggested_tool", prefer the **exact tool name** from the full list above when it fits. Otherwise use a short category hint (e.g. "web_search", "file_read").
-        - For "expected_outcome", describe success in simple, practical terms. 
-        Most tool-based steps should have outcomes like:
-        - "Tool executed successfully and returned the requested data"
-        - "File was successfully read/loaded/parsed"
-        - "Content was written to the target file"
-        - "Analysis completed and results produced"
-        - Do NOT invent complex structured objects or deep theoretical results unless the user request explicitly requires them.
+    Core Rules (strict):
+    - **SINGULAR vs MULTI DECISION RULE**: 
+    - Output **EXACTLY 1 step** ONLY if the entire request can be completed with a **single tool call or single atomic action** with no real dependencies.
+    - Output **2 or more steps** whenever the request contains **sequential phases**, **different capabilities**, or **hard dependencies** (e.g. "read file → analyze content → write result", "search → process results → save", etc.).
+    - Common patterns that MUST be split: file reading + content analysis + file writing; data fetching + transformation + output; any request with "first... then..." or multiple distinct phases.
 
-        Output ONLY valid JSON:
+    - Do NOT collapse genuinely sequential or multi-capability tasks into one step just to be minimal. Accuracy of phase separation is more important than having the smallest possible number of steps.
+    - Each step must correspond to what **one realistic tool execution** can achieve.
+    - For "suggested_tool", use the **exact tool name** from the list above when possible. Otherwise use a short category (e.g. "file_read", "code_analysis", "file_write").
+    - For "expected_outcome", keep it short and practical (e.g. "File successfully read", "Analysis completed", "Report written to disk").
 
+    Output ONLY valid JSON:
+
+    {{
+    "steps": [
         {{
-        "steps": [
-            {{
-            "description": "exact sub-task description",
-            "dependencies": [list of previous step indices or empty list],
-            "suggested_tool": "exact tool name if available, otherwise short category hint",
-            "expected_outcome": "short, realistic success description (usually 'Tool executed successfully' or similar)"
-            }}
-        ]
+        "description": "exact sub-task description",
+        "dependencies": [list of previous step indices or empty list],
+        "suggested_tool": "exact tool name if available, otherwise short category hint",
+        "expected_outcome": "short, realistic success description"
         }}
+    ]
+    }}
 
-        Return the plan:"""
+    Return the plan:"""
 
     @staticmethod
     def sub_task_execution(

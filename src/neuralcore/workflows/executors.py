@@ -46,7 +46,7 @@ async def plan_tasks_unified(
 
     try:
         plan_text = await agent.client.chat(
-            planning_prompt, temperature=0.0, max_tokens=1500
+            planning_prompt, temperature=0.0, max_tokens=agent.client.max_tokens
         )
         logger.info(f"[PLANNING RAW] LLM returned {len(plan_text)} chars")
 
@@ -279,7 +279,7 @@ async def goal_driven_task_loop(
     messages = await agent.context_manager.provide_context(
         query=current_query,
         max_input_tokens=agent.max_tokens,
-        reserved_for_output=12000,
+        reserved_for_output=agent.max_tokens * 0.45,
         include_logs=True,
         chat=False,
         lightweight_agentic=True,
@@ -411,8 +411,8 @@ async def goal_driven_task_loop(
         try:
             validation_messages = await agent.context_manager.provide_context(
                 query=validation_query,
-                max_input_tokens=agent.max_tokens,
-                reserved_for_output=2500,
+                max_input_tokens=agent.max_tokens * 0.45,
+                reserved_for_output=agent.client.max_tokens * 0.25,
                 include_logs=True,
                 chat=False,
                 lightweight_agentic=False,
