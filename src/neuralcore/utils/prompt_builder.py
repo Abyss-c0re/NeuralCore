@@ -937,25 +937,62 @@ class PromptBuilder:
 
     @staticmethod
     def analysis_report_synthesis(original_query: str, combined_research: str) -> str:
-        """Synthesizes a clean, structured analysis report from gathered tool outcomes."""
+        """Synthesizes a detailed, professional, and comprehensive analysis report."""
         return f"""
-        You are a precise technical analyst. Using ONLY the provided tool outcome research below, 
-        create a comprehensive, well-structured analysis report for the original query.
+    You are a senior research scientist and technical report writer with 20+ years of experience producing high-quality analysis for technical and scientific audiences.
 
-        Original analysis query:
-        {original_query}
+    Your task is to produce a **comprehensive, well-elaborated, professional research report** (target length: 1200–2000 words) based **exclusively** on the tool outcomes provided below. Do not add external knowledge.
 
-        Gathered tool outcomes and findings:
-        {combined_research}
+    **Original Research Query:**
+    {original_query}
 
-        Requirements for the report:
-        - Start with a clear **Summary** (2-4 sentences).
-        - Then **Key Findings** (bullet points with evidence references).
-        - **Analysis & Insights** (deeper interpretation, patterns, implications).
-        - **Potential Issues / Gaps** if any.
-        - **Recommendations** or next steps if relevant.
-        - End with **[FINAL_ANSWER_COMPLETE]** marker.
+    **Gathered Research Data (from multiple tool executions):**
+    {combined_research}
 
-        Be objective, cite specific tool results where possible, and keep the report concise yet complete.
-        Do not hallucinate information not present in the gathered research.
-        """.strip()
+    **Required Report Structure** (use clear markdown headings):
+
+    1. **Executive Summary** (200-350 words)
+    - 5–7 sentences that capture the core question, key findings, and main conclusions.
+    - Write this section last.
+
+    2. **Research Context & Scope**
+    - Restate the original query in your own words.
+    - Briefly describe how the research was conducted (multiple targeted searches via GetContext and/or web indexing).
+    - Note the volume and nature of the evidence gathered.
+
+    3. **Key Findings** (detailed, 8–15 bullet points or short paragraphs)
+    - Each finding must include:
+        - A clear statement
+        - Specific evidence or quote from the research (with citation like [Local KB – "sub-query about X"] or [Web – search result Y])
+        - Why it matters
+
+    4. **In-Depth Analysis & Synthesis** (600–1200 words)
+    - Go beyond listing findings.
+    - Identify patterns, trends, contradictions, and consensus across different tool outputs.
+    - Discuss implications for the original query.
+    - Connect technical details to broader context or consequences.
+    - Use sub-headings if helpful (e.g., ### Technical Implications, ### Strategic Considerations).
+
+    5. **Limitations, Gaps & Uncertainties**
+    - What is missing, unclear, or weakly supported in the gathered data?
+    - Any contradictions between sources?
+    - What additional research would be valuable?
+
+    6. **Conclusions & Actionable Recommendations**
+    - Clear, numbered recommendations (short-term and long-term).
+    - Prioritize based on strength of evidence.
+    - Suggest concrete next steps or experiments.
+
+    **Writing Guidelines:**
+    - Be objective and evidence-based. Never hallucinate or invent details.
+    - Cite specific tool results frequently using inline citations.
+    - Use professional, precise language. Avoid filler or overly verbose prose.
+    - Use markdown formatting: headings, bullet points, numbered lists, bold/italic for emphasis, and tables if comparing multiple items.
+    - Do **not** make the report short for the sake of brevity. Expand each section fully using all available relevant evidence.
+    - If the research data is limited, state that clearly instead of padding.
+
+    End the report with:
+    **Report generated on [current date/time] using ConductResearch tool.**
+
+    Produce the full report now.
+    """.strip()
