@@ -5,7 +5,7 @@ import time
 import numpy as np
 import hashlib
 import json
-from typing import Tuple, List, Dict, Any, Optional, AsyncIterable
+from typing import Tuple, List, Dict, Any, AsyncIterable
 from neuralcore.utils.logger import Logger
 from neuralcore.utils.prompt_builder import PromptBuilder
 from neuralcore.utils.config import get_loader
@@ -20,13 +20,7 @@ from neuralcore.cognition.knowledge import KnowledgeBase
 # scikit-learn for sparse vectors
 from sklearn.feature_extraction.text import TfidfVectorizer
 
-try:
-    from fastembed import TextEmbedding
-
-    FASTEMBED_AVAILABLE = True
-except ImportError:
-    TextEmbedding = None
-    FASTEMBED_AVAILABLE = False
+from fastembed import TextEmbedding
 
 
 # ─────────────────────────────────────────────────────────────
@@ -43,7 +37,6 @@ SLICE_SIZE = 6  # Bigger window for off-topic detection
 # ─────────────────────────────────────────────────────────────
 CHUNK_SIZE_TOKENS = 768  # ← Recommended increase from 512
 CHUNK_OVERLAP_TOKENS = 128  # ~17% overlap (good sweet spot)
-MAX_CHUNKS_PER_ITEM = 12  # Allow more chunks for large files/code
 TOOL_OUTCOME_NO_CHUNK_THRESHOLD = 1500  # Only chunk very large tool outputs
 
 logger = Logger.get_logger()
@@ -63,13 +56,7 @@ class ContextManager:
         loader = get_loader()
         embed_config = loader.get_client_config("embeddings") or {}
 
-        self.use_fastembed = embed_config.get("use_fastembed", True)
-        self.fast_embedder = None
-        self.fastembed_model = None
-
-        # Initialize FastEmbed with full config support
-        if self.use_fastembed and TextEmbedding is not None:
-            self._init_fastembed(embed_config)
+        self.fast_embedder = self._init_fastembed(embed_config)
 
         # Tokenizer setup (unchanged)
         self.tokenizer = None
@@ -142,49 +129,38 @@ class ContextManager:
 
         init_kwargs = {"model_name": model_name}
 
-        try:
-            # === Handle tilde expansion for local_path ===
-            if local_path:
-                # Expand ~, ~user, and environment variables
-                expanded_local = os.path.expanduser(local_path)
-                expanded_local = os.path.expandvars(
-                    expanded_local
-                )  # in case someone uses $HOME
-                expanded_local = os.path.abspath(expanded_local)  # make it absolute
+        # === Handle tilde expansion for local_path ===
+        if local_path:
+            # Expand ~, ~user, and environment variables
+            expanded_local = os.path.expanduser(local_path)
+            expanded_local = os.path.expandvars(
+                expanded_local
+            )  # in case someone uses $HOME
+            expanded_local = os.path.abspath(expanded_local)  # make it absolute
 
-                if os.path.isdir(expanded_local):
-                    init_kwargs["specific_model_path"] = expanded_local
-                    logger.info(
-                        f"✅ FastEmbed: Loading from local path → {expanded_local}"
-                    )
-                else:
-                    logger.warning(
-                        f"⚠️  fastembed_local_path '{local_path}' (resolved to '{expanded_local}') does not exist. "
-                        f"Falling back to Hugging Face cache/download."
-                    )
-
-            # === Cache directory (also expand ~) ===
-            if cache_dir:
-                expanded_cache = os.path.abspath(
-                    os.path.expanduser(os.path.expandvars(cache_dir))
+            if os.path.isdir(expanded_local):
+                init_kwargs["specific_model_path"] = expanded_local
+                logger.info(f"✅ FastEmbed: Loading from local path → {expanded_local}")
+            else:
+                logger.warning(
+                    f"⚠️  fastembed_local_path '{local_path}' (resolved to '{expanded_local}') does not exist. "
+                    f"Falling back to Hugging Face cache/download."
                 )
-                init_kwargs["cache_dir"] = expanded_cache
-                logger.info(f"   FastEmbed cache directory: {expanded_cache}")
 
-            # === Offline mode ===
-            if local_files_only:
-                init_kwargs["local_files_only"] = True
-                logger.info("   FastEmbed: local_files_only=True (strict offline mode)")
-            if self.use_fastembed and TextEmbedding is not None:
-                # Initialize
-                self.fast_embedder = TextEmbedding(**init_kwargs)
-                self.fastembed_model = model_name
+        # === Cache directory (also expand ~) ===
+        if cache_dir:
+            expanded_cache = os.path.abspath(
+                os.path.expanduser(os.path.expandvars(cache_dir))
+            )
+            init_kwargs["cache_dir"] = expanded_cache
+            logger.info(f"   FastEmbed cache directory: {expanded_cache}")
 
-                logger.info(f"✅ FastEmbed ready (model: {model_name})")
-
-        except Exception as e:
-            logger.warning(f"⚠️ FastEmbed init failed: {e}")
-            self.fast_embedder = None
+        # === Offline mode ===
+        if local_files_only:
+            init_kwargs["local_files_only"] = True
+            logger.info("   FastEmbed: local_files_only=True (strict offline mode)")
+            # Initialize
+        return TextEmbedding(**init_kwargs)
 
     async def set_mode(self, mode: str) -> None:
         async with self._mode_lock:
@@ -379,14 +355,20 @@ class ContextManager:
         emb = np.array([])
 
         if self.fast_embedder is not None:
-            fast_embedder = self.fast_embedder  # Pyright narrowing
-            input_text = f"{prefix}: {text}" if prefix else text
             try:
 
                 def _embed_sync():
-                    return np.asarray(
-                        list(fast_embedder.embed([input_text]))[0], dtype=np.float32
-                    )
+                    # Proper prefix handling for BGE models
+                    if prefix == "query":
+                        return np.asarray(
+                            list(self.fast_embedder.embed([text], prefix="query"))[0],
+                            dtype=np.float32,
+                        )
+                    else:
+                        return np.asarray(
+                            list(self.fast_embedder.embed([text], prefix="passage"))[0],
+                            dtype=np.float32,
+                        )
 
                 emb = await asyncio.to_thread(_embed_sync)
             except Exception as e:
@@ -610,25 +592,24 @@ class ContextManager:
     # CHUNKING (improved – uses real tokenizer when available)
     # ─────────────────────────────────────────────────────────────
     def _chunk_text(
-        self, text: str, parent_key: str, source_type: str
+        self,
+        text: str,
+        parent_key: str,
+        source_type: str,
+        merge: bool = False,  # ← NEW: default = True (always one file)
     ) -> List[KnowledgeItem]:
-        """Chunk text and generate unique keys.
-
-        For streaming tool outcomes we use content hash in the key to prevent collisions
-        across multiple calls to add_external_content under the same parent_key.
+        """Chunk text.
+        If merge=True → always return exactly ONE KnowledgeItem with full content.
+        If merge=False → return multiple chunk items (legacy behavior).
         """
         if len(text) < TOOL_OUTCOME_NO_CHUNK_THRESHOLD:
             chunk_texts = [text]
         else:
             if self.tokenizer:
                 chunk_texts = self.tokenizer.split_text_into_chunks(
-                    text,
-                    max_tokens=CHUNK_SIZE_TOKENS,
-                    overlap=CHUNK_OVERLAP_TOKENS,
+                    text, max_tokens=CHUNK_SIZE_TOKENS, overlap=CHUNK_OVERLAP_TOKENS
                 )
-                chunk_texts = chunk_texts[:MAX_CHUNKS_PER_ITEM]
             else:
-                # fallback character-based
                 chunk_size = CHUNK_SIZE_TOKENS * 4
                 overlap = CHUNK_OVERLAP_TOKENS * 4
                 chunks = []
@@ -637,30 +618,45 @@ class ContextManager:
                     end = start + chunk_size
                     chunks.append(text[start:end])
                     start = end - overlap
-                chunk_texts = chunks[:MAX_CHUNKS_PER_ITEM]
+                chunk_texts = chunks
 
-        items: List[KnowledgeItem] = []
-        for i, chunk_content in enumerate(chunk_texts):
-            if not chunk_content.strip():
-                continue
+        if not chunk_texts:
+            return []
 
-            # === KEY FIX: Use content hash for uniqueness ===
-            content_hash = hashlib.md5(chunk_content.encode("utf-8")).hexdigest()[:12]
-
-            chunk_key = f"{parent_key}_chunk_{content_hash}"
+        if merge:
+            # === NEW BEHAVIOR: Always one file ===
+            full_content = "\n\n".join(chunk_texts)
+            content_hash = hashlib.md5(full_content.encode("utf-8")).hexdigest()[:12]
+            item_key = f"{parent_key}_full_{content_hash}"
 
             metadata = {
                 "parent_key": parent_key,
-                "chunk_index": i,  # keep original order
-                "content_hash": content_hash,
                 "total_chunks": len(chunk_texts),
                 "source_type": source_type,
+                "is_merged": True,
+                "chunked": len(chunk_texts) > 1,
             }
-
-            item = KnowledgeItem(chunk_key, source_type, chunk_content, metadata)
-            items.append(item)
-
-        return items
+            return [KnowledgeItem(item_key, source_type, full_content, metadata)]
+        else:
+            # === OLD BEHAVIOR: Multiple items (for streaming tool outcomes) ===
+            items = []
+            for i, chunk_content in enumerate(chunk_texts):
+                if not chunk_content.strip():
+                    continue
+                content_hash = hashlib.md5(chunk_content.encode("utf-8")).hexdigest()[
+                    :12
+                ]
+                chunk_key = f"{parent_key}_chunk_{content_hash}"
+                metadata = {
+                    "parent_key": parent_key,
+                    "chunk_index": i,
+                    "total_chunks": len(chunk_texts),
+                    "source_type": source_type,
+                }
+                items.append(
+                    KnowledgeItem(chunk_key, source_type, chunk_content, metadata)
+                )
+            return items
 
     async def _add_streaming_chunk_batch(
         self,
@@ -1160,88 +1156,98 @@ class ContextManager:
     async def ranked_retrieve(
         self,
         query: str,
-        max_kb_tokens: int = 5000,
-        k: int = 12,
+        max_kb_tokens: int = 4500,
+        k: int = 25,
         research_mode: bool = False,
     ) -> str:
-        """Hybrid retrieval: short-term memory + persistent KnowledgeBase.
-
-        When research_mode=True:
-            - Only tool_outcome items are considered (cleanest signal for research)
-            - Still uses full hybrid RRF + file/param boosting + consolidator reranking
-        When research_mode=False (default): normal mixed retrieval.
+        """Proper chunk-aware RAG retrieval.
+        - Pulls many small chunks from KnowledgeBase (respects `k`)
+        - Reranks with consolidator (if present)
+        - Strictly respects token budget
         """
         if not query.strip():
             return ""
 
         logger.debug(
             f"[RANKED_RETRIEVE] START | query='{query[:80]}...' | "
-            f"short_term={len(self.short_term_mem)} | "
-            f"persistent_enabled={getattr(self.knowledge_base, 'enabled', False)} | "
-            f"research_mode={research_mode}"
+            f"k={k} | research={research_mode} | budget={max_kb_tokens}"
         )
 
-        # === 1. Get candidates from SHORT-TERM memory ===
-        short_term_candidates = await self._get_broad_candidates(query)
+        # 1. Get candidates (now respects k)
+        short_term = await self._get_broad_candidates(query)
 
-        # === 2. Get candidates from PERSISTENT KnowledgeBase ===
-        long_term_candidates: List[KnowledgeItem] = []
+        long_term = []
         if getattr(self.knowledge_base, "enabled", False):
             try:
-                long_term_candidates = await self.knowledge_base.retrieve(
-                    query, k=15, categories=None
-                )
-                logger.debug(
-                    f"[RANKED_RETRIEVE] Persistent KB returned {len(long_term_candidates)} items"
-                )
+                # Pull a bit more than k for better reranking, but respect the parameter
+                retrieve_k = max(k * 2, 40)
+                long_term = await self.knowledge_base.retrieve(query, k=retrieve_k)
+                logger.debug(f"Persistent KB returned {len(long_term)} chunk items")
             except Exception as e:
-                logger.warning(f"Persistent KB retrieve failed: {e}")
+                logger.warning(f"KB retrieve failed: {e}")
 
-        # === 3. Merge + deduplicate ===
-        all_candidates = short_term_candidates + long_term_candidates
-
+        # 2. Deduplicate
+        all_candidates = short_term + long_term
         seen = set()
-        unique_candidates = []
+        unique = []
         for item in all_candidates:
             key = getattr(item, "key", id(item))
             if key not in seen:
                 seen.add(key)
-                unique_candidates.append(item)
+                unique.append(item)
 
-        logger.debug(
-            f"[RANKED_RETRIEVE] Combined unique candidates: {len(unique_candidates)}"
-        )
-
-        # === RESEARCH MODE FILTER ===
         if research_mode:
-            original_count = len(unique_candidates)
-            unique_candidates = [
+            unique = [
                 item
-                for item in unique_candidates
-                if getattr(item, "source_type", None) in ("tool_outcome", "file")
-                # ^^^ now includes both live tool results AND persistent KnowledgeBase documents
+                for item in unique
+                if getattr(item, "source_type", "") in ("tool_outcome", "file")
             ]
-            logger.debug(
-                f"[RESEARCH_MODE] Filtered to tool_outcomes + KB files: {original_count} → {len(unique_candidates)}"
-            )
-            if not unique_candidates:
-                logger.debug(
-                    "[RESEARCH_MODE] No relevant items (tool_outcome or file) found"
-                )
+            if not unique:
+                logger.debug("[RANKED_RETRIEVE] No research-mode candidates")
                 return ""
 
-        # === 4. Rerank with consolidator ===
-        if self.consolidator and unique_candidates:
-            reranked = await self.consolidator.rerank(query, unique_candidates, k=k)
-        else:
-            reranked = unique_candidates[:k]
+        if not unique:
+            logger.debug("[RANKED_RETRIEVE] No candidates")
+            return ""
 
-        # === 5. Format final output ===
-        result = await self._format_knowledge_blocks(reranked, max_kb_tokens)
+        # 3. Rerank (now uses k)
+        rerank_k = min(len(unique), max(k * 2, 30))
+        if self.consolidator:
+            reranked = await self.consolidator.rerank(query, unique, k=rerank_k)
+        else:
+            reranked = unique[:rerank_k]
+
+        # 4. Greedy selection within strict token budget
+        parts = []
+        remaining = max_kb_tokens
+        used_tokens = 0
+
+        for item in reranked:
+            content = getattr(item, "content", "").strip()
+            if not content:
+                continue
+
+            item_tokens = self.count_tokens([{"role": "user", "content": content}])
+
+            if item_tokens <= remaining:
+                parts.append(content)
+                remaining -= item_tokens
+                used_tokens += item_tokens
+            else:
+                if remaining > 300:
+                    ratio = remaining / item_tokens
+                    truncated = content[: int(len(content) * ratio * 0.92)]
+                    parts.append(truncated + " …")
+                    used_tokens += self.count_tokens(
+                        [{"role": "user", "content": truncated}]
+                    )
+                break
+
+        result = "\n\n---\n\n".join(parts).strip()
 
         logger.debug(
-            f"[RANKED_RETRIEVE] END → {len(result):,} chars from {len(reranked)} items "
-            f"(research_mode={research_mode})"
+            f"[RANKED_RETRIEVE] END → {len(result):,} chars / ~{used_tokens} tokens "
+            f"from {len(parts)} chunks (k={k}, budget={max_kb_tokens})"
         )
         return result
 
@@ -1276,38 +1282,6 @@ class ContextManager:
                 return True
 
         return False
-
-    async def _format_knowledge_blocks(
-        self, items: List[KnowledgeItem], max_tokens: int
-    ) -> str:
-        """Format reranked KnowledgeItems into final context string."""
-        parts: List[str] = []
-        used = 0
-
-        for item in items:
-            meta_str = ", ".join(f"{k}={v}" for k, v in item.metadata.items() if v)
-            header = PromptBuilder.knowledge_block_header(
-                source_type=item.source_type,
-                key=item.key,
-                meta_str=meta_str,
-            )
-            block = (
-                f"{header}{item.content}\n{PromptBuilder.knowledge_block_separator()}"
-            )
-
-            block_tokens = (
-                self.tokenizer.count_tokens(block)
-                if self.tokenizer
-                else len(block) // 4
-            )
-
-            if used + block_tokens > max_tokens:
-                break
-
-            parts.append(block)
-            used += block_tokens
-
-        return "".join(parts)
 
     async def add_message(
         self, role: str, message: str, embedding: np.ndarray | None = None
@@ -1557,7 +1531,7 @@ class ContextManager:
                     content = str(msg.get("content", "")).strip()
                     formatted.append(f"{role}:\n{content}")
                 context = "\n\n".join(formatted)
-                logger.debug(f"Context provided: {context}")
+                #logger.debug(f"Context provided: {context}")
                 return context
 
             return messages
@@ -1590,8 +1564,7 @@ class ContextManager:
             # ── ORIGINAL RICH AGENTIC MODE ──
             summary = self.get_context_summary()
             full_system = (
-                PromptBuilder.agentic_action_system_prefix()
-                + f"\n\n{summary}\n\n{PromptBuilder.context_summary_instruction()}"
+                f"\n\n{summary}\n\n{PromptBuilder.context_summary_instruction()}"
             )
 
             if include_logs:
@@ -1617,9 +1590,12 @@ class ContextManager:
         target = max_input_tokens - reserved_for_output
         remaining = max(0, target - tokens_used - query_tokens)
 
-        kb_tokens = (
-            min(max_kb_tokens, remaining // 3) if not lightweight_agentic else 1800
-        )
+        if research_mode:
+            kb_tokens = min(18000, max(4000, remaining // 2))  # much more aggressive
+        else:
+            kb_tokens = (
+                min(max_kb_tokens, remaining // 3) if not lightweight_agentic else 1800
+            )
 
         # ── Collect external context (KB) ──
         context_parts: List[str] = []
@@ -1721,7 +1697,7 @@ class ContextManager:
                 content = str(msg.get("content", "")).strip()
                 formatted.append(f"{role}:\n{content}")
             context = "\n\n".join(formatted)
-            logger.debug(f"Context provided: {context}")
+            #logger.debug(f"Context provided: {context}")
             return context
 
         return messages
