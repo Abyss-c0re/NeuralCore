@@ -286,6 +286,7 @@ def tool(set_name: str, **kwargs):
         # === NEW: Explicitly read confirmation parameters ===
         require_confirmation = kwargs.get("require_confirmation", False)
         confirmation_preview = kwargs.get("confirmation_preview")
+        record_to_context = kwargs.get("record_to_context", True)
 
         sig = signature(fn)
         parameters = dict(kwargs.get("parameters", {}))
@@ -339,6 +340,7 @@ def tool(set_name: str, **kwargs):
             hidden_for_subagents=kwargs.get("hidden_for_subagents", False),
             require_confirmation=require_confirmation,
             confirmation_preview=confirmation_preview,
+            record_to_context=record_to_context,
         )
 
         # Register (unchanged)

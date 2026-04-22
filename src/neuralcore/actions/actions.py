@@ -24,10 +24,9 @@ class Action:
         confirmation_preview: Optional[Callable[[dict], str]] = None,
         tags: Optional[List[str]] = None,
         aliases: Optional[List[str]] = None,
-        # ==================== NEW: PER-AGENT + SUB-AGENT HIDING ====================
-        hidden_for_agents: Optional[List[str]] = None,  # specific agent_ids
-        hidden_for_subagents: bool = False,  # optional sub-agent flag
-        # =========================================================================
+        hidden_for_agents: Optional[List[str]] = None,
+        hidden_for_subagents: bool = False,
+        record_to_context: bool = True,  # ← NEW FLAG
     ):
         if action_type not in {"tool", "function"}:
             raise ValueError("action_type must be 'tool' or 'function'")
@@ -51,7 +50,9 @@ class Action:
         )
         self.hidden_for_subagents = hidden_for_subagents
 
-        self._bound_agent = None  # Only stores validated agent instances
+        self.record_to_context = record_to_context
+        # =========================================================
+        self._bound_agent = None
 
         # Build schema (exclude self/agent from LLM parameters)
         props = {k: v for k, v in parameters.items() if k not in ("agent", "self")}
@@ -81,15 +82,13 @@ class Action:
         self._first_param_name = params[0].name if params else None
         self._needs_agent = self._first_param_name in ("self", "agent")
 
-    # ====================== BINDING ======================
-
+    # ====================== BINDING ====================== (unchanged)
     def bind_agent(self, agent: Any) -> "Action":
         """Bind agent instance with proper validation based on parameter name."""
         if agent is None:
             raise ValueError(f"Cannot bind None as agent to action '{self.name}'")
 
         if self._first_param_name == "self":
-            # Strict validation: when declared as 'self', it MUST be a real Agent
             if not self._is_valid_agent(agent):
                 raise TypeError(
                     f"Action '{self.name}' is defined with 'self' as first parameter. "
@@ -98,7 +97,6 @@ class Action:
                     f"→ Use parameter name 'agent' instead of 'self' if binding non-Agent classes."
                 )
 
-        # For parameter name 'agent', we are more permissive (but still require agent_id)
         elif self._first_param_name == "agent":
             if not self._is_valid_agent(agent):
                 logger.warning(
@@ -113,26 +111,17 @@ class Action:
         return self
 
     def _is_valid_agent(self, obj: Any) -> bool:
-        """Validate that the object is an Agent instance by checking for .agent_id attribute."""
         if obj is None:
             return False
-        # Primary check: Agent class always has .agent_id
         return hasattr(obj, "agent_id") and isinstance(getattr(obj, "agent_id"), str)
 
     # ====================== EXECUTION ======================
-
     async def __call__(self, **kwargs) -> Any:
-        """Execute the action — now with full support for streaming results.
-
-        Streaming support:
-        - If the executor returns an AsyncIterable (async generator or async iterator),
-        it is passed directly to context_manager.record_tool_outcome() as a stream.
-        - This enables chunk-by-chunk embedding without holding the entire output in memory.
-        """
+        """Execute the action — now with support for skipping context recording."""
         logger.info(f"[ACTION START] {self.name}")
         logger.debug(f"[ACTION INPUT] {self.name} kwargs={kwargs}")
 
-        # ==================== CONFIRMATION CHECK (unchanged) ====================
+        # Confirmation check (unchanged)
         confirmation_bypassed = kwargs.pop("_confirmation_passed", False)
         if self.require_confirmation and not confirmation_bypassed:
             preview = self.confirmation_preview(kwargs)
@@ -156,19 +145,13 @@ class Action:
 
             self.usage_count += 1
 
-            # ====================== STREAMING DETECTION & HANDLING ======================
+            # Streaming detection
             is_streaming = False
-            if hasattr(
-                result, "__aiter__"
-            ):  # AsyncIterable (async generator, async iterator, etc.)
+            if hasattr(result, "__aiter__"):
                 is_streaming = True
-                logger.info(
-                    f"[ACTION STREAMING] {self.name} → detected async iterable result"
-                )
+                logger.info(f"[ACTION STREAMING] {self.name} → detected async iterable")
                 final_result_for_history = f"<streaming output — {self.name} — chunks will be embedded incrementally>"
-
             else:
-                # Original sync / full-result path
                 if isinstance(result, (dict, list, tuple)):
                     try:
                         final_result = json.dumps(result, ensure_ascii=False, indent=2)
@@ -184,7 +167,6 @@ class Action:
 
             success = not (isinstance(result, dict) and result.get("status") == "error")
 
-            # ====================== GENERIC SUCCESS INDICATOR ======================
             step_success_indicator = {
                 "tool_name": self.name,
                 "success": success,
@@ -195,31 +177,33 @@ class Action:
                 "streamed": is_streaming,
             }
 
-            # ====================== RECORDING ======================
-            if self._bound_agent is not None:
-                if hasattr(self._bound_agent, "context_manager"):
-                    try:
-                        await self._bound_agent.context_manager.record_tool_outcome(
-                            tool_name=self.name,
-                            result=result,  # ← Pass raw result (can be AsyncIterable)
-                            metadata={
-                                "args": kwargs,
-                                "action_type": self.type,
-                                "usage_count": self.usage_count,
-                                "success": success,
-                                "raw_type": type(result).__name__,
-                                "streamed": is_streaming,
-                                "step_success_indicator": step_success_indicator,
-                            },
-                        )
-
-                    except Exception as e:
-                        logger.warning(f"[CONTEXT RECORD FAILED] {self.name}: {e}")
+            # ====================== RECORDING (NOW CONDITIONAL) ======================
+            if (
+                self._bound_agent is not None
+                and hasattr(self._bound_agent, "context_manager")
+                and self.record_to_context  # ← NEW CHECK
+            ):
+                try:
+                    await self._bound_agent.context_manager.record_tool_outcome(
+                        tool_name=self.name,
+                        result=result,
+                        metadata={
+                            "args": kwargs,
+                            "action_type": self.type,
+                            "usage_count": self.usage_count,
+                            "success": success,
+                            "raw_type": type(result).__name__,
+                            "streamed": is_streaming,
+                            "step_success_indicator": step_success_indicator,
+                        },
+                    )
+                except Exception as e:
+                    logger.warning(f"[CONTEXT RECORD FAILED] {self.name}: {e}")
 
             logger.info(
-                f"[ACTION SUCCESS] {self.name} | success={success} | streamed={is_streaming}"
+                f"[ACTION SUCCESS] {self.name} | success={success} | streamed={is_streaming} | recorded={self.record_to_context}"
             )
-            return final_result_for_history  # Return a short placeholder for streaming case
+            return final_result_for_history
 
         except ConfirmationRequired:
             raise
@@ -233,8 +217,11 @@ class Action:
                 "args": kwargs,
             }
 
-            if self._bound_agent is not None and hasattr(
-                self._bound_agent, "context_manager"
+            # Still record errors unless explicitly told not to
+            if (
+                self._bound_agent is not None
+                and hasattr(self._bound_agent, "context_manager")
+                and self.record_to_context
             ):
                 await self._bound_agent.context_manager.record_tool_outcome(
                     tool_name=self.name,
