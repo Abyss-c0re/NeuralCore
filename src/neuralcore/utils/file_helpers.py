@@ -11,6 +11,113 @@ from neuralcore.utils.logger import Logger
 
 logger = Logger.get_logger()
 
+IGNORE_DIRS = {
+    ".git",
+    "node_modules",
+    "venv",
+    "env",
+    "__pycache__",
+    "build",
+    "dist",
+    ".venv",
+    ".idea",
+    ".vscode",
+    ".pytest_cache",
+    ".mypy_cache",
+    "target",
+    "Cargo.lock",
+    ".next",
+    ".nuxt",
+    "coverage",
+    "htmlcov",
+}
+IGNORE_FILES = {".DS_Store", "Thumbs.db", ".gitignore", "*.pyc", "*.pyo", "*.pyd"}
+
+
+# ─────────────────────────────────────────────────────────────
+# ASYNC TEXT FILE DETECTOR 
+# ─────────────────────────────────────────────────────────────
+async def _is_text_file(file_path: str, sample_size: int = 8192) -> bool:
+    """
+    Async content-based text detection.
+    Replaces all hardcoded extension lists.
+    """
+    if not os.path.isfile(file_path) or os.path.islink(file_path):
+        return False
+    try:
+        async with aiofiles.open(file_path, "rb") as f:
+            sample = await f.read(sample_size)
+        if not sample:
+            return True
+        if b"\x00" in sample:
+            return False
+        control_chars = sum(1 for b in sample if b < 32 and b not in (9, 10, 13))
+        return (control_chars / len(sample)) < 0.06
+    except (PermissionError, OSError, asyncio.TimeoutError):
+        return False
+    except Exception as e:
+        logger.debug(f"_is_text_file failed for {file_path}: {e}")
+        return False
+
+
+
+# ─────────────────────────────────────────────────────────────
+# UNIVERSAL TEXT FILE COLLECTOR 
+# ─────────────────────────────────────────────────────────────
+async def _collect_text_files(
+    folder_path: str,
+    recursive: bool = True,
+    max_files: int = 200,
+    sort_by: str = "name",  # "name" | "path" | "size"
+) -> List[str]:
+    """
+    Recursively collect text files using async content detection.
+    No extensions hardcoded. Respects IGNORE_* and max_files.
+    """
+    if not os.path.isdir(folder_path):
+        return []
+
+    candidates: List[str] = []
+    files_count = 0
+
+    for root, dirs, files in os.walk(folder_path, followlinks=False):
+        if not recursive:
+            dirs.clear()
+
+        # Filter ignored dirs in-place
+        dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
+
+        for f in sorted(files):
+            if f in IGNORE_FILES:
+                continue
+
+            file_path = os.path.join(root, f)
+            candidates.append(file_path)
+            files_count += 1
+
+            if files_count >= max_files * 2:  # small buffer for filtering
+                break
+
+        if files_count >= max_files * 2:
+            break
+
+    if not candidates:
+        return []
+
+    # Parallel text checks (much faster than sequential for large folders)
+    tasks = [_is_text_file(p) for p in candidates]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    text_files = [p for p, ok in zip(candidates, results) if ok is True][:max_files]
+
+    # Optional sorting
+    if sort_by == "name":
+        text_files.sort(key=os.path.basename)
+    elif sort_by == "size":
+        text_files.sort(key=lambda p: os.path.getsize(p) if os.path.exists(p) else 0)
+
+    return text_files
+
 
 async def _read_pdf_file(file_path: str) -> str | AsyncIterable[str]:
     """Internal helper for PDF files."""
