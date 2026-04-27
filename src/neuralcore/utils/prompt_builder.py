@@ -20,34 +20,34 @@ class PromptBuilder:
     def shell_helper(user_input: str) -> str:
         """Generates a shell command prompt tailored to the actual distro."""
         return f"""
-        Generate a SINGLE, non-interactive shell command for this system: **{get_os_info()}**
+Generate a SINGLE, non-interactive shell command for this system: **{get_os_info()}**
 
-        Rules:
-        - Use the correct package manager (pacman for Arch, apt for Debian/Ubuntu, dnf for Fedora, zypper for openSUSE, etc.).
-        - Never explain, never wrap in code blocks, never add extra text.
-        - If the command needs sudo, include it.
-        - Always use flags to make it non-interactive (-y, --noconfirm, --assume-yes, etc.).
-        - Do NOT ask for confirmation.
+Rules:
+- Use the correct package manager (pacman for Arch, apt for Debian/Ubuntu, dnf for Fedora, zypper for openSUSE, etc.).
+- Never explain, never wrap in code blocks, never add extra text.
+- If the command needs sudo, include it.
+- Always use flags to make it non-interactive (-y, --noconfirm, --assume-yes, etc.).
+- Do NOT ask for confirmation.
 
-        User wants to: {user_input}
-        """.strip()
+User wants to: {user_input}
+""".strip()
 
     @staticmethod
     def analyzer_helper(command: str, output: str) -> str:
         """Analyzes shell command output."""
         return f"""
-        Analyze the output of the following command: {command}
+Analyze the output of the following command: {command}
 
-        Output:
-        {output}
+Output:
+{output}
 
-        Summarize errors, warnings, success status, and key information.
-        Only mention system details if relevant to the issue.
+Summarize errors, warnings, success status, and key information.
+Only mention system details if relevant to the issue.
 
-        SYSTEM INFO (use only if needed):
-        Time: {datetime.now().isoformat()}
-        OS: {get_os_info()}
-        """.strip()
+SYSTEM INFO (use only if needed):
+Time: {datetime.now().isoformat()}
+OS: {get_os_info()}
+""".strip()
 
     @staticmethod
     def topics_helper(history: list) -> str:
@@ -56,27 +56,27 @@ class PromptBuilder:
         logger.debug(f"Topics helper: injected history: {history_text}")
 
         return f"""
-        Based on the following conversation history, please name a topic and provide a description in JSON format:
+Based on the following conversation history, please name a topic and provide a description in JSON format:
 
-        {history_text}
+{history_text}
 
-        Response must be valid JSON with keys:
-        - "topic_name": string
-        - "topic_description": string
-        """.strip()
+Response must be valid JSON with keys:
+- "topic_name": string
+- "topic_description": string
+""".strip()
 
     @staticmethod
     def analyze_code(content: str) -> str:
         """Analyzes code and returns structured metadata in JSON."""
         return f"""
-        Analyze the following code and return structured metadata in JSON format with these keys:
-        - "functions": list of {{ "name": str, "description": str }}
-        - "classes": list of {{ "name": str, "purpose": str }}
-        - "purpose": brief overall summary
+Analyze the following code and return structured metadata in JSON format with these keys:
+- "functions": list of {{ "name": str, "description": str }}
+- "classes": list of {{ "name": str, "purpose": str }}
+- "purpose": brief overall summary
 
-        Code:
-        {content}
-        """.strip()
+Code:
+{content}
+""".strip()
 
     @staticmethod
     def casual_chat_system_prompt() -> str:
@@ -105,15 +105,15 @@ class PromptBuilder:
         """Return a clean, one-shot classification prompt."""
         return f"""You are an intent classifier. Classify the FINAL user message as exactly one of:
 
-    CASUAL → greeting, small talk, chit-chat, joke, opinion, thanks, storytelling, emotional support, philosophy, roleplay, simple factual questions that need no tools.
+CASUAL → greeting, small talk, chit-chat, joke, opinion, thanks, storytelling, emotional support, philosophy, roleplay, simple factual questions that need no tools.
 
-    TASK   → anything that could benefit from tools, code, files, search, calculation, research, multi-step planning, current events, data lookup, actions, or workflow execution.
+TASK   → anything that could benefit from tools, code, files, search, calculation, research, multi-step planning, current events, data lookup, actions, or workflow execution.
 
-    User message to classify:
-    {query}
+User message to classify:
+{query}
 
-    Answer with **exactly one word** on its own line: CASUAL or TASK
-    Do not explain. Do not add any other text."""
+Answer with **exactly one word** on its own line: CASUAL or TASK
+Do not explain. Do not add any other text."""
 
     @staticmethod
     def casual_system_prompt() -> str:
@@ -127,19 +127,19 @@ class PromptBuilder:
         """Detects if a request requires multiple steps."""
         return f"""You are an expert at analyzing user requests for multi-step execution.
 
-        Determine if this request is:
-        - SIMPLE → one direct action (single tool call)
-        - COMPLEX → requires **multiple distinct steps**, planning, sequencing, or dependencies
+Determine if this request is:
+- SIMPLE → one direct action (single tool call)
+- COMPLEX → requires **multiple distinct steps**, planning, sequencing, or dependencies
 
-        Be strict. Examples:
-        - "list files in this dir"          → SIMPLE
-        - "read config.json"                → SIMPLE
-        - "read this PDF and analyze this code from that point of view" → COMPLEX
-        - "open file A and reference it to analyze file B" → COMPLEX
+Be strict. Examples:
+- "list files in this dir"          → SIMPLE
+- "read config.json"                → SIMPLE
+- "read this PDF and analyze this code from that point of view" → COMPLEX
+- "open file A and reference it to analyze file B" → COMPLEX
 
-        Request: {query}
+Request: {query}
 
-        Answer with **exactly one word**: SIMPLE or COMPLEX"""
+Answer with **exactly one word**: SIMPLE or COMPLEX"""
 
     @staticmethod
     def task_decomposition(original_query: str) -> str:
@@ -187,37 +187,37 @@ class PromptBuilder:
 
         return f"""You are a pragmatic task decomposition expert.
 
-    USER REQUEST: {original_query}
+USER REQUEST: {original_query}
 
-    {tools_section}
+{tools_section}
 
-    Break this request into the **minimal number of clear, actionable steps** required to complete the goal.
+Break this request into the **minimal number of clear, actionable steps** required to complete the goal.
 
-    Core Rules (strict):
-    - **SINGULAR vs MULTI DECISION RULE**: 
-    - Output **EXACTLY 1 step** ONLY if the entire request can be completed with a **single tool call or single atomic action** with no real dependencies.
-    - Output **2 or more steps** whenever the request contains **sequential phases**, **different capabilities**, or **hard dependencies** (e.g. "read file → analyze content → write result", "search → process results → save", etc.).
-    - Common patterns that MUST be split: file reading + content analysis + file writing; data fetching + transformation + output; any request with "first... then..." or multiple distinct phases.
+Core Rules (strict):
+- **SINGULAR vs MULTI DECISION RULE**: 
+- Output **EXACTLY 1 step** ONLY if the entire request can be completed with a **single tool call or single atomic action** with no real dependencies.
+- Output **2 or more steps** whenever the request contains **sequential phases**, **different capabilities**, or **hard dependencies** (e.g. "read file → analyze content → write result", "search → process results → save", etc.).
+- Common patterns that MUST be split: file reading + content analysis + file writing; data fetching + transformation + output; any request with "first... then..." or multiple distinct phases.
 
-    - Do NOT collapse genuinely sequential or multi-capability tasks into one step just to be minimal. Accuracy of phase separation is more important than having the smallest possible number of steps.
-    - Each step must correspond to what **one realistic tool execution** can achieve.
-    - For "suggested_tool", use the **exact tool name** from the list above when possible. Otherwise use a short category (e.g. "file_read", "code_analysis", "file_write").
-    - For "expected_outcome", keep it short and practical (e.g. "File successfully read", "Analysis completed", "Report written to disk").
+- Do NOT collapse genuinely sequential or multi-capability tasks into one step just to be minimal. Accuracy of phase separation is more important than having the smallest possible number of steps.
+- Each step must correspond to what **one realistic tool execution** can achieve.
+- For "suggested_tool", use the **exact tool name** from the list above when possible. Otherwise use a short category (e.g. "file_read", "code_analysis", "file_write").
+- For "expected_outcome", keep it short and practical (e.g. "File successfully read", "Analysis completed", "Report written to disk").
 
-    Output ONLY valid JSON:
+Output ONLY valid JSON:
 
+{{
+"steps": [
     {{
-    "steps": [
-        {{
-        "description": "exact sub-task description",
-        "dependencies": [list of previous step indices or empty list],
-        "suggested_tool": "exact tool name if available, otherwise short category hint",
-        "expected_outcome": "short, realistic success description"
-        }}
-    ]
+    "description": "exact sub-task description",
+    "dependencies": [list of previous step indices or empty list],
+    "suggested_tool": "exact tool name if available, otherwise short category hint",
+    "expected_outcome": "short, realistic success description"
     }}
+]
+}}
 
-    Return the plan:"""
+Return the plan:"""
 
     @staticmethod
     def sub_task_execution(
@@ -263,71 +263,71 @@ class PromptBuilder:
 
         return f"""You are executing **ONE SPECIFIC SUB-TASK ONLY**. Ignore everything else.
 
-            ORIGINAL USER REQUEST (background only): {original_query}
+ORIGINAL USER REQUEST (background only): {original_query}
 
-            ALREADY COMPLETED STEPS (short summary — do NOT repeat):
-            {completed_context}
-            {previous_results_block}
+ALREADY COMPLETED STEPS (short summary — do NOT repeat):
+{completed_context}
+{previous_results_block}
 
-            TOOLS ALREADY USED (avoid exact repeats unless necessary):
-            {used_tools_str}
+TOOLS ALREADY USED (avoid exact repeats unless necessary):
+{used_tools_str}
 
-            TOOL RULE: If FindTool succeeded last turn, the tool is loaded — use it directly. Do not call FindTool again.
+TOOL RULE: If FindTool succeeded last turn, the tool is loaded — use it directly. Do not call FindTool again.
 
-            REMAINING STEPS:
-            {remaining_context}
+REMAINING STEPS:
+{remaining_context}
 
-            CURRENT SUB-TASK ({current_index + 1}/{total_tasks}): {task_desc}
-            {expected_block}
-            {final_step_block}
+CURRENT SUB-TASK ({current_index + 1}/{total_tasks}): {task_desc}
+{expected_block}
+{final_step_block}
 
-            STRICT PROTOCOL:
-            1. Focus only on the current sub-task.
-            2. Call the correct tool with accurate parameters.
-            3. After tool result: verify it matches the expected_outcome above.
-            4. When verification passes → output EXACTLY:
-            {marker}
-            Nothing else. No commentary.
+STRICT PROTOCOL:
+1. Focus only on the current sub-task.
+2. Call the correct tool with accurate parameters.
+3. After tool result: verify it matches the expected_outcome above.
+4. When verification passes → output EXACTLY:
+{marker}
+Nothing else. No commentary.
 
-            Turn: {loop_count}"""
+Turn: {loop_count}"""
 
     @staticmethod
     def objective_reminder(reminder_body: str) -> str:
         """Centralized objective reminder template.
         Takes the dynamic state-built body and wraps it with the fixed header + critical instructions."""
         return f"""OBJECTIVE REMINDER:
-        {reminder_body}
+{reminder_body}
 
-        CRITICAL INSTRUCTIONS:
-        - Stay focused on the current goal and sub-task.
-        - If the required tool for the current action is missing, FIRST use the FindTool tool to discover and load it.
-        - Only after the needed tool has been successfully loaded via FindTool should you call the actual tool.
-        - When a sub-task is complete, output exactly: 
-        - Use only verified information from tool_results when summarizing."""
+CRITICAL INSTRUCTIONS:
+- Stay focused on the current goal and sub-task.
+- If the required tool for the current action is missing, FIRST use the FindTool tool to discover and load it.
+- Only after the needed tool has been successfully loaded via FindTool should you call the actual tool.
+- When a sub-task is complete, output exactly: 
+- Use only verified information from tool_results when summarizing."""
 
     @staticmethod
     def final_synthesis(original_query: str) -> str:
         """Final answer synthesis prompt."""
         return f"""USER ORIGINAL REQUEST: {original_query}
 
-        Task is now complete (or max loops reached). 
-        Summarize using ONLY the verified results from state.tool_results. Be concise."""
+Task is now complete (or max loops reached). 
+Summarize using ONLY the verified results from state.tool_results. Be concise."""
 
     @staticmethod
     def findtool_refinement(original_user_query: str) -> str:
         """Refines user request for FindTool selection."""
         return f"""You are an expert tool-router.
-        Convert this user request into a SHORT, keyword-rich query (max 12 words) that will perfectly match the best tool in our registry.
+Convert this user request into a SHORT, keyword-rich query (max 12 words) that will perfectly match the best tool in our registry.
 
-        USER REQUEST: {original_user_query}
+USER REQUEST: {original_user_query}
 
-        Rules:
-        - Focus ONLY on the core capability needed (e.g. "web search weather", "read pdf file", "search codebase function").
-        - Use terms that appear in tool names/descriptions/tags.
-        - Do NOT include specific data values (e.g. do NOT put "Poland").
-        - Return ONLY the refined query as plain text, nothing else.
+Rules:
+- Focus ONLY on the core capability needed (e.g. "web search weather", "read pdf file", "search codebase function").
+- Use terms that appear in tool names/descriptions/tags.
+- Do NOT include specific data values (e.g. do NOT put "Poland").
+- Return ONLY the refined query as plain text, nothing else.
 
-        Refined query:"""
+Refined query:"""
 
     @staticmethod
     def findtool_selection(
@@ -336,36 +336,36 @@ class PromptBuilder:
         """Selects the best tool from the registry."""
         return f"""REFINED INTENT (use this for matching): {refined_query}
 
-        USER ORIGINAL REQUEST: {original_user_query}
+USER ORIGINAL REQUEST: {original_user_query}
 
-        AVAILABLE TOOLS:
-        {tool_list_str}
+AVAILABLE TOOLS:
+{tool_list_str}
 
-        You MUST pick the SINGLE best tool that can fulfill the refined intent.
-        Return ONLY valid JSON (no extra text, no markdown):
+You MUST pick the SINGLE best tool that can fulfill the refined intent.
+Return ONLY valid JSON (no extra text, no markdown):
 
-        {{
-        "tool_name": "exact_tool_name",
-        "parameters": {{ "key": "value", ... }},
-        "reason": "one short sentence"
-        }}
+{{
+"tool_name": "exact_tool_name",
+"parameters": {{ "key": "value", ... }},
+"reason": "one short sentence"
+}}
 
-        If no tool is clearly better than others, still pick the closest one."""
+If no tool is clearly better than others, still pick the closest one."""
 
     @staticmethod
     def agentic_action_system_prefix() -> str:
         """Strong, always-present instruction that forces tool usage over explanation in agentic mode."""
         return f"""You are an ACTION-ORIENTED AGENT with direct tool access.
 
-        CORE RULES (never violate):
-        - If the user request involves any concrete action (add, create, write, modify, execute, implement, read, analyze with tools, etc.) → CALL THE APPROPRIATE TOOL immediately.
-        - NEVER respond with a summary, report, or explanation when a tool can fulfill the request.
-        - You have access to write_file, read_file, execute commands, FindTool, and many others. Use them directly.
-        - If the exact tool you need is not currently loaded, call FindTool first.
-        - After a tool succeeds and the current request is complete, output exactly: {PromptBuilder.FINAL_ANSWER_MARKER}
-        - Do not add commentary like "Based on previous analysis..." unless explicitly asked.
+CORE RULES (never violate):
+- If the user request involves any concrete action (add, create, write, modify, execute, implement, read, analyze with tools, etc.) → CALL THE APPROPRIATE TOOL immediately.
+- NEVER respond with a summary, report, or explanation when a tool can fulfill the request.
+- You have access to write_file, read_file, execute commands, FindTool, and many others. Use them directly.
+- If the exact tool you need is not currently loaded, call FindTool first.
+- After a tool succeeds and the current request is complete, output exactly: {PromptBuilder.FINAL_ANSWER_MARKER}
+- Do not add commentary like "Based on previous analysis..." unless explicitly asked.
 
-        Stay in tool-execution mode until the goal is achieved."""
+Stay in tool-execution mode until the goal is achieved."""
 
     @staticmethod
     def loaded_tools_summary(loaded_tool_names: List[str]) -> str:
@@ -385,9 +385,9 @@ class PromptBuilder:
 
         return f"""Expected outcome for current step: {expected_outcome.strip()}
 
-        When this outcome is achieved (e.g. file successfully modified, 
-        new tool added and working), you MUST output exactly the marker 
-        {PromptBuilder.FINAL_ANSWER_MARKER} and nothing else after it."""
+When this outcome is achieved (e.g. file successfully modified, 
+new tool added and working), you MUST output exactly the marker 
+{PromptBuilder.FINAL_ANSWER_MARKER} and nothing else after it."""
 
     @staticmethod
     def context_summary_instruction() -> str:
@@ -705,26 +705,26 @@ class PromptBuilder:
         """Orchestrator prompt for breaking a complex task into micro-tasks."""
         return f"""Break this task into 5-8 small focused micro-tasks.
 
-        TASK: {task}
+TASK: {task}
 
-        Return ONLY valid JSON in this exact format:
-        {{
-        "microtasks": [
-            {{
-            "description": "Clear one-sentence description",
-            "suggested_tools": ["tool1", "tool2"],
-            "depends_on": null
-            }},
-            {{
-            "description": "...",
-            "suggested_tools": ["tool3"],
-            "depends_on": "step_1"
-            }}
-        ]
-        }}
+Return ONLY valid JSON in this exact format:
+{{
+"microtasks": [
+    {{
+    "description": "Clear one-sentence description",
+    "suggested_tools": ["tool1", "tool2"],
+    "depends_on": null
+    }},
+    {{
+    "description": "...",
+    "suggested_tools": ["tool3"],
+    "depends_on": "step_1"
+    }}
+]
+}}
 
-        Note: Use "depends_on": null for tasks that can start immediately.
-        Use the first few words of a previous task's description as "depends_on" value if it depends on it."""
+Note: Use "depends_on": null for tasks that can start immediately.
+Use the first few words of a previous task's description as "depends_on" value if it depends on it."""
 
     @staticmethod
     def user_friendly_task_summary_prompt(
@@ -733,19 +733,19 @@ class PromptBuilder:
         """Natural summary prompt after a complex task completes."""
         return f"""You are a helpful Deploy Agent. The complex task has just finished.
 
-    Task: {task}
-    Goal: {goal or "General deployment assistance"}
+Task: {task}
+Goal: {goal or "General deployment assistance"}
 
-    What was actually done (tool results):
-    {tool_results_str or "No tool results recorded."}
+What was actually done (tool results):
+{tool_results_str or "No tool results recorded."}
 
-    Write a **friendly, concise, natural** message to the user (2–6 sentences max).
-    - Celebrate what was accomplished
-    - Mention any important outcomes or warnings
-    - End by saying we're back in normal chat mode and ask how else you can help
+Write a **friendly, concise, natural** message to the user (2–6 sentences max).
+- Celebrate what was accomplished
+- Mention any important outcomes or warnings
+- End by saying we're back in normal chat mode and ask how else you can help
 
-    Tone: professional but warm and clear. No JSON. No technical jargon unless necessary.
-    """
+Tone: professional but warm and clear. No JSON. No technical jargon unless necessary.
+"""
 
     @staticmethod
     def agent_objective_reminder(
@@ -801,16 +801,16 @@ class PromptBuilder:
         Centralized, reusable, and free of any client-specific logic."""
         return f"""You are a helpful Deploy Agent. A complex background task has just finished.
 
-        Task: {task}
+Task: {task}
 
-        Key results from tools:
-        {tool_results_str or "No detailed tool output available."}
+Key results from tools:
+{tool_results_str or "No detailed tool output available."}
 
-        Write a friendly, concise summary (3-7 sentences) for the user.
-        - Mention what was accomplished
-        - Highlight any important outcomes or warnings
-        - Use natural language and light emojis if appropriate
-        - Keep it easy to read"""
+Write a friendly, concise summary (3-7 sentences) for the user.
+- Mention what was accomplished
+- Highlight any important outcomes or warnings
+- Use natural language and light emojis if appropriate
+- Keep it easy to read"""
 
     @staticmethod
     def abstract_concept_extraction(
@@ -839,37 +839,37 @@ class PromptBuilder:
 
         return f"""You are a precise systems thinker and abstraction specialist.
 
-        Your task is to extract **{max_concepts} high-quality, higher-dimensional abstract concepts** that reveal deep connections between the provided artifacts.
+Your task is to extract **{max_concepts} high-quality, higher-dimensional abstract concepts** that reveal deep connections between the provided artifacts.
 
-        CRITICAL RULES (strictly enforced):
-        - ONLY extract a concept if there is **clear, direct evidence** in the items.
-        - Never invent mechanisms, classes, or processes that are not explicitly present.
-        - Prefer **refining or extending** existing concepts over creating new ones.
-        - Focus on **cross-domain intellectual bridges** (e.g. "LambdaMART reranking as computational analogue of attentional modulation").
-        - Each concept must feel like a genuine, non-obvious insight — not generic description.
-        - Output **ONLY** a valid JSON array. No explanations, no markdown, no extra text.
+CRITICAL RULES (strictly enforced):
+- ONLY extract a concept if there is **clear, direct evidence** in the items.
+- Never invent mechanisms, classes, or processes that are not explicitly present.
+- Prefer **refining or extending** existing concepts over creating new ones.
+- Focus on **cross-domain intellectual bridges** (e.g. "LambdaMART reranking as computational analogue of attentional modulation").
+- Each concept must feel like a genuine, non-obvious insight — not generic description.
+- Output **ONLY** a valid JSON array. No explanations, no markdown, no extra text.
 
-        Goal: {goal}
+Goal: {goal}
 
-    
 
-        Findings:
-        {existing_text}
 
-        RELEVANT ARTIFACTS:
-        {items_text}
+Findings:
+{existing_text}
 
-        Output format (JSON array only):
-        [
-        {{
-            "name": "Short, precise, evocative name",
-            "description": "1-2 sentence intellectually deep mapping",
-            "type": "mechanism | strategy | principle | analogy | architecture",
-            "score": 0.0-1.0,
-            "links_to": ["existing_concept_name"] or []
-        }}
-        ]
-        """
+RELEVANT ARTIFACTS:
+{items_text}
+
+Output format (JSON array only):
+[
+{{
+    "name": "Short, precise, evocative name",
+    "description": "1-2 sentence intellectually deep mapping",
+    "type": "mechanism | strategy | principle | analogy | architecture",
+    "score": 0.0-1.0,
+    "links_to": ["existing_concept_name"] or []
+}}
+]
+"""
 
     @staticmethod
     def context_summary_recent_tools_header() -> str:
@@ -885,132 +885,132 @@ class PromptBuilder:
         """Strict LLM-based step outcome validation prompt."""
         return f"""You are a strict validation agent for multi-step task execution.
 
-        CURRENT SUB-TASK ({current_idx + 1}/{total_tasks}):
-        {current_task.description}
+CURRENT SUB-TASK ({current_idx + 1}/{total_tasks}):
+{current_task.description}
 
-        EXPECTED OUTCOME THAT MUST BE VERIFIED:
-        {current_task.expected_outcome or "Step completed successfully"}
+EXPECTED OUTCOME THAT MUST BE VERIFIED:
+{current_task.expected_outcome or "Step completed successfully"}
 
-        MOST RECENT TOOL RESULT:
-        {last_result_str[:2500] or "No tool results available yet."}
+MOST RECENT TOOL RESULT:
+{last_result_str[:2500] or "No tool results available yet."}
 
-        QUESTION:
-        Has the expected outcome been FULLY achieved based on the tool result above?
-        Be conservative. Only answer YES if the outcome is clearly and completely met.
+QUESTION:
+Has the expected outcome been FULLY achieved based on the tool result above?
+Be conservative. Only answer YES if the outcome is clearly and completely met.
 
-        Answer with **exactly one word** on its own line:
-        YES
-        or
-        NO
+Answer with **exactly one word** on its own line:
+YES
+or
+NO
 
-        No explanations. No extra text."""
+No explanations. No extra text."""
 
     @staticmethod
     def sub_task_execution_system_prompt() -> str:
         """System prompt used when building context for sub-task execution."""
         return """You are executing ONE specific sub-task in a larger plan.
-    Focus only on the current sub-task description provided.
-    Use tools when needed.
-    When the current sub-task is complete and the expected outcome is achieved, output exactly the marker."""
+Focus only on the current sub-task description provided.
+Use tools when needed.
+When the current sub-task is complete and the expected outcome is achieved, output exactly the marker."""
 
     @staticmethod
     def final_synthesis_system_prompt() -> str:
         """Clean system prompt for final answer synthesis."""
         return """FINAL ANSWER MODE
-    Provide a clear, complete, and concise summary of what was accomplished in the entire task.
-    Use only verified information from tool results.
-    Be natural and professional."""
+Provide a clear, complete, and concise summary of what was accomplished in the entire task.
+Use only verified information from tool results.
+Be natural and professional."""
 
     @staticmethod
     def validation_system_prompt() -> str:
         """System prompt specifically for step validation."""
         return """You are a strict validation agent.
-    Evaluate whether the expected outcome for the current sub-task has been achieved.
-    Be precise, conservative, and objective.
-    Use ONLY the information provided in the query.
-    Answer with exactly one word: YES or NO."""
+Evaluate whether the expected outcome for the current sub-task has been achieved.
+Be precise, conservative, and objective.
+Use ONLY the information provided in the query.
+Answer with exactly one word: YES or NO."""
 
     @staticmethod
     def analysis_multi_query_generation(analysis_query: str) -> str:
         """Generates 4-6 diverse and effective search queries for any given topic."""
         return f"""
-    You are an expert research strategist. 
+You are an expert research strategist. 
 
-    Given the following topic or analysis goal, generate **4 to 6 diverse, high-quality search queries** 
-    that will help retrieve the most relevant and useful information from a knowledge base.
+Given the following topic or analysis goal, generate **4 to 6 diverse, high-quality search queries** 
+that will help retrieve the most relevant and useful information from a knowledge base.
 
-    **Rules:**
-    - Make the queries cover different angles and aspects of the topic.
-    - Include a mix of broad exploratory queries and very specific, targeted ones.
-    - Use precise terminology that is likely to appear in documents, code, tool outputs, or reports.
-    - Vary the scope: conceptual, practical, comparative, problem-oriented, etc.
-    - Return **ONLY** a valid JSON array of strings. No explanations, no extra text, no markdown.
+**Rules:**
+- Make the queries cover different angles and aspects of the topic.
+- Include a mix of broad exploratory queries and very specific, targeted ones.
+- Use precise terminology that is likely to appear in documents, code, tool outputs, or reports.
+- Vary the scope: conceptual, practical, comparative, problem-oriented, etc.
+- Return **ONLY** a valid JSON array of strings. No explanations, no extra text, no markdown.
 
-    **Topic / Analysis Goal:**
-    {analysis_query}
+**Topic / Analysis Goal:**
+{analysis_query}
 
-    **Output (JSON array only):**
-    ["query one here", "query two here", "query three here", ...]
-    """.strip()
+**Output (JSON array only):**
+["query one here", "query two here", "query three here", ...]
+""".strip()
 
     @staticmethod
     def analysis_report_synthesis(original_query: str, combined_research: str) -> str:
         """Synthesizes a detailed, professional, and comprehensive analysis report."""
         return f"""
-    You are a senior research scientist and technical report writer with 20+ years of experience producing high-quality analysis for technical and scientific audiences.
+You are a senior research scientist and technical report writer with 20+ years of experience producing high-quality analysis for technical and scientific audiences.
 
-    Your task is to produce a **comprehensive, well-elaborated, professional research report** (target length: 1200–2000 words) based **exclusively** on the tool outcomes provided below. Do not add external knowledge.
+Your task is to produce a **comprehensive, well-elaborated, professional research report** (target length: 1200–2000 words) based **exclusively** on the tool outcomes provided below. Do not add external knowledge.
 
-    **Original Research Query:**
-    {original_query}
+**Original Research Query:**
+{original_query}
 
-    **Gathered Research Data (from multiple tool executions):**
-    {combined_research}
+**Gathered Research Data (from multiple tool executions):**
+{combined_research}
 
-    **Required Report Structure** (use clear markdown headings):
+**Required Report Structure** (use clear markdown headings):
 
-    1. **Executive Summary** (200-350 words)
-    - 5–7 sentences that capture the core question, key findings, and main conclusions.
-    - Write this section last.
+1. **Executive Summary** (200-350 words)
+- 5–7 sentences that capture the core question, key findings, and main conclusions.
+- Write this section last.
 
-    2. **Research Context & Scope**
-    - Restate the original query in your own words.
-    - Briefly describe how the research was conducted (multiple targeted searches via GetContext and/or web indexing).
-    - Note the volume and nature of the evidence gathered.
+2. **Research Context & Scope**
+- Restate the original query in your own words.
+- Briefly describe how the research was conducted (multiple targeted searches via GetContext and/or web indexing).
+- Note the volume and nature of the evidence gathered.
 
-    3. **Key Findings** (detailed, 8–15 bullet points or short paragraphs)
-    - Each finding must include:
-        - A clear statement
-        - Specific evidence or quote from the research (with citation like [Local KB – "sub-query about X"] or [Web – search result Y])
-        - Why it matters
+3. **Key Findings** (detailed, 8–15 bullet points or short paragraphs)
+- Each finding must include:
+    - A clear statement
+    - Specific evidence or quote from the research (with citation like [Local KB – "sub-query about X"] or [Web – search result Y])
+    - Why it matters
 
-    4. **In-Depth Analysis & Synthesis** (600–1200 words)
-    - Go beyond listing findings.
-    - Identify patterns, trends, contradictions, and consensus across different tool outputs.
-    - Discuss implications for the original query.
-    - Connect technical details to broader context or consequences.
-    - Use sub-headings if helpful (e.g., ### Technical Implications, ### Strategic Considerations).
+4. **In-Depth Analysis & Synthesis** (600–1200 words)
+- Go beyond listing findings.
+- Identify patterns, trends, contradictions, and consensus across different tool outputs.
+- Discuss implications for the original query.
+- Connect technical details to broader context or consequences.
+- Use sub-headings if helpful (e.g., ### Technical Implications, ### Strategic Considerations).
 
-    5. **Limitations, Gaps & Uncertainties**
-    - What is missing, unclear, or weakly supported in the gathered data?
-    - Any contradictions between sources?
-    - What additional research would be valuable?
+5. **Limitations, Gaps & Uncertainties**
+- What is missing, unclear, or weakly supported in the gathered data?
+- Any contradictions between sources?
+- What additional research would be valuable?
 
-    6. **Conclusions & Actionable Recommendations**
-    - Clear, numbered recommendations (short-term and long-term).
-    - Prioritize based on strength of evidence.
-    - Suggest concrete next steps or experiments.
+6. **Conclusions & Actionable Recommendations**
+- Clear, numbered recommendations (short-term and long-term).
+- Prioritize based on strength of evidence.
+- Suggest concrete next steps or experiments.
 
-    **Writing Guidelines:**
-    - Be objective and evidence-based. Never hallucinate or invent details.
-    - Cite specific tool results frequently using inline citations.
-    - Use professional, precise language. Avoid filler or overly verbose prose.
-    - Use markdown formatting: headings, bullet points, numbered lists, bold/italic for emphasis, and tables if comparing multiple items.
-    - Do **not** make the report short for the sake of brevity. Expand each section fully using all available relevant evidence.
-    - If the research data is limited, state that clearly instead of padding.
+**Writing Guidelines:**
+- Be objective and evidence-based. Never hallucinate or invent details.
+- Cite specific tool results frequently using inline citations.
+- Use professional, precise language. Avoid filler or overly verbose prose.
+- Use markdown formatting: headings, bullet points, numbered lists, bold/italic for emphasis, and tables if comparing multiple items.
+- Do **not** make the report short for the sake of brevity. Expand each section fully using all available relevant evidence.
+- If the research data is limited, state that clearly instead of padding.
 
-    End the report with:
-    **Report generated on [current date/time] using ConductResearch tool.**
+End the report with:
+**Report generated on [current date/time] using ConductResearch tool.**
 
-    Produce the full report now.
-    """.strip()
+Produce the full report now.
+""".strip()
