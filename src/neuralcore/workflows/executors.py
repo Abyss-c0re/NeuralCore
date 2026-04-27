@@ -218,13 +218,13 @@ async def goal_driven_task_loop(
             if file_contents:
                 previous_results_context = "\n\n".join(file_contents)
 
-        used_tools = [r.get("name", "unknown") for r in state.tool_results]
-        used_tools_str = ", ".join(set(used_tools)) if used_tools else "none"
+    
+        used_tools_str = state.used_tools_str
 
         completed = []
         for i in range(state.current_task_index):
             if i < len(state.tool_results):
-                tool_name = state.tool_results[i].get("name", "unknown")
+                tool_name = state.tool_results[i].get("name") or f"step-{i}"
                 raw = str(state.tool_results[i].get("result", ""))
                 if len(raw) > 400:
                     preview = (
@@ -285,6 +285,8 @@ async def goal_driven_task_loop(
         lightweight_agentic=True,
     )
 
+    logger.debug(f"Task Context: {(str(messages))}")
+
     queue = await agent.client.stream_with_tools(
         manager=agent.manager,
         messages=messages,
@@ -303,13 +305,12 @@ async def goal_driven_task_loop(
             elif kind in ("tool_delta", "tool_complete", "needs_confirmation"):
                 tools_called_this_turn = True
                 if isinstance(payload, dict):
-                    tool_name = (
-                        payload.get("tool_name") or payload.get("name") or "unknown"
-                    )
+                    tool_name = payload.get("tool_name") or payload.get("name")
 
-                    yield ("tool_name", {"name": tool_name})
+                    if tool_name:
+                        yield ("tool_name", {"name": tool_name})
 
-                    if "FindTool" in tool_name:
+                    if tool_name and "FindTool" in tool_name:
                         state.record_findtool_call()
                         state.skip_manager_this_turn = True
                         state.request_loop_restart(
@@ -317,7 +318,7 @@ async def goal_driven_task_loop(
                         )
                         yield ("phase_changed", {"phase": "restarting_loop"})
                         return
-                    else:
+                    elif tool_name:
                         state.last_used_tool = tool_name
 
             elif kind == "finish":
@@ -347,7 +348,7 @@ async def goal_driven_task_loop(
         result = state.tool_results[-1].get("result") if state.tool_results else None
 
         # Record actual tool usage for training
-        tool_name = state.last_used_tool or "unknown"
+        tool_name = state.last_used_tool  # can be None — consolidator handles it
         current_task.used_tool = tool_name
 
         if hasattr(agent, "consolidator") and agent.consolidator:
@@ -359,13 +360,12 @@ async def goal_driven_task_loop(
             )
 
         # === EXPLICIT + CLEAR ===
-        current_task.complete(result=result)  # ← direct call
+        current_task.complete(result=result)
         if current_task.status == "completed":
             state.completed_task_ids.add(current_task.task_id)
 
         # === ADVANCE TO NEXT TASK ===
         if not is_multi_step or state.current_task_index >= len(state.tasks) - 1:
-            # Last step
             state.full_reply = f"Task completed successfully. {marker}"
             state.is_complete = True
             state.last_tool_success = {"success": True}
@@ -409,16 +409,18 @@ async def goal_driven_task_loop(
         )
 
         try:
-            validation_messages = await agent.context_manager.provide_context(
+            validation_context = await agent.context_manager.provide_context(
                 query=validation_query,
                 max_input_tokens=agent.max_tokens * 0.45,
                 reserved_for_output=agent.client.max_tokens * 0.25,
                 include_logs=True,
                 chat=False,
                 lightweight_agentic=False,
+                return_as_string=True,
             )
+            logger.debug(f"Validation Context: {validation_context}")
             validation_result = await agent.client.chat(
-                validation_messages, temperature=0.0, max_tokens=20
+                validation_context, temperature=0.0, max_tokens=20
             )
             outcome_met = "YES" in validation_result.strip().upper()
         except Exception as e:
@@ -514,7 +516,6 @@ async def goal_driven_task_loop(
     else:
         state.empty_loops = 0
 
-    # If we somehow reached the end without goal_achieved or explicit restart, force restart
     if not state.goal_reached:
         logger.warning("Loop iteration ended without goal_achieved — forcing restart")
         state.request_loop_restart(
