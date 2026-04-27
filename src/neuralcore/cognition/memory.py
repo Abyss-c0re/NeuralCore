@@ -5,7 +5,7 @@ import time
 import numpy as np
 import hashlib
 import json
-from typing import Tuple, List, Dict, Any, AsyncIterable
+from typing import Tuple, List, Dict, Any, AsyncIterable, Optional
 from neuralcore.utils.logger import Logger
 from neuralcore.utils.prompt_builder import PromptBuilder
 from neuralcore.utils.config import get_loader
@@ -1309,6 +1309,30 @@ class ContextManager:
                 full_context = PromptBuilder.lightweight_agentic_context(state)
                 messages.append({"role": "system", "content": full_context})
                 tokens_used = self.count_tokens(messages)
+
+                # === INJECT LAST FULL TOOL RESULT (via helper) ===
+                latest_tool = self._get_latest_tool_outcome()
+                if latest_tool:
+                    tool_block = (
+                        f"\n\n=== LAST TOOL RESULT (FULL) ===\n"
+                        f"Tool: {latest_tool['tool_name']}\n"
+                        f"Executed: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(latest_tool['timestamp']))}\n\n"
+                        f"{latest_tool['content']}\n"
+                        f"=== END LAST TOOL RESULT ==="
+                    )
+                    tool_tokens = self.count_tokens(
+                        [{"role": "user", "content": tool_block}]
+                    )
+                    if tokens_used + tool_tokens < (
+                        max_input_tokens - reserved_for_output - 800
+                    ):
+                        messages.append({"role": "system", "content": tool_block})
+                        tokens_used += tool_tokens
+                        logger.debug(
+                            f"→ [LIGHTWEIGHT] Injected FULL tool outcome "
+                            f"({latest_tool['tool_name']}, {len(latest_tool['content'])} chars)"
+                        )
+
             else:
                 # ── RICH AGENTIC MODE (includes research_mode) ──
                 summary = self.get_context_summary()
@@ -1317,6 +1341,29 @@ class ContextManager:
                 )
                 messages.append({"role": "system", "content": full_system})
                 tokens_used = self.count_tokens(messages)
+
+                # === INJECT LAST FULL TOOL RESULT (via helper) ===
+                latest_tool = self._get_latest_tool_outcome()
+                if latest_tool:
+                    tool_block = (
+                        f"\n\n=== LAST TOOL RESULT (FULL) ===\n"
+                        f"Tool: {latest_tool['tool_name']}\n"
+                        f"Executed: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(latest_tool['timestamp']))}\n\n"
+                        f"{latest_tool['content']}\n"
+                        f"=== END LAST TOOL RESULT ==="
+                    )
+                    tool_tokens = self.count_tokens(
+                        [{"role": "user", "content": tool_block}]
+                    )
+                    if tokens_used + tool_tokens < (
+                        max_input_tokens - reserved_for_output - 800
+                    ):
+                        messages.append({"role": "system", "content": tool_block})
+                        tokens_used += tool_tokens
+                        logger.debug(
+                            f"→ [RICH] Injected FULL tool outcome "
+                            f"({latest_tool['tool_name']}, {len(latest_tool['content'])} chars)"
+                        )
 
             # ── COMMON FINAL STEPS (KB + HISTORY) ──
             query_tokens = (
@@ -1336,11 +1383,12 @@ class ContextManager:
                 )
 
             context_parts: List[str] = []
-            if query.strip():
+
+            if not lightweight_agentic and query.strip():
                 if research_mode and state is not None and state.executed_functions:
                     executed_tools_summary = []
                     for func in state.executed_functions[-8:]:
-                        name = func.get("name", "unknown")
+                        name = func.get("name") or "tool"
                         args = func.get("args", {})
                         if args:
                             args_str = ", ".join(
@@ -1355,8 +1403,9 @@ class ContextManager:
                     enriched_query = f"{query} [EXECUTED TOOLS: {tools_str}]"
                 else:
                     enriched_query = query
+
                 kb_text = await self.ranked_retrieve(
-                    enriched_query if research_mode else query,
+                    enriched_query,
                     kb_tokens,
                     research_mode=research_mode,
                 )
@@ -1403,7 +1452,6 @@ class ContextManager:
         )
 
         if system_idx is None:
-            # No system message exists → use clean PromptBuilder helpers (keeps manager clean)
             if chat:
                 default_system = PromptBuilder.casual_chat_system_prompt()
             else:
@@ -1419,7 +1467,6 @@ class ContextManager:
                 f"via PromptBuilder (include_logs={include_logs})"
             )
         else:
-            # Ensure system message is strictly first (move if necessary)
             if system_idx != 0:
                 sys_msg = messages.pop(system_idx)
                 messages.insert(0, sys_msg)
@@ -1427,7 +1474,6 @@ class ContextManager:
                     f"→ Moved system message from index {system_idx} to position 0"
                 )
 
-        # Combine logs into the (now first) system message if include_logs was requested
         if logs_section and logs_section not in messages[0].get("content", ""):
             current_content = messages[0]["content"].rstrip()
             messages[0]["content"] = f"{current_content}\n\n{logs_section}"
@@ -1653,6 +1699,51 @@ class ContextManager:
             metadata=metadata,
         )
 
+    def _get_latest_tool_outcome(self) -> Optional[Dict[str, Any]]:
+        """Returns the most recent non-streamed tool outcome.
+        Smartly extracts real tool name from metadata or content.
+        Safe sorting (no KnowledgeItem comparison)."""
+        if not self.short_term_mem:
+            return None
+
+        tool_outcomes = [
+            (item.metadata.get("timestamp", 0), item)
+            for item in self.short_term_mem.values()
+            if item.source_type == "tool_outcome"
+            and not item.metadata.get("streamed", False)
+        ]
+        if not tool_outcomes:
+            return None
+
+        # Safe sort using only timestamp + unique id tie-breaker
+        tool_outcomes.sort(key=lambda x: (x[0], id(x[1])), reverse=True)
+
+        _, latest_item = tool_outcomes[0]
+
+        full_content = latest_item.content.strip()
+        if not full_content:
+            return None
+
+        # === Smart tool name extraction ===
+        tool_name = latest_item.metadata.get("tool") or latest_item.metadata.get("name")
+
+        if not tool_name:
+            match = re.match(r"Tool:\s*(\S+)", full_content)
+            if match:
+                tool_name = match.group(1)
+                lines = full_content.splitlines()
+                if len(lines) > 1:
+                    full_content = "\n".join(lines[1:]).strip()
+
+        if not tool_name:
+            tool_name = "tool"
+
+        return {
+            "tool_name": tool_name,
+            "content": full_content,
+            "timestamp": latest_item.metadata.get("timestamp", time.time()),
+        }
+
     async def _get_recent_tool_outcomes(
         self,
         limit: int = 4,
@@ -1666,13 +1757,14 @@ class ContextManager:
         if not self.short_term_mem:
             logger.debug("No entries in short_term_mem")
             return ""
+
         # Only consider final consolidated tool_outcomes
         tool_items = [
             (
                 item.metadata.get("timestamp", 0),
                 key,
                 item,
-                item.metadata.get("tool", "unknown"),
+                item.metadata.get("tool") or item.metadata.get("name") or "tool",
                 len(item.content),
             )
             for key, item in self.short_term_mem.items()
@@ -1680,8 +1772,10 @@ class ContextManager:
             and item.metadata.get("streamed", False) is not True
             and not str(key).startswith("tool_outcome_chunk")
         ]
-        # Sort by timestamp descending
-        tool_items.sort(reverse=True)
+
+        # Sort by timestamp descending (safe)
+        tool_items.sort(key=lambda x: x[0], reverse=True)
+
         parts: List[str] = []
         used_tokens = 0
         for ts, key, item, tool_name, size in tool_items[:limit]:
@@ -1692,8 +1786,9 @@ class ContextManager:
             )
             # Truncate content per result
             content = item.content
-            if len(content) > max_tokens_per_result * 4:  # rough char → token estimate
+            if len(content) > max_tokens_per_result * 4:
                 content = content[: max_tokens_per_result * 4] + "\n... [truncated]"
+
             block = PromptBuilder.latest_tool_block(
                 tool_name=tool_name,
                 timestamp_str=timestamp_str,
@@ -1705,7 +1800,6 @@ class ContextManager:
                 if self.tokenizer
                 else len(block) // 4
             )
-            # Respect total token budget across all recent outcomes
             if used_tokens + block_tokens > max_total_tokens:
                 logger.debug(
                     f"Token budget reached in _get_recent_tool_outcomes ({used_tokens}/{max_total_tokens})"
@@ -1713,6 +1807,7 @@ class ContextManager:
                 break
             parts.append(block)
             used_tokens += block_tokens
+
         result = "\n".join(parts) if parts else ""
         logger.debug(
             f"_get_recent_tool_outcomes returned {len(result)} chars from {len(parts)} tool outcomes"
