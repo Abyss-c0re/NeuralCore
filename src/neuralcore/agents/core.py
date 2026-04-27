@@ -291,9 +291,7 @@ class Agent:
                 except Exception as e:
                     logger.warning(f"Failed to load tool '{action_name}': {e}")
 
-    def _resolve_workflow(
-        self, chat_mode: bool = False, workflow_override: Optional[str] = None
-    ) -> str:
+    def _resolve_workflow(self, workflow_override: Optional[str] = None) -> str:
         if workflow_override:
             return workflow_override
 
@@ -942,9 +940,7 @@ class Agent:
         )
         self._status = "running"
 
-        workflow_name = self._resolve_workflow(
-            chat_mode=chat_mode, workflow_override=workflow
-        )
+        workflow_name = self._resolve_workflow(workflow_override=workflow)
         return system_prompt, temperature, max_tokens, workflow_name
 
     async def _run_workflow_once(
@@ -1051,9 +1047,7 @@ class Agent:
             self.state.current_task = user_prompt
 
         self.state.status = "running"
-        workflow_name = self._resolve_workflow(
-            chat_mode=chat_mode, workflow_override=workflow
-        )
+        workflow_name = self._resolve_workflow(workflow_override=workflow)
 
         if not chat_mode:
             self.manager.reset_to_default_package("headless_bootstrap", self.workflow)
