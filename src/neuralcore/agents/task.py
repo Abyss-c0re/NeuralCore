@@ -26,7 +26,7 @@ class Task:
     expected_outcome: str = ""
 
     suggested_tool: str = ""
-    used_tool: str = ""
+    used_tool: Optional[str] = None  # ← FIXED: now Optional
 
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
@@ -95,7 +95,7 @@ class Task:
             else None,
             "expected_outcome": self.expected_outcome,
             "suggested_tool": self.suggested_tool,
-            "used_tool": self.used_tool,
+            "used_tool": self.used_tool,  # ← now safely accepts None
             "start_time": self.start_time.isoformat() if self.start_time else None,
             "end_time": self.end_time.isoformat() if self.end_time else None,
             "result": str(self.result)[:1000] if self.result is not None else None,
@@ -111,6 +111,6 @@ class Task:
             else ""
         )
         tool_info = f" | suggested={self.suggested_tool}" if self.suggested_tool else ""
-        if self.used_tool:
+        if self.used_tool:  # ← works perfectly with None or ""
             tool_info += f" | used={self.used_tool}"
         return f"[{self.status.upper()}] {self.task_id[:8]}… | {self.description[:80]}{tool_info}{duration}"

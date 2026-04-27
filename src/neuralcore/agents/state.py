@@ -125,6 +125,15 @@ class AgentState:
             return None
         return round(time.time() - self.wait_start_time, 1)
 
+    @property
+    def used_tools_str(self) -> str:
+        """Clean, type-safe comma-separated list of tool names used so far.
+        Never returns 'unknown'. Returns 'none' when empty."""
+        names: List[str] = [
+            str(r.get("name", "")) for r in self.tool_results if r.get("name")
+        ]
+        return ", ".join(set(names)) if names else "none"
+
     # ==================== Helpers ====================
     def prepare_messages(
         self,
