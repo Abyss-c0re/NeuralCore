@@ -1068,6 +1068,9 @@ class ContextManager:
     async def add_message(
         self, role: str, message: str, embedding: np.ndarray | None = None
     ) -> None:
+        if not message or not message.strip():
+            logger.debug(f"Skipping empty {role} message")
+            return
         if embedding is None or embedding.size == 0:
             embedding = await self.fetch_embedding(message, prefix="passage")
         token_count = (
@@ -1255,8 +1258,21 @@ class ContextManager:
         logger.debug(
             f"provide_context called | query='{query[:100]}...' | chat={chat} | "
             f"lightweight_agentic={lightweight_agentic} | research_mode={research_mode} | "
-            f"has_state={state is not None} | return_as_string={return_as_string}"
+            f"has_state={state is not None} | return_as_string={return_as_string} | include_logs={include_logs}"
         )
+        if not len(query) > 0:
+            return "No query was provided"
+
+        # ── UNIVERSAL LOGS HANDLING (works in EVERY mode) ──
+        logs_section = ""
+        if include_logs:
+            try:
+                log_lines = Logger.get_log_data(level="info", max_entries=100)
+                if log_lines:
+                    logs_section = PromptBuilder.recent_logs_section(log_lines)
+            except Exception:
+                pass
+
         if chat:
             # ── RICH CHAT MODE  ──
             logger.debug("→ Entering CHAT mode")
@@ -1264,25 +1280,7 @@ class ContextManager:
                 recent = self.pure_chat_history[-12:]
                 for msg in recent:
                     messages.append({"role": msg["role"], "content": msg["content"]})
-            if query.strip() and self.short_term_mem:
-                kb_text = await self.ranked_retrieve(
-                    query, max_kb_tokens // 2, research_mode=False
-                )
-                if kb_text:
-                    messages.append(
-                        {
-                            "role": "system",
-                            "content": PromptBuilder.relevant_external_context_section(
-                                kb_text
-                            ),
-                        }
-                    )
-            messages.append(
-                {
-                    "role": "user",
-                    "content": query.strip() or "[AUTONOMOUS CONTINUATION]",
-                }
-            )
+
             total_tokens = self.count_tokens(messages)
             if total_tokens > max_input_tokens - reserved_for_output:
                 self.prune_to_fit_context(
@@ -1294,127 +1292,150 @@ class ContextManager:
                     assistant_role="assistant",
                     tool_role="tool",
                 )
-            if return_as_string:
-                formatted = []
-                for msg in messages:
-                    role = msg.get("role", "unknown").upper()
-                    content = str(msg.get("content", "")).strip()
-                    formatted.append(f"{role}:\n{content}")
-                context = "\n\n".join(formatted)
-                # logger.debug(f"Context provided: {context}")
-                return context
-            return messages
-        # ── AGENTIC MODE ──
-        logger.debug("→ Entering AGENTIC mode")
-        tokens_used = 0
-        if lightweight_agentic and state is not None:
-            # ── LIGHTWEIGHT PATH FOR LONG-RUNNING LOOPS ──
-            logger.debug(
-                "→ Using IMPROVED LIGHTWEIGHT agentic context (long-running mode)"
-            )
-            # Validate state integrity
-            warnings = state.validate_state_integrity()
-            if warnings:
-                logger.warning(
-                    f"AgentState integrity warnings before lightweight context: {warnings}"
+        else:
+            # ── AGENTIC MODE ──
+            logger.debug("→ Entering AGENTIC mode")
+            tokens_used = 0
+            if lightweight_agentic and state is not None:
+                # ── LIGHTWEIGHT PATH FOR LONG-RUNNING LOOPS ──
+                logger.debug(
+                    "→ Using IMPROVED LIGHTWEIGHT agentic context (long-running mode)"
                 )
-            # Build context using PromptBuilder helper only
-            full_context = PromptBuilder.lightweight_agentic_context(state)
-            messages.append({"role": "system", "content": full_context})
-            tokens_used = self.count_tokens(messages)
-        else:
-            # ── RICH AGENTIC MODE ──
-            summary = self.get_context_summary()
-            full_system = (
-                f"\n\n{summary}\n\n{PromptBuilder.context_summary_instruction()}"
-            )
-            if include_logs:
-                try:
-                    log_lines = Logger.get_log_data(level="info", max_entries=100)
-                    if log_lines:
-                        full_system += (
-                            f"\n\n{PromptBuilder.recent_logs_section(log_lines)}"
-                        )
-                except Exception:
-                    pass
-            messages.append({"role": "system", "content": full_system})
-            tokens_used = self.count_tokens(messages)
-        # ── COMMON FINAL STEPS ──
-        query_tokens = (
-            self.count_tokens([{"role": "user", "content": query}])
-            if query.strip()
-            else 0
-        )
-        target = max_input_tokens - reserved_for_output
-        remaining = max(0, target - tokens_used - query_tokens)
-        if research_mode:
-            kb_tokens = min(18000, max(4000, remaining // 2))  # much more aggressive
-        else:
-            kb_tokens = (
-                min(max_kb_tokens, remaining // 3) if not lightweight_agentic else 1800
-            )
-        # ── Collect external context (KB) ──
-        context_parts: List[str] = []
-        # In research_mode ONLY provide relevant context (KB), skip conversation history
-        if query.strip():
-            # ── NEW: In research mode, embed executed tools (names + args only) into the query for better embedding/retrieval
-            if research_mode and state is not None and state.executed_functions:
-                executed_tools_summary = []
-                for func in state.executed_functions[-8:]:  # last 8 for relevance
-                    name = func.get("name", "unknown")
-                    args = func.get("args", {})
-                    if args:
-                        args_str = ", ".join(
-                            f"{k}={v}" for k, k, v in list(args.items())[:5]
-                        )
-                        executed_tools_summary.append(f"Name{name} Args{args_str}")
-                    else:
-                        executed_tools_summary.append(name)
-                tools_str = " | ".join(executed_tools_summary)
-                enriched_query = f"{query} [EXECUTED TOOLS: {tools_str}]"
+                warnings = state.validate_state_integrity()
+                if warnings:
+                    logger.warning(
+                        f"AgentState integrity warnings before lightweight context: {warnings}"
+                    )
+                full_context = PromptBuilder.lightweight_agentic_context(state)
+                messages.append({"role": "system", "content": full_context})
+                tokens_used = self.count_tokens(messages)
             else:
-                enriched_query = query
-            kb_text = await self.ranked_retrieve(
-                enriched_query if research_mode else query,
-                kb_tokens,
-                research_mode=research_mode,
-            )
-            if kb_text:
-                context_parts.append(
-                    PromptBuilder.relevant_external_context_section(kb_text)
+                # ── RICH AGENTIC MODE (includes research_mode) ──
+                summary = self.get_context_summary()
+                full_system = (
+                    f"\n\n{summary}\n\n{PromptBuilder.context_summary_instruction()}"
                 )
-        # ── HISTORY HANDLING ──
-        if lightweight_agentic:
-            logger.debug("→ LIGHTWEIGHT MODE: skipping full conversation history")
-        elif research_mode:
+                messages.append({"role": "system", "content": full_system})
+                tokens_used = self.count_tokens(messages)
+
+            # ── COMMON FINAL STEPS (KB + HISTORY) ──
+            query_tokens = (
+                self.count_tokens([{"role": "user", "content": query}])
+                if query.strip()
+                else 0
+            )
+            target = max_input_tokens - reserved_for_output
+            remaining = max(0, target - tokens_used - query_tokens)
+            if research_mode:
+                kb_tokens = min(18000, max(4000, remaining // 2))
+            else:
+                kb_tokens = (
+                    min(max_kb_tokens, remaining // 3)
+                    if not lightweight_agentic
+                    else 1800
+                )
+
+            context_parts: List[str] = []
+            if query.strip():
+                if research_mode and state is not None and state.executed_functions:
+                    executed_tools_summary = []
+                    for func in state.executed_functions[-8:]:
+                        name = func.get("name", "unknown")
+                        args = func.get("args", {})
+                        if args:
+                            args_str = ", ".join(
+                                f"{k}={v}" for k, v in list(args.items())[:5]
+                            )
+                            executed_tools_summary.append(
+                                f"Name: {name} Args: {args_str}"
+                            )
+                        else:
+                            executed_tools_summary.append(name)
+                    tools_str = " | ".join(executed_tools_summary)
+                    enriched_query = f"{query} [EXECUTED TOOLS: {tools_str}]"
+                else:
+                    enriched_query = query
+                kb_text = await self.ranked_retrieve(
+                    enriched_query if research_mode else query,
+                    kb_tokens,
+                    research_mode=research_mode,
+                )
+                if kb_text:
+                    context_parts.append(
+                        PromptBuilder.relevant_external_context_section(kb_text)
+                    )
+
+            if lightweight_agentic:
+                logger.debug("→ LIGHTWEIGHT MODE: skipping full conversation history")
+            elif research_mode:
+                logger.debug(
+                    "→ RESEARCH MODE: skipping conversation history, only relevant KB context"
+                )
+            else:
+                history_budget = max(remaining - kb_tokens, min_history_tokens)
+                recent_msgs: List[Dict[str, str]] = []
+                for msg, t in zip(
+                    reversed(self.current_topic.history),
+                    reversed(self.current_topic.history_tokens),
+                ):
+                    if t > history_budget:
+                        break
+                    recent_msgs.insert(0, msg)
+                    history_budget -= t
+                    tokens_used += t
+                messages.extend(recent_msgs)
+
+            provided_context = (
+                "\n\n---\n\n".join(context_parts)
+                if context_parts
+                else "[No additional external context]"
+            )
+            user_query_text = query.strip() or "[AUTONOMOUS CONTINUATION]"
+            user_content = f"""{user_query_text}
+            {provided_context}"""
+            messages.append({"role": "user", "content": user_content})
+
+        # ═══════════════════════════════════════════════════════════════
+        # ── FINAL NORMALIZATION: SYSTEM MESSAGE ALWAYS FIRST + LOGS COMBINED ──
+        # ═══════════════════════════════════════════════════════════════
+        system_idx = next(
+            (i for i, m in enumerate(messages) if m.get("role") == "system"), None
+        )
+
+        if system_idx is None:
+            # No system message exists → use clean PromptBuilder helpers (keeps manager clean)
+            if chat:
+                default_system = PromptBuilder.casual_chat_system_prompt()
+            else:
+                default_system = getattr(
+                    self.client,
+                    "system_message",
+                    PromptBuilder.default_agent_system_prompt(),
+                )
+            messages.insert(0, {"role": "system", "content": default_system})
+            system_idx = 0
             logger.debug(
-                "→ RESEARCH MODE: skipping conversation history, only relevant KB context"
+                f"→ Injected {'chat-friendly' if chat else 'default'} system message "
+                f"via PromptBuilder (include_logs={include_logs})"
             )
         else:
-            history_budget = max(remaining - kb_tokens, min_history_tokens)
-            recent_msgs: List[Dict[str, str]] = []
-            for msg, t in zip(
-                reversed(self.current_topic.history),
-                reversed(self.current_topic.history_tokens),
-            ):
-                if t > history_budget:
-                    break
-                recent_msgs.insert(0, msg)
-                history_budget -= t
-                tokens_used += t
-            messages.extend(recent_msgs)
-        # ── FINAL USER MESSAGE: query + all external context (no more spamming system messages) ──
-        provided_context = (
-            "\n\n---\n\n".join(context_parts)
-            if context_parts
-            else "[No additional external context]"
-        )
-        user_query_text = query.strip() or "[AUTONOMOUS CONTINUATION]"
-        user_content = f"""{user_query_text}
-        {provided_context}"""
-        messages.append({"role": "user", "content": user_content})
+            # Ensure system message is strictly first (move if necessary)
+            if system_idx != 0:
+                sys_msg = messages.pop(system_idx)
+                messages.insert(0, sys_msg)
+                logger.debug(
+                    f"→ Moved system message from index {system_idx} to position 0"
+                )
+
+        # Combine logs into the (now first) system message if include_logs was requested
+        if logs_section and logs_section not in messages[0].get("content", ""):
+            current_content = messages[0]["content"].rstrip()
+            messages[0]["content"] = f"{current_content}\n\n{logs_section}"
+            logger.debug("→ Combined recent logs into the first system message")
+
+        # ── FINAL PRUNE (if needed) ──
         final_tokens = self.count_tokens(messages)
-        logger.debug(f"Final context before prune → {final_tokens} tokens")
+        target = max_input_tokens - reserved_for_output
         if final_tokens > target:
             removed, pruned_turns = self.prune_to_fit_context(
                 messages,
@@ -1428,20 +1449,21 @@ class ContextManager:
             if pruned_turns and not lightweight_agentic:
                 self.current_topic.archived_history.extend(pruned_turns)
             logger.debug(f"Pruned {removed} turns to fit token limit")
+
         logger.debug(
-            f"provide_context finished | messages={len(messages)} | "
+            f"provide_context finished | messages={len(messages)} | first_role={messages[0]['role'] if messages else 'empty'} | "
             f"lightweight={lightweight_agentic} | research_mode={research_mode} | "
-            f"return_as_string={return_as_string} | tokens={final_tokens}"
+            f"include_logs={include_logs} | return_as_string={return_as_string} | tokens={final_tokens}"
         )
+
         if return_as_string:
             formatted = []
             for msg in messages:
                 role = msg.get("role", "unknown").upper()
                 content = str(msg.get("content", "")).strip()
                 formatted.append(f"{role}:\n{content}")
-            context = "\n\n".join(formatted)
-            # logger.debug(f"Context provided: {context}")
-            return context
+            return "\n\n".join(formatted)
+
         return messages
 
     def prune_to_fit_context(

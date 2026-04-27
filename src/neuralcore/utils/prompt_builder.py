@@ -14,15 +14,13 @@ class PromptBuilder:
     Must remain completely abstract and free of any client-specific business logic.
     """
 
-    user_system = get_os_info()
-    current_time = datetime.now().isoformat()
     FINAL_ANSWER_MARKER = "[FINAL_ANSWER_COMPLETE]"
 
     @staticmethod
     def shell_helper(user_input: str) -> str:
         """Generates a shell command prompt tailored to the actual distro."""
         return f"""
-        Generate a SINGLE, non-interactive shell command for this system: **{PromptBuilder.user_system}**
+        Generate a SINGLE, non-interactive shell command for this system: **{get_os_info()}**
 
         Rules:
         - Use the correct package manager (pacman for Arch, apt for Debian/Ubuntu, dnf for Fedora, zypper for openSUSE, etc.).
@@ -47,8 +45,8 @@ class PromptBuilder:
         Only mention system details if relevant to the issue.
 
         SYSTEM INFO (use only if needed):
-        Time: {PromptBuilder.current_time}
-        OS: {PromptBuilder.user_system}
+        Time: {datetime.now().isoformat()}
+        OS: {get_os_info()}
         """.strip()
 
     @staticmethod
@@ -80,7 +78,27 @@ class PromptBuilder:
         {content}
         """.strip()
 
-    # ====================== NEW PROMPTS FROM AgentExecutors ======================
+    @staticmethod
+    def casual_chat_system_prompt() -> str:
+        """Warm, friendly system prompt for pure casual chat mode."""
+
+        return (
+            f"You are a friendly, natural, and engaging conversational AI assistant.\n"
+            f"Current time: {datetime.now().isoformat()}\n"
+            f"System: {get_os_info()}\n\n"
+            "Respond casually, warmly, and helpfully. "
+            "Keep replies concise but engaging. Use the time/OS info only if relevant."
+        )
+
+    @staticmethod
+    def default_agent_system_prompt() -> str:
+        """Default system prompt for agentic / tool-using modes."""
+
+        return (
+            f"You are a helpful, accurate, and concise AI assistant.\n"
+            f"Current time: {datetime.now().isoformat()}\n"
+            f"System: {get_os_info()}"
+        )
 
     @staticmethod
     def classify_intent(query: str) -> str:
