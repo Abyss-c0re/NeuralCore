@@ -494,9 +494,9 @@ class KnowledgeConsolidator:
                     asyncio.create_task(self._schedule_training())
 
     # ====================== NOVELTY FILTER ======================
-    async def _get_novel_relevant(self, goal: str, k: int = 0):
+    async def _get_novel_relevant(self, goal: str, k: Optional[int] = None):
         """Get novel + relevant items with configurable k."""
-        if k == 0:
+        if k is None:
             cognition_config = (
                 getattr(getattr(self.agent, "loader", None), "config", {})
                 .get("app", {})
@@ -505,7 +505,7 @@ class KnowledgeConsolidator:
             k = cognition_config.get("novelty_k", 100)
 
         candidates = self._get_all_candidates()
-        relevant = await self.rerank(goal, candidates, k=k)
+        relevant = await self.rerank(goal, candidates, k=k or 50)
         return self._filter_novel_items(relevant)
 
     def _filter_novel_items(

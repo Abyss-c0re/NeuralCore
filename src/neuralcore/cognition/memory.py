@@ -956,7 +956,6 @@ class ContextManager:
         self,
         query: str,
         max_kb_tokens: int = 4500,
-        k: int = 25,
         research_mode: bool = False,
     ) -> str:
         """Proper chunk-aware RAG retrieval.
@@ -968,16 +967,16 @@ class ContextManager:
             return ""
         logger.debug(
             f"[RANKED_RETRIEVE] START | query='{query[:80]}...' | "
-            f"k={k} | research={research_mode} | budget={max_kb_tokens}"
+            f"research={research_mode} | budget={max_kb_tokens}"
         )
         # 1. Get candidates
         short_term = await self._get_broad_candidates(query)
         long_term = []
         if getattr(self.knowledge_base, "enabled", False):
             try:
-                # Pull a bit more than k for better reranking, but respect the parameter
-                retrieve_k = max(k * 2, 40)
-                long_term = await self.knowledge_base.retrieve(query, k=retrieve_k)
+                # === CLEAN: Just ask for more chunks ===
+                # KnowledgeBase.retrieve now handles its own default (50) and config
+                long_term = await self.knowledge_base.retrieve(query, k=100)
                 logger.debug(f"Persistent KB returned {len(long_term)} chunk items")
             except Exception as e:
                 logger.warning(f"KB retrieve failed: {e}")
@@ -1002,8 +1001,8 @@ class ContextManager:
         if not unique:
             logger.debug("[RANKED_RETRIEVE] No candidates")
             return ""
-        # 3. Rerank (now uses k)
-        rerank_k = min(len(unique), max(k * 2, 30))
+        # 3. Rerank
+        rerank_k = min(len(unique), 75)
         if self.consolidator:
             reranked = await self.consolidator.rerank(query, unique, k=rerank_k)
         else:
@@ -1033,7 +1032,7 @@ class ContextManager:
         result = "\n\n---\n\n".join(parts).strip()
         logger.debug(
             f"[RANKED_RETRIEVE] END → {len(result):,} chars / ~{used_tokens} tokens "
-            f"from {len(parts)} chunks (k={k}, budget={max_kb_tokens})"
+            f"from {len(parts)} chunks ( budget={max_kb_tokens})"
         )
         return result
 

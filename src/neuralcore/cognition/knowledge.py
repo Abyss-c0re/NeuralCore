@@ -323,13 +323,19 @@ class KnowledgeBase:
     async def retrieve(
         self,
         query: str,
-        k: int = 12,
+        k: Optional[int] = None,  # ← now optional
         categories: Optional[List[str]] = None,
         top_category: Optional[str] = None,
         include_archived: bool = False,
     ) -> List[KnowledgeItem]:
         if not self.enabled or not query.strip():
             return []
+
+        # === NEW: Use configured default if k not provided ===
+        if not k:
+            k = getattr(self, "default_retrieve_k", 50)
+        if not k:
+            k = 50
 
         items = self.index.get("items", {})
         filtered_keys = [
@@ -434,6 +440,7 @@ class KnowledgeBase:
                         continue
 
                     entry: Tuple[float, int, KnowledgeItem] = (score, counter, item)
+
                     if len(top_k) < k:
                         heapq.heappush(top_k, entry)
                     elif score > top_k[0][0]:
