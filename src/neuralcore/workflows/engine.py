@@ -823,11 +823,12 @@ class WorkflowEngine:
 
             while attempt <= retries:
                 try:
-                    async for event, payload in self._run_step_handler(
-                        handler,
+                    async for event, payload in self.execute_step(
+                        step_name,
                         iteration=iteration,
                         state=state,
                         timeout_sec=timeout_sec,
+                        emit_lifecycle_events=False,
                     ):
                         yield event, payload
 
@@ -1299,18 +1300,84 @@ class WorkflowEngine:
             state.complete_wait("fallback")
         yield "wait_completed", {"type": wait_type, "reason": "step_end"}
 
-    async def _run_step_handler(
+    async def execute_step(
         self,
-        handler: Callable,
-        *,
-        iteration: int,
-        state: AgentState,
-        timeout_sec: Optional[float],
+        step_name: str,
+        iteration: int = 0,
+        state: Optional[AgentState] = None,
+        timeout_sec: Optional[float] = None,
+        emit_lifecycle_events: bool = True,
+        **kwargs,
     ) -> AsyncIterator[Tuple[str, Any]]:
-        async for event, payload in self._iter_handler_events(
-            handler, iteration, state, timeout_sec
-        ):
-            yield event, payload
+        """
+        Execute a single workflow step by name (isolated / standalone execution).
+
+        This is useful for:
+        - Testing individual steps (e.g. 'llm_stream', 'tool_call', 'wait', 'custom_step')
+        - Debugging without running full workflow
+        - Sub-agent or manual orchestration
+        - wf_ prefixed steps or any registered handler
+
+        Supports the same event stream as full run/loop execution.
+        Set emit_lifecycle_events=False when reusing inside run() to avoid duplicate events.
+        """
+        if state is None:
+            state = getattr(self.agent, "state", None)
+            if state is None:
+                state = AgentState()
+
+        handler = self._step_handlers.get(step_name)
+        if not handler:
+            yield ("warning", f"Unknown step: {step_name} (handler not registered)")
+            return
+
+        # Optional tool configuration (safe if manager exists)
+        if hasattr(self.agent, "manager"):
+            try:
+                self.agent.manager.configure_for_step(step_name, self)
+            except Exception:
+                logger.debug(f"No tool config applied for isolated step '{step_name}'")
+
+        if emit_lifecycle_events:
+            yield (
+                "step_start_detail",
+                {
+                    "step": step_name,
+                    "iteration": iteration,
+                    "isolated_execution": True,
+                    "workflow": self.current_workflow_name,
+                },
+            )
+
+        try:
+            async for event, payload in self._iter_handler_events(
+                handler, iteration, state, timeout_sec
+            ):
+                yield event, payload
+        except Exception as e:
+            logger.error(f"Error in isolated step '{step_name}': {e}", exc_info=True)
+            yield (
+                "step_error",
+                {
+                    "step": step_name,
+                    "error": str(e),
+                    "iteration": iteration,
+                },
+            )
+            return
+
+        if emit_lifecycle_events:
+            yield (
+                "step_completed",
+                {
+                    "step": step_name,
+                    "iteration": iteration,
+                    "isolated_execution": True,
+                },
+            )
+            logger.info(
+                f"✅ execute_step completed: '{step_name}' (iteration {iteration})"
+            )
 
     async def run(
         self,
@@ -1504,11 +1571,12 @@ class WorkflowEngine:
 
                 while attempt <= retries:
                     try:
-                        async for event, payload in self._run_step_handler(
-                            handler,
+                        async for event, payload in self.execute_step(
+                            step_name,
                             iteration=iteration,
                             state=state,
                             timeout_sec=timeout_sec,
+                            emit_lifecycle_events=False,
                         ):
                             yield (event, payload)
 
