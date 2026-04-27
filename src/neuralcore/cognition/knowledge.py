@@ -11,11 +11,13 @@ from datetime import datetime
 from collections.abc import AsyncIterable
 
 import aiofiles
+from rapidfuzz import fuzz
 
 from neuralcore.utils.logger import Logger
 from neuralcore.cognition.items import KnowledgeItem
 from neuralcore.utils.search import cosine_sim, keyword_score
 from neuralcore.utils.file_helpers import _read_file
+
 
 logger = Logger.get_logger()
 
@@ -48,6 +50,11 @@ class KnowledgeBase:
         self.auto_reindex = kb_config.get("auto_reindex", True)
         self.reindex_interval = kb_config.get("reindex_interval_seconds", 300)
 
+        # === NEW: Retrieval tightening config ===
+        self.min_sim_threshold = kb_config.get("min_similarity_threshold", 0.29)
+        self.direct_match_boost = kb_config.get("direct_match_boost", 0.18)
+        self.direct_match_threshold = kb_config.get("direct_match_threshold", 0.23)
+
         self.base_folder.mkdir(parents=True, exist_ok=True)
         (self.base_folder / "items").mkdir(exist_ok=True)
 
@@ -60,26 +67,23 @@ class KnowledgeBase:
 
         logger.info(
             f"✅ KnowledgeBase initialized | root={self.base_folder} | "
-            f"items={len(self.index.get('items', {}))}"
+            f"items={len(self.index.get('items', {}))} | "
+            f"min_threshold={self.min_sim_threshold}"
         )
 
-    # ====================== START BACKGROUND WATCHER (MISSING BEFORE) ======================
+    # ====================== START BACKGROUND WATCHER ======================
     async def start_background_watcher(self):
-        """Start the background reindex watcher with non-blocking first scan."""
         if not (self.enabled and self.auto_reindex):
             logger.info("KnowledgeBase auto-reindex is disabled")
             return
 
-        # === NON-BLOCKING FIRST SCAN ===
         logger.info("🔄 Performing initial reindex scan (background)...")
-        asyncio.create_task(self._run_initial_reindex())  # ← Run in background
+        asyncio.create_task(self._run_initial_reindex())
 
-        # Start periodic watcher
         asyncio.create_task(self._background_watcher())
         logger.info("🔄 Background reindex watcher started (periodic every 5 min)")
 
     async def _run_initial_reindex(self):
-        """Run the first reindex in background without blocking UI."""
         try:
             count = await self.reindex_changed_files()
             if count > 0:
@@ -201,9 +205,7 @@ class KnowledgeBase:
         item_folder = self._get_item_folder(parent_key)
         item_folder.mkdir(parents=True, exist_ok=True)
 
-        # === PROPER STREAMING — NO MERGE, NO FULL CONTENT IN MEMORY ===
         try:
-            # Direct await (no broken to_thread + asyncio.run)
             content_or_stream = await _read_file(self.agent, str(file_path))
         except Exception as e:
             logger.error(f"Failed to read {file_path}: {e}")
@@ -219,7 +221,6 @@ class KnowledgeBase:
                 if not raw_text or len(raw_text.strip()) < 10:
                     continue
 
-                # Chunk each arriving piece independently (merge=False keeps them small)
                 sub_items = self.context_manager._chunk_text(
                     raw_text, parent_key, "file", merge=False
                 )
@@ -240,7 +241,6 @@ class KnowledgeBase:
                         chunk_count += 1
 
         else:
-            # Fallback for non-streaming readers (small files)
             content_str = str(content_or_stream).strip()
             if len(content_str) < 30:
                 logger.warning(f"Very little text from {file_path.name}")
@@ -269,7 +269,6 @@ class KnowledgeBase:
 
         logger.info(f"📄 {file_path.name} → {len(embeddings_list)} chunks (streamed)")
 
-        # === SAVE (unchanged, but now fed from stream) ===
         content_path = item_folder / "content.jsonl"
         async with aiofiles.open(content_path, "w", encoding="utf-8") as f:
             await f.write("\n".join(content_lines))
@@ -279,7 +278,6 @@ class KnowledgeBase:
             np.savez_compressed, item_folder / "embeddings.npz", **emb_dict
         )
 
-        # meta + index update (same as before)
         meta = {
             "key": parent_key,
             "source_type": "file",
@@ -321,7 +319,7 @@ class KnowledgeBase:
         )
         return parent_key
 
-    # ====================== RETRIEVAL ======================
+    # ====================== RETRIEVAL (TIGHTENED) ======================
     async def retrieve(
         self,
         query: str,
@@ -351,11 +349,14 @@ class KnowledgeBase:
             logger.debug("[KB] No matching files for query")
             return []
 
-        # Compute query embedding once
+        # Compute query embedding + mentions once
         query_words = query.lower().split()
         query_emb = await self.context_manager.fetch_embedding(query, prefix="query")
+        file_mentions = self.context_manager._extract_potential_file_or_param_mentions(
+            query
+        )
 
-        # Min-heap to keep only top-k (memory-safe even with 10k+ chunks)
+        # Min-heap to keep only top-k
         top_k: List[Tuple[float, int, KnowledgeItem]] = []
         counter = 0
         loaded_chunks = 0
@@ -397,6 +398,7 @@ class KnowledgeBase:
                     )
                     item.embedding = emb_data[emb_key]
 
+                    # === BASE SCORING ===
                     kw = keyword_score(query_words, item.content)
                     dense = (
                         cosine_sim(query_emb, item.embedding)
@@ -404,6 +406,32 @@ class KnowledgeBase:
                         else 0.0
                     )
                     score = 0.6 * dense + 0.4 * kw
+
+                    # === DIRECT MATCH BOOST (category or filename) ===
+                    direct_match = False
+                    category_path = meta.get("category_path", "").lower()
+                    original_path = meta.get("original_path", "").lower()
+
+                    for mention in file_mentions:
+                        m = mention.lower()
+                        if (
+                            m in category_path
+                            or m in original_path
+                            or (fuzz and fuzz.partial_ratio(m, category_path) > 82)
+                            or (fuzz and fuzz.partial_ratio(m, original_path) > 82)
+                        ):
+                            direct_match = True
+                            break
+
+                    if direct_match:
+                        score += self.direct_match_boost
+                        effective_threshold = self.direct_match_threshold
+                    else:
+                        effective_threshold = self.min_sim_threshold
+
+                    # === HARD MINIMUM THRESHOLD FILTER ===
+                    if score < effective_threshold:
+                        continue
 
                     entry: Tuple[float, int, KnowledgeItem] = (score, counter, item)
                     if len(top_k) < k:
@@ -418,13 +446,13 @@ class KnowledgeBase:
         if not top_k:
             return []
 
-        # Sort descending (best first)
         top_k.sort(key=lambda x: x[0], reverse=True)
         result = [item for _, _, item in top_k]
 
         logger.debug(
             f"[KB] retrieve → {len(result)} chunks (from {loaded_chunks} total, "
-            f"kept top-{k}, heap peak={len(top_k)})"
+            f"kept top-{k}, min_threshold={self.min_sim_threshold}, "
+            f"direct_boost={self.direct_match_boost})"
         )
         return result
 
@@ -441,7 +469,7 @@ class KnowledgeBase:
         if not self.enabled:
             return 0
 
-        async with self._reindex_lock:  # ← Prevent double runs
+        async with self._reindex_lock:
             logger.info("🔄 Starting incremental reindex scan...")
             indexed_count = 0
 
