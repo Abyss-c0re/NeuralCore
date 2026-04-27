@@ -494,12 +494,23 @@ class KnowledgeConsolidator:
                     asyncio.create_task(self._schedule_training())
 
     # ====================== NOVELTY FILTER ======================
-    async def _get_novel_relevant(self, goal: str):
+    async def _get_novel_relevant(self, goal: str, k: int = 0):
+        """Get novel + relevant items with configurable k."""
+        if k == 0:
+            cognition_config = (
+                getattr(getattr(self.agent, "loader", None), "config", {})
+                .get("app", {})
+                .get("cognition", {})
+            )
+            k = cognition_config.get("novelty_k", 100)
+
         candidates = self._get_all_candidates()
-        relevant = await self.rerank(goal, candidates, k=50)
+        relevant = await self.rerank(goal, candidates, k=k)
         return self._filter_novel_items(relevant)
 
-    def _filter_novel_items(self, candidates: List[Any]) -> List[Any]:
+    def _filter_novel_items(
+        self, candidates: List[Any], min_keep: int = 25
+    ) -> List[Any]:
         if not self.concept_graph or not candidates:
             return candidates
 
@@ -522,6 +533,23 @@ class KnowledgeConsolidator:
 
             if max_sim < threshold:
                 novel.append(item)
+
+        # Guarantee we always return at least min_keep items
+        if len(novel) < min_keep:
+            # Fall back to top items by recency / source quality
+            sorted_by_quality = sorted(
+                candidates,
+                key=lambda x: (
+                    1 if getattr(x, "source_type", "") == "tool_outcome" else 0,
+                    getattr(x, "timestamp", 0),
+                ),
+                reverse=True,
+            )
+            for item in sorted_by_quality:
+                if item not in novel:
+                    novel.append(item)
+                if len(novel) >= min_keep:
+                    break
 
         return novel
 
