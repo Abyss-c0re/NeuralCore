@@ -37,11 +37,12 @@ class KnowledgeConsolidator:
         self.reranker_enabled: bool = cognition_config.get("reranker_enabled", True)
         self.novelty_threshold: float = cognition_config.get("novelty_threshold", 0.85)
 
-        # === Tunable rerank budget + semantic weight ===
+        # === Tunable rerank budget + semantic weight + recency decay ===
         self.max_rerank_candidates: int = cognition_config.get(
             "max_rerank_candidates", 80
         )
         self.semantic_weight: float = cognition_config.get("semantic_weight", 0.25)
+        self.recency_decay_lambda = cognition_config.get("recency_decay_lambda", 0.05)
 
         # Training data
         self.training_data: List[Tuple[Dict[str, float], int]] = []
@@ -70,7 +71,8 @@ class KnowledgeConsolidator:
             logger.info(
                 f"✅ KnowledgeConsolidator initialized | "
                 f"reranker=ENABLED | novelty_threshold={self.novelty_threshold} | "
-                f"max_rerank={self.max_rerank_candidates} | semantic_weight={self.semantic_weight}"
+                f"max_rerank={self.max_rerank_candidates} | semantic_weight={self.semantic_weight} | "
+                f"recency_decay_lambda={self.recency_decay_lambda}"
             )
         else:
             logger.info(
@@ -156,7 +158,9 @@ class KnowledgeConsolidator:
                 "content_length": length,
                 "source_type_score": source_score,
                 "is_tool_outcome": is_tool,
-                "recency_score": np.exp(-0.08 * recency_hours),
+                "recency_score": np.exp(
+                    -self.recency_decay_lambda * recency_hours
+                ),  # ← now configurable
                 "dense_cosine": dense,
                 "cosine_x_keyword": dense * kw * 1.5,
                 "semantic_rescue": dense * 2.0 if kw < 4.6 else 0.0,
@@ -304,17 +308,21 @@ class KnowledgeConsolidator:
         tool = np.array(features_df.get("is_tool_outcome", 0.0))
         dense = np.array(features_df.get("dense_cosine", 0.0))
         cat = np.array(features_df.get("category_score", 1.0))
+        recency = np.array(features_df.get("recency_score", 1.0))  # already decayed
 
-        # === TUNABLE SEMANTIC WEIGHT ===
-        return (
+        # === TUNABLE SEMANTIC WEIGHT + RECENCY DECAY ===
+        base_score = (
             kw * 0.35
             + np.log1p(length) * 0.12
             + source * 0.08
             + tool * 0.06
-            + dense * self.semantic_weight  # ← tunable
+            + dense * self.semantic_weight
             + cat * 0.07
             + np.array(features_df.get("cosine_x_keyword", 0.0)) * 0.10
         )
+
+        # Apply recency decay
+        return base_score * recency
 
     async def _collect_training_sample(
         self, query: str, candidates: List[Any], chosen_items: List[Any]

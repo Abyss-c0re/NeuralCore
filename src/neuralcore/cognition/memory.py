@@ -91,6 +91,7 @@ class ContextManager:
         self.tool_call_history: List[Dict[str, Any]] = []
         self.knowledge_base = KnowledgeBase(self)
         self.consolidator = KnowledgeConsolidator(agent)
+        self.recency_decay_lambda = self.consolidator.recency_decay_lambda
 
     def _init_fastembed(self, embed_config: dict):
         """Helper method to initialize FastEmbed with full path handling."""
@@ -871,14 +872,16 @@ class ContextManager:
         return result
 
     async def _get_broad_candidates(self, query: str) -> List[KnowledgeItem]:
-        """Returns broad candidates using RRF fusion + file/param boosting.
-        Always returns pure List[KnowledgeItem]."""
+        """Returns broad candidates using RRF fusion + file/param boosting + recency decay.
+        Decay formula: score * exp(-λ * hours_since_added)
+        """
         if not self.short_term_mem:
             logger.debug("[BROAD] KB empty → returning []")
             return []
         logger.debug(
             f"[BROAD] START | query='{query[:100]}...' | KB_size={len(self.short_term_mem)}"
         )
+
         # Dense ranking
         query_emb = await self.fetch_embedding(
             PromptBuilder.knowledge_retrieval_embedding_query(query), prefix="query"
@@ -889,23 +892,43 @@ class ContextManager:
                 emb = getattr(item, "embedding", None)
                 if emb is not None and emb.size > 0:
                     sim = cosine_sim(query_emb, emb)
-                    dense_ranked.append((sim, key, item))
+
+                    # === DYNAMIC DECAY ===
+                    ts = item.metadata.get("timestamp", time.time())
+                    recency_hours = max(0.0, (time.time() - ts) / 3600.0)
+                    decay = np.exp(-self.recency_decay_lambda * recency_hours)
+                    decayed_sim = sim * decay
+
+                    dense_ranked.append((decayed_sim, key, item))
+
         logger.debug(f"[BROAD] Dense ranked: {len(dense_ranked)} items")
+
         # Sparse ranking
         sparse_scores = await self._sparse_retrieve(query)
         sparse_ranked = []
         for key, score in sparse_scores.items():
             if score > 0 and key in self.short_term_mem:
-                sparse_ranked.append((score, key, self.short_term_mem[key]))
+                item = self.short_term_mem[key]
+
+                # === DYNAMIC DECAY ===
+                ts = item.metadata.get("timestamp", time.time())
+                recency_hours = max(0.0, (time.time() - ts) / 3600.0)
+                decay = np.exp(-self.recency_decay_lambda * recency_hours)
+                decayed_score = score * decay
+
+                sparse_ranked.append((decayed_score, key, item))
+
         logger.debug(f"[BROAD] Sparse ranked: {len(sparse_ranked)} items")
-        # RRF fusion
+
+        # RRF fusion (on decayed scores)
         rrf_scores: Dict[str, float] = {}
         k = 60
         for rank, (_, key, _) in enumerate(dense_ranked[:50], start=1):
             rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (rank + k)
         for rank, (_, key, _) in enumerate(sparse_ranked[:50], start=1):
             rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (rank + k)
-        # File/param boosting
+
+        # File/param boosting (unchanged)
         file_mentions = self._extract_potential_file_or_param_mentions(query)
         if file_mentions:
             logger.debug(f"[BOOST] Detected mentions: {file_mentions}")
@@ -939,7 +962,8 @@ class ContextManager:
                     boosted += 1
             if boosted > 0:
                 logger.debug(f"[BOOST] Applied boosts to {boosted} tool outcomes")
-        # Final candidates - always (score, item) for safe sorting
+
+        # Final candidates
         scored = [
             (rrf_scores.get(key, 0.0), item)
             for key, item in self.short_term_mem.items()
@@ -958,9 +982,10 @@ class ContextManager:
         max_kb_tokens: int = 4500,
         research_mode: bool = False,
     ) -> str:
-        """Proper chunk-aware RAG retrieval.
-        - Pulls many small chunks from KnowledgeBase (respects `k`)
+        """Proper chunk-aware RAG retrieval with recency decay.
+        - Pulls many small chunks from KnowledgeBase
         - Reranks with consolidator (if present)
+        - Applies dynamic decay to favor recent memories
         - Strictly respects token budget
         """
         if not query.strip():
@@ -969,17 +994,16 @@ class ContextManager:
             f"[RANKED_RETRIEVE] START | query='{query[:80]}...' | "
             f"research={research_mode} | budget={max_kb_tokens}"
         )
-        # 1. Get candidates
+        # 1. Get candidates (decay is already applied inside _get_broad_candidates)
         short_term = await self._get_broad_candidates(query)
         long_term = []
         if getattr(self.knowledge_base, "enabled", False):
             try:
-                # === CLEAN: Just ask for more chunks ===
-                # KnowledgeBase.retrieve now handles its own default (50) and config
                 long_term = await self.knowledge_base.retrieve(query, k=100)
                 logger.debug(f"Persistent KB returned {len(long_term)} chunk items")
             except Exception as e:
                 logger.warning(f"KB retrieve failed: {e}")
+
         # 2. Deduplicate
         all_candidates = short_term + long_term
         seen = set()
@@ -989,6 +1013,7 @@ class ContextManager:
             if key not in seen:
                 seen.add(key)
                 unique.append(item)
+
         if research_mode:
             unique = [
                 item
@@ -1001,12 +1026,14 @@ class ContextManager:
         if not unique:
             logger.debug("[RANKED_RETRIEVE] No candidates")
             return ""
-        # 3. Rerank
+
+        # 3. Rerank (decay already baked into candidate scores)
         rerank_k = min(len(unique), 75)
         if self.consolidator:
             reranked = await self.consolidator.rerank(query, unique, k=rerank_k)
         else:
             reranked = unique[:rerank_k]
+
         # 4. Greedy selection within strict token budget
         parts = []
         remaining = max_kb_tokens
@@ -1029,10 +1056,11 @@ class ContextManager:
                         [{"role": "user", "content": truncated}]
                     )
                 break
+
         result = "\n\n---\n\n".join(parts).strip()
         logger.debug(
             f"[RANKED_RETRIEVE] END → {len(result):,} chars / ~{used_tokens} tokens "
-            f"from {len(parts)} chunks ( budget={max_kb_tokens})"
+            f"from {len(parts)} chunks (budget={max_kb_tokens})"
         )
         return result
 
