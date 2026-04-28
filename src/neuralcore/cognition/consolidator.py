@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from neuralcore.utils.prompt_builder import PromptBuilder
 
 from neuralcore.utils.logger import Logger
-from neuralcore.utils.search import cosine_sim, keyword_score
+from neuralcore.utils.search import cosine_sim, keyword_score, cosine_sim_batch
 from neuralcore.cognition.items import KnowledgeItem
 
 logger = Logger.get_logger()
@@ -538,26 +538,40 @@ class KnowledgeConsolidator:
         novel = []
         threshold = self.novelty_threshold
 
-        for item in candidates:
-            item_emb = getattr(item, "embedding", None)
-            if item_emb is None or len(item_emb) == 0:
-                novel.append(item)
-                continue
+        # === VECTORIZED NOVELTY CHECK ===
+        concept_embeddings = []
+        concept_names = []
+        for name, concept in self.concept_graph.items():
+            emb = concept.get("embedding")
+            if emb is not None and len(emb) > 0:
+                concept_embeddings.append(emb)
+                concept_names.append(name)
 
-            max_sim = 0.0
-            for concept in self.concept_graph.values():
-                concept_emb = concept.get("embedding")
-                if concept_emb is not None and len(concept_emb) > 0:
-                    sim = cosine_sim(item_emb, concept_emb)
-                    if sim > max_sim:
-                        max_sim = sim
+        if not concept_embeddings:
+            return candidates  # no concepts to compare against
 
-            if max_sim < threshold:
+        # Prepare candidate embeddings
+        candidate_embs = [getattr(item, "embedding", None) for item in candidates]
+
+        # Vectorized similarity to ALL concepts at once
+        # Shape: (num_candidates, num_concepts)
+        sim_matrix = []
+        for emb in candidate_embs:
+            if emb is None or len(emb) == 0:
+                sim_matrix.append(np.zeros(len(concept_embeddings)))
+            else:
+                sims = cosine_sim_batch(emb, concept_embeddings)
+                sim_matrix.append(sims)
+
+        sim_matrix = np.array(sim_matrix)  # (N_candidates, N_concepts)
+        max_sim_per_candidate = sim_matrix.max(axis=1) if sim_matrix.size > 0 else np.zeros(len(candidates))
+
+        for i, item in enumerate(candidates):
+            if max_sim_per_candidate[i] < threshold:
                 novel.append(item)
 
         # Guarantee we always return at least min_keep items
         if len(novel) < min_keep:
-            # Fall back to top items by recency / source quality
             sorted_by_quality = sorted(
                 candidates,
                 key=lambda x: (

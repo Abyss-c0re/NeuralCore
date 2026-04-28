@@ -1,6 +1,6 @@
 import re
+from typing import List
 import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
 from rapidfuzz import fuzz
 
 
@@ -55,11 +55,16 @@ def fuzzy_score(query, text):
 
 
 def cosine_sim(vec1: np.ndarray, vec2: np.ndarray) -> float:
+    """
+    Fast, robust cosine similarity.
+    Compatible with all call sites in ContextManager + KnowledgeConsolidator.
+    """
     if vec1 is None or vec2 is None:
         return 0.0
 
-    vec1 = np.asarray(vec1, dtype=np.float32)
-    vec2 = np.asarray(vec2, dtype=np.float32)
+    # Convert + flatten (handles (384,) and (1, 384) safely)
+    vec1 = np.asarray(vec1, dtype=np.float32).ravel()
+    vec2 = np.asarray(vec2, dtype=np.float32).ravel()
 
     if vec1.size == 0 or vec2.size == 0:
         return 0.0
@@ -70,9 +75,47 @@ def cosine_sim(vec1: np.ndarray, vec2: np.ndarray) -> float:
     if not np.isfinite(vec1).all() or not np.isfinite(vec2).all():
         return 0.0
 
-    try:
-        # sklearn expects 2D arrays
-        sim = cosine_similarity(vec1.reshape(1, -1), vec2.reshape(1, -1))
-        return float(sim[0][0])
-    except Exception:
+    norm1 = np.linalg.norm(vec1)
+    norm2 = np.linalg.norm(vec2)
+
+    if norm1 == 0.0 or norm2 == 0.0:
         return 0.0
+
+    # Pure numpy dot product (fastest path)
+    return float(np.dot(vec1, vec2) / (norm1 * norm2))
+
+
+def cosine_sim_batch(
+    query_emb: np.ndarray,
+    embeddings: List[np.ndarray],
+) -> np.ndarray:
+    """
+    Vectorized cosine similarity — much faster than looping.
+    Returns array of similarities in the same order as embeddings.
+    """
+    if not embeddings:
+        return np.array([])
+
+    # Stack all embeddings into a matrix (N x D)
+    emb_matrix = np.vstack(
+        [e.ravel() for e in embeddings if e is not None and e.size > 0]
+    )
+
+    if emb_matrix.size == 0:
+        return np.zeros(len(embeddings))
+
+    query = query_emb.ravel().astype(np.float32)
+
+    # Normalize
+    query_norm = np.linalg.norm(query)
+    if query_norm == 0:
+        return np.zeros(len(embeddings))
+
+    emb_norms = np.linalg.norm(emb_matrix, axis=1)
+    emb_norms[emb_norms == 0] = 1.0  # avoid div by zero
+
+    # Batch dot product
+    dots = emb_matrix @ query
+    sims = dots / (query_norm * emb_norms)
+
+    return sims.astype(np.float32)

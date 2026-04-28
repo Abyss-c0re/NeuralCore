@@ -11,7 +11,7 @@ from neuralcore.utils.prompt_builder import PromptBuilder
 from neuralcore.utils.config import get_loader
 from neuralcore.clients.factory import get_clients
 from neuralcore.utils.text_tokenizer import TextTokenizer
-from neuralcore.utils.search import keyword_score, cosine_sim
+from neuralcore.utils.search import keyword_score, cosine_sim, cosine_sim_batch
 from neuralcore.agents.state import AgentState
 from neuralcore.cognition.items import KnowledgeItem, Topic
 from neuralcore.cognition.consolidator import KnowledgeConsolidator
@@ -873,54 +873,59 @@ class ContextManager:
 
     async def _get_broad_candidates(self, query: str) -> List[KnowledgeItem]:
         """Returns broad candidates using RRF fusion + file/param boosting + recency decay.
-        Decay formula: score * exp(-λ * hours_since_added)
+        Now uses vectorized dense similarity for speed.
         """
         if not self.short_term_mem:
             logger.debug("[BROAD] KB empty → returning []")
             return []
+
         logger.debug(
             f"[BROAD] START | query='{query[:100]}...' | KB_size={len(self.short_term_mem)}"
         )
 
-        # Dense ranking
+        # === DENSE RANKING (vectorized) ===
         query_emb = await self.fetch_embedding(
             PromptBuilder.knowledge_retrieval_embedding_query(query), prefix="query"
         )
+
         dense_ranked = []
         if query_emb.size > 0:
-            for key, item in self.short_term_mem.items():
-                emb = getattr(item, "embedding", None)
-                if emb is not None and emb.size > 0:
-                    sim = cosine_sim(query_emb, emb)
+            # Prepare all embeddings in order
+            items = list(self.short_term_mem.items())
+            embeddings = [item.embedding for _, item in items]
 
-                    # === DYNAMIC DECAY ===
-                    ts = item.metadata.get("timestamp", time.time())
-                    recency_hours = max(0.0, (time.time() - ts) / 3600.0)
-                    decay = np.exp(-self.recency_decay_lambda * recency_hours)
-                    decayed_sim = sim * decay
+            # Vectorized similarity
+            sims = cosine_sim_batch(query_emb, embeddings)
 
-                    dense_ranked.append((decayed_sim, key, item))
+            for (key, item), sim in zip(items, sims):
+                if sim <= 0:
+                    continue
+
+                # Dynamic recency decay
+                ts = item.metadata.get("timestamp", time.time())
+                recency_hours = max(0.0, (time.time() - ts) / 3600.0)
+                decay = np.exp(-self.recency_decay_lambda * recency_hours)
+                decayed_sim = sim * decay
+
+                dense_ranked.append((decayed_sim, key, item))
 
         logger.debug(f"[BROAD] Dense ranked: {len(dense_ranked)} items")
 
-        # Sparse ranking
+        # === SPARSE RANKING (unchanged) ===
         sparse_scores = await self._sparse_retrieve(query)
         sparse_ranked = []
         for key, score in sparse_scores.items():
             if score > 0 and key in self.short_term_mem:
                 item = self.short_term_mem[key]
-
-                # === DYNAMIC DECAY ===
                 ts = item.metadata.get("timestamp", time.time())
                 recency_hours = max(0.0, (time.time() - ts) / 3600.0)
                 decay = np.exp(-self.recency_decay_lambda * recency_hours)
                 decayed_score = score * decay
-
                 sparse_ranked.append((decayed_score, key, item))
 
         logger.debug(f"[BROAD] Sparse ranked: {len(sparse_ranked)} items")
 
-        # RRF fusion (on decayed scores)
+        # === RRF FUSION ===
         rrf_scores: Dict[str, float] = {}
         k = 60
         for rank, (_, key, _) in enumerate(dense_ranked[:50], start=1):
@@ -928,7 +933,7 @@ class ContextManager:
         for rank, (_, key, _) in enumerate(sparse_ranked[:50], start=1):
             rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (rank + k)
 
-        # File/param boosting (unchanged)
+        # === FILE/PARAM BOOSTING (unchanged) ===
         file_mentions = self._extract_potential_file_or_param_mentions(query)
         if file_mentions:
             logger.debug(f"[BOOST] Detected mentions: {file_mentions}")
@@ -963,7 +968,7 @@ class ContextManager:
             if boosted > 0:
                 logger.debug(f"[BOOST] Applied boosts to {boosted} tool outcomes")
 
-        # Final candidates
+        # === FINAL CANDIDATES ===
         scored = [
             (rrf_scores.get(key, 0.0), item)
             for key, item in self.short_term_mem.items()
@@ -971,8 +976,10 @@ class ContextManager:
         ]
         scored.sort(key=lambda x: x[0], reverse=True)
         candidates = [item for score, item in scored[:100]]
+
         logger.debug(
-            f"[BROAD] END → returning {len(candidates)} broad candidates (top RRF score: {scored[0][0] if scored else 0:.4f})"
+            f"[BROAD] END → returning {len(candidates)} broad candidates "
+            f"(top RRF score: {scored[0][0] if scored else 0:.4f})"
         )
         return candidates
 

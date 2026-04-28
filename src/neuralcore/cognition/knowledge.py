@@ -15,7 +15,7 @@ from rapidfuzz import fuzz
 
 from neuralcore.utils.logger import Logger
 from neuralcore.cognition.items import KnowledgeItem
-from neuralcore.utils.search import cosine_sim, keyword_score
+from neuralcore.utils.search import cosine_sim, keyword_score, cosine_sim_batch
 from neuralcore.utils.file_helpers import _read_file
 
 
@@ -323,7 +323,7 @@ class KnowledgeBase:
     async def retrieve(
         self,
         query: str,
-        k: Optional[int] = None,  # ← now optional
+        k: Optional[int] = None,
         categories: Optional[List[str]] = None,
         top_category: Optional[str] = None,
         include_archived: bool = False,
@@ -331,7 +331,6 @@ class KnowledgeBase:
         if not self.enabled or not query.strip():
             return []
 
-        # === NEW: Use configured default if k not provided ===
         if not k:
             k = getattr(self, "default_retrieve_k", 50)
         if not k:
@@ -345,27 +344,19 @@ class KnowledgeBase:
             and (not top_category or meta.get("top_category") == top_category)
             and (
                 not categories
-                or any(
-                    meta.get("category_path", "").startswith(cat) for cat in categories
-                )
+                or any(meta.get("category_path", "").startswith(cat) for cat in categories)
             )
         ]
 
         if not filtered_keys:
-            logger.debug("[KB] No matching files for query")
             return []
 
-        # Compute query embedding + mentions once
         query_words = query.lower().split()
         query_emb = await self.context_manager.fetch_embedding(query, prefix="query")
-        file_mentions = self.context_manager._extract_potential_file_or_param_mentions(
-            query
-        )
+        file_mentions = self.context_manager._extract_potential_file_or_param_mentions(query)
 
-        # Min-heap to keep only top-k
-        top_k: List[Tuple[float, int, KnowledgeItem]] = []
-        counter = 0
-        loaded_chunks = 0
+        # === COLLECT ALL CHUNKS FIRST ===
+        all_chunks: List[Dict[str, Any]] = []  # temp storage
 
         for key in filtered_keys:
             meta = items[key]
@@ -390,7 +381,6 @@ class KnowledgeBase:
                     if emb_key not in emb_data:
                         continue
 
-                    loaded_chunks += 1
                     item = KnowledgeItem(
                         key=f"{key}_chunk{i}",
                         source_type="file",
@@ -403,52 +393,70 @@ class KnowledgeBase:
                         },
                     )
                     item.embedding = emb_data[emb_key]
-
-                    # === BASE SCORING ===
-                    kw = keyword_score(query_words, item.content)
-                    dense = (
-                        cosine_sim(query_emb, item.embedding)
-                        if query_emb.size > 0
-                        else 0.0
+                    all_chunks.append(
+                        {
+                            "item": item,
+                            "kw": keyword_score(query_words, item.content),
+                            "meta": meta,
+                        }
                     )
-                    score = 0.6 * dense + 0.4 * kw
-
-                    # === DIRECT MATCH BOOST (category or filename) ===
-                    direct_match = False
-                    category_path = meta.get("category_path", "").lower()
-                    original_path = meta.get("original_path", "").lower()
-
-                    for mention in file_mentions:
-                        m = mention.lower()
-                        if (
-                            m in category_path
-                            or m in original_path
-                            or (fuzz and fuzz.partial_ratio(m, category_path) > 82)
-                            or (fuzz and fuzz.partial_ratio(m, original_path) > 82)
-                        ):
-                            direct_match = True
-                            break
-
-                    if direct_match:
-                        score += self.direct_match_boost
-                        effective_threshold = self.direct_match_threshold
-                    else:
-                        effective_threshold = self.min_sim_threshold
-
-                    # === HARD MINIMUM THRESHOLD FILTER ===
-                    if score < effective_threshold:
-                        continue
-
-                    entry: Tuple[float, int, KnowledgeItem] = (score, counter, item)
-
-                    if len(top_k) < k:
-                        heapq.heappush(top_k, entry)
-                    elif score > top_k[0][0]:
-                        heapq.heapreplace(top_k, entry)
-                    counter += 1
 
             except Exception as e:
                 logger.warning(f"Failed to load item {key}: {e}")
+
+        if not all_chunks:
+            return []
+
+        # === VECTORIZED DENSE SIMILARITY ===
+        if query_emb.size > 0:
+            embeddings = [c["item"].embedding for c in all_chunks]
+            dense_sims = cosine_sim_batch(query_emb, embeddings)
+        else:
+            dense_sims = np.zeros(len(all_chunks))
+
+        # === SCORING + FILTERING ===
+        top_k: List[Tuple[float, int, KnowledgeItem]] = []
+        counter = 0
+
+        for i, chunk in enumerate(all_chunks):
+            item = chunk["item"]
+            kw = chunk["kw"]
+            meta = chunk["meta"]
+
+            dense = float(dense_sims[i])
+            score = 0.6 * dense + 0.4 * kw
+
+            # Direct match boost
+            direct_match = False
+            category_path = meta.get("category_path", "").lower()
+            original_path = meta.get("original_path", "").lower()
+
+            for mention in file_mentions:
+                m = mention.lower()
+                if (
+                    m in category_path
+                    or m in original_path
+                    or (fuzz and fuzz.partial_ratio(m, category_path) > 82)
+                    or (fuzz and fuzz.partial_ratio(m, original_path) > 82)
+                ):
+                    direct_match = True
+                    break
+
+            if direct_match:
+                score += self.direct_match_boost
+                effective_threshold = self.direct_match_threshold
+            else:
+                effective_threshold = self.min_sim_threshold
+
+            if score < effective_threshold:
+                continue
+
+            entry = (score, counter, item)
+            if len(top_k) < k:
+                heapq.heappush(top_k, entry)
+            elif score > top_k[0][0]:
+                heapq.heapreplace(top_k, entry)
+            counter += 1
 
         if not top_k:
             return []
@@ -457,9 +465,8 @@ class KnowledgeBase:
         result = [item for _, _, item in top_k]
 
         logger.debug(
-            f"[KB] retrieve → {len(result)} chunks (from {loaded_chunks} total, "
-            f"kept top-{k}, min_threshold={self.min_sim_threshold}, "
-            f"direct_boost={self.direct_match_boost})"
+            f"[KB] retrieve → {len(result)} chunks (from {len(all_chunks)} total, "
+            f"kept top-{k})"
         )
         return result
 
