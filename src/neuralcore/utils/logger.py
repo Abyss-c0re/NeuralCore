@@ -136,7 +136,7 @@ class Logger:
         return cls._memory_handler.get_logs(level=lvl_no, max_entries=max_entries)
 
 
-# ===================== Handlers (unchanged) =====================
+# ===================== Handlers =====================
 
 
 class MemoryHandler(logging.Handler):

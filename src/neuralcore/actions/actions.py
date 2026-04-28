@@ -82,7 +82,7 @@ class Action:
         self._first_param_name = params[0].name if params else None
         self._needs_agent = self._first_param_name in ("self", "agent")
 
-    # ====================== BINDING ====================== (unchanged)
+    # ====================== BINDING ======================
     def bind_agent(self, agent: Any) -> "Action":
         """Bind agent instance with proper validation based on parameter name."""
         if agent is None:
@@ -121,7 +121,7 @@ class Action:
         logger.info(f"[ACTION START] {self.name}")
         logger.debug(f"[ACTION INPUT] {self.name} kwargs={kwargs}")
 
-        # Confirmation check (unchanged)
+        # Confirmation check
         confirmation_bypassed = kwargs.pop("_confirmation_passed", False)
         if self.require_confirmation and not confirmation_bypassed:
             preview = self.confirmation_preview(kwargs)

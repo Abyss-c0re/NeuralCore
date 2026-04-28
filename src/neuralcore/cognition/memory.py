@@ -911,7 +911,7 @@ class ContextManager:
 
         logger.debug(f"[BROAD] Dense ranked: {len(dense_ranked)} items")
 
-        # === SPARSE RANKING (unchanged) ===
+        # === SPARSE RANKING ===
         sparse_scores = await self._sparse_retrieve(query)
         sparse_ranked = []
         for key, score in sparse_scores.items():
@@ -933,7 +933,7 @@ class ContextManager:
         for rank, (_, key, _) in enumerate(sparse_ranked[:50], start=1):
             rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (rank + k)
 
-        # === FILE/PARAM BOOSTING (unchanged) ===
+        # === FILE/PARAM BOOSTING ===
         file_mentions = self._extract_potential_file_or_param_mentions(query)
         if file_mentions:
             logger.debug(f"[BOOST] Detected mentions: {file_mentions}")

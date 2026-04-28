@@ -307,7 +307,7 @@ def tool(set_name: str, **kwargs):
             if param.default is _empty and param_name not in required:
                 required.append(param_name)
 
-        # Executor wrapper (unchanged)
+        # Executor wrapper
         if iscoroutinefunction(fn):
 
             @wraps(fn)
@@ -343,7 +343,7 @@ def tool(set_name: str, **kwargs):
             record_to_context=record_to_context,
         )
 
-        # Register (unchanged)
+        # Register
         if set_name in registry.sets:
             aset = registry.sets[set_name]
         else:

@@ -375,7 +375,7 @@ class DynamicActionManager:
         """Return which toolset originally loaded this tool."""
         return self._tool_to_set.get(tool_name)
 
-    # Existing properties (unchanged)
+    # Existing properties
     def get_llm_tools(self) -> List[Dict[str, Any]]:
         return self.current_set.get_llm_tools()
 
