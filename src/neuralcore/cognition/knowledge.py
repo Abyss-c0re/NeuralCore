@@ -15,7 +15,7 @@ from rapidfuzz import fuzz
 
 from neuralcore.utils.logger import Logger
 from neuralcore.cognition.items import KnowledgeItem
-from neuralcore.utils.search import cosine_sim, keyword_score, cosine_sim_batch
+from neuralcore.utils.search import keyword_score, cosine_sim_batch
 from neuralcore.utils.file_helpers import _read_file
 
 
@@ -344,7 +344,9 @@ class KnowledgeBase:
             and (not top_category or meta.get("top_category") == top_category)
             and (
                 not categories
-                or any(meta.get("category_path", "").startswith(cat) for cat in categories)
+                or any(
+                    meta.get("category_path", "").startswith(cat) for cat in categories
+                )
             )
         ]
 
@@ -353,7 +355,9 @@ class KnowledgeBase:
 
         query_words = query.lower().split()
         query_emb = await self.context_manager.fetch_embedding(query, prefix="query")
-        file_mentions = self.context_manager._extract_potential_file_or_param_mentions(query)
+        file_mentions = self.context_manager._extract_potential_file_or_param_mentions(
+            query
+        )
 
         # === COLLECT ALL CHUNKS FIRST ===
         all_chunks: List[Dict[str, Any]] = []  # temp storage
