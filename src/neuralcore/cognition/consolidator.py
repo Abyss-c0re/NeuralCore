@@ -37,6 +37,12 @@ class KnowledgeConsolidator:
         self.reranker_enabled: bool = cognition_config.get("reranker_enabled", True)
         self.novelty_threshold: float = cognition_config.get("novelty_threshold", 0.85)
 
+        # === Tunable rerank budget + semantic weight ===
+        self.max_rerank_candidates: int = cognition_config.get(
+            "max_rerank_candidates", 80
+        )
+        self.semantic_weight: float = cognition_config.get("semantic_weight", 0.25)
+
         # Training data
         self.training_data: List[Tuple[Dict[str, float], int]] = []
         self.min_samples_for_training = 10
@@ -63,7 +69,8 @@ class KnowledgeConsolidator:
         if self.reranker_enabled:
             logger.info(
                 f"✅ KnowledgeConsolidator initialized | "
-                f"reranker=ENABLED (lazy load) | novelty_threshold={self.novelty_threshold}"
+                f"reranker=ENABLED | novelty_threshold={self.novelty_threshold} | "
+                f"max_rerank={self.max_rerank_candidates} | semantic_weight={self.semantic_weight}"
             )
         else:
             logger.info(
@@ -245,7 +252,7 @@ class KnowledgeConsolidator:
 
         return []
 
-    # ====================== RERANKING ======================
+    # ====================== RERANKING (TUNABLE) ======================
     async def rerank(
         self,
         query: str,
@@ -260,6 +267,10 @@ class KnowledgeConsolidator:
 
         if self.reranker_enabled and self.reranker_model is None:
             await self.load_reranker()
+
+        # === RESPECT GLOBAL RERANK BUDGET ===
+        rerank_budget = min(len(candidates), self.max_rerank_candidates)
+        candidates = candidates[:rerank_budget]
 
         features_df = await self._extract_features(query, candidates)
 
@@ -294,13 +305,15 @@ class KnowledgeConsolidator:
         dense = np.array(features_df.get("dense_cosine", 0.0))
         cat = np.array(features_df.get("category_score", 1.0))
 
+        # === TUNABLE SEMANTIC WEIGHT ===
         return (
             kw * 0.35
-            + np.log1p(length) * 0.15
-            + source * 0.10
-            + tool * 0.08
-            + dense * 0.15
+            + np.log1p(length) * 0.12
+            + source * 0.08
+            + tool * 0.06
+            + dense * self.semantic_weight  # ← tunable
             + cat * 0.07
+            + np.array(features_df.get("cosine_x_keyword", 0.0)) * 0.10
         )
 
     async def _collect_training_sample(
@@ -493,7 +506,7 @@ class KnowledgeConsolidator:
                     self._last_training_ts = now
                     asyncio.create_task(self._schedule_training())
 
-    # ====================== NOVELTY FILTER ======================
+    # ====================== NOVELTY FILTER (uses max_rerank_candidates) ======================
     async def _get_novel_relevant(self, goal: str, k: Optional[int] = None):
         """Get novel + relevant items with configurable k."""
         if k is None:
@@ -502,7 +515,7 @@ class KnowledgeConsolidator:
                 .get("app", {})
                 .get("cognition", {})
             )
-            k = cognition_config.get("novelty_k", 100)
+            k = cognition_config.get("novelty_k", self.max_rerank_candidates)
 
         candidates = self._get_all_candidates()
         relevant = await self.rerank(goal, candidates, k=k or 50)
