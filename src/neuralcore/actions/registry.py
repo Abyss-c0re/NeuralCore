@@ -283,7 +283,7 @@ def tool(set_name: str, **kwargs):
         tags = kwargs.get("tags", [])
         aliases = kwargs.get("aliases", [])
 
-        # === NEW: Explicitly read confirmation parameters ===
+        # ===  Explicitly read confirmation parameters ===
         require_confirmation = kwargs.get("require_confirmation", False)
         confirmation_preview = kwargs.get("confirmation_preview")
         record_to_context = kwargs.get("record_to_context", True)

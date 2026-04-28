@@ -1106,7 +1106,7 @@ class Agent:
                     continue
 
                 if isinstance(msg, dict):
-                    # NEW: Confirmation response handling
+                    #  Confirmation response handling
                     if msg.get("event") == "confirmation_response":
                         await self._process_confirmation_response(msg)
                         self.message_queue.task_done()

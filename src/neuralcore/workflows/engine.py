@@ -156,7 +156,7 @@ class WorkflowEngine:
             f"({len(self.workflow.workflows)} decorator workflows + {loop_count} loops)"
         )
 
-    # NEW: Live reload support (clean, no external references)
+    #  Live reload support (clean, no external references)
     def reload_workflow_config(self, new_config: dict | None = None) -> bool:
         """Reload workflows from a fresh config dict."""
         try:
@@ -1008,7 +1008,7 @@ class WorkflowEngine:
                 )
                 break
 
-            # ====================== NEW: LOOP SIGNAL PROCESSING (Option 3) ======================
+            # ======================  LOOP SIGNAL PROCESSING (Option 3) ======================
             async for event, payload in self._process_loop_signals(loop_name, state):
                 yield event, payload
                 if event == "loop_broken":

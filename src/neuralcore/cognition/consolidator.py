@@ -158,9 +158,7 @@ class KnowledgeConsolidator:
                 "content_length": length,
                 "source_type_score": source_score,
                 "is_tool_outcome": is_tool,
-                "recency_score": np.exp(
-                    -self.recency_decay_lambda * recency_hours
-                ),  # ← now configurable
+                "recency_score": np.exp(-self.recency_decay_lambda * recency_hours),
                 "dense_cosine": dense,
                 "cosine_x_keyword": dense * kw * 1.5,
                 "semantic_rescue": dense * 2.0 if kw < 4.6 else 0.0,
@@ -564,7 +562,9 @@ class KnowledgeConsolidator:
                 sim_matrix.append(sims)
 
         sim_matrix = np.array(sim_matrix)  # (N_candidates, N_concepts)
-        max_sim_per_candidate = sim_matrix.max(axis=1) if sim_matrix.size > 0 else np.zeros(len(candidates))
+        max_sim_per_candidate = (
+            sim_matrix.max(axis=1) if sim_matrix.size > 0 else np.zeros(len(candidates))
+        )
 
         for i, item in enumerate(candidates):
             if max_sim_per_candidate[i] < threshold:

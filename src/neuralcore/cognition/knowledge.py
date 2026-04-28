@@ -50,7 +50,7 @@ class KnowledgeBase:
         self.auto_reindex = kb_config.get("auto_reindex", True)
         self.reindex_interval = kb_config.get("reindex_interval_seconds", 300)
 
-        # === NEW: Retrieval tightening config ===
+        # ===  Retrieval tightening config ===
         self.min_sim_threshold = kb_config.get("min_similarity_threshold", 0.29)
         self.direct_match_boost = kb_config.get("direct_match_boost", 0.18)
         self.direct_match_threshold = kb_config.get("direct_match_threshold", 0.23)
