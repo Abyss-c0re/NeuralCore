@@ -2,8 +2,10 @@ from functools import wraps
 from typing import Any, Callable, Dict, List, Optional, Union
 from inspect import signature, iscoroutinefunction
 
-from neuralcore.workflows.engine import WorkflowEngine
+
 from neuralcore.utils.config import get_loader
+from neuralcore.workflows.engine import WorkflowEngine
+from neuralcore.utils.search import TOKENIZER, keyword_score, fuzzy_score
 from neuralcore.utils.logger import Logger
 
 logger = Logger.get_logger()
@@ -12,7 +14,7 @@ logger = Logger.get_logger()
 class Workflow:
     """
     Unified Workflow Registry with Steps, Loops, Conditions, and Universal Waits.
-    100% backward compatible.
+    100% backward compatible + new list_all / search capabilities.
     """
 
     def __init__(self):
@@ -24,7 +26,7 @@ class Workflow:
         self.conditions: Dict[str, Callable] = {}
 
         logger.debug(
-            "Workflow registry initialized (steps + loops + conditions + waits)"
+            "Workflow registry initialized (steps + loops + conditions + waits + search)"
         )
 
     # ===================================================================
@@ -65,7 +67,7 @@ class Workflow:
             return False
 
     # ===================================================================
-    # UNIVERSAL WAIT (clean + mypy-safe)
+    # UNIVERSAL WAIT
     # ===================================================================
     def wait(
         self,
@@ -87,7 +89,6 @@ class Workflow:
                 uses_universal = False
                 logger.info(f"✅ Custom wait handler registered: '{step_name}'")
             else:
-                # Dummy callable - will be replaced in bind_to_engine
                 self.handlers[step_name] = lambda *args, **kwargs: None
                 uses_universal = True
 
@@ -120,21 +121,18 @@ class Workflow:
         return decorator
 
     # ===================================================================
-    # LOOPS (UPDATED — infinite loops supported)
+    # LOOPS
     # ===================================================================
     def loop(
         self,
         loop_name: str,
         *,
-        max_iterations: Optional[
-            int
-        ] = 10,  # None or <= 0 means infinite (run until break_condition / loop signal)
+        max_iterations: Optional[int] = 10,
         break_condition: Optional[str] = None,
         continue_condition: Optional[str] = None,
         description: Optional[str] = None,
     ):
         def decorator(fn: Callable):
-            # Normalize infinite loops
             if max_iterations is None or max_iterations <= 0:
                 effective_max = None
                 max_label = "∞"
@@ -145,7 +143,7 @@ class Workflow:
             self.loops[loop_name] = {
                 "name": loop_name,
                 "handler": fn,
-                "max_iterations": effective_max,  # None = infinite
+                "max_iterations": effective_max,
                 "break_condition": break_condition,
                 "continue_condition": continue_condition,
                 "description": description or fn.__doc__ or f"Loop: {loop_name}",
@@ -163,7 +161,7 @@ class Workflow:
         return decorator
 
     # ===================================================================
-    # STEPS (unchanged)
+    # STEPS
     # ===================================================================
     def step(
         self,
@@ -281,7 +279,240 @@ class Workflow:
         return []
 
     # ===================================================================
-    # BIND TO ENGINE
+    # LIST ALL (NEW)
+    # ===================================================================
+    def list_workflows(self, detailed: bool = False) -> List[Dict[str, Any]]:
+        """List all registered workflows (optionally with full step lists)."""
+        result = []
+        for name, meta in self.workflows.items():
+            entry = {
+                "name": name,
+                "description": meta.get("description", ""),
+                "step_count": len(meta.get("steps", [])),
+            }
+            if detailed:
+                entry["steps"] = meta.get("steps", [])
+                entry["hidden_toolsets"] = meta.get("hidden_toolsets")
+            result.append(entry)
+        return sorted(result, key=lambda x: x["name"])
+
+    def list_steps(
+        self, detailed: bool = False, include_waits: bool = True
+    ) -> List[Dict[str, Any]]:
+        """List all registered steps (optionally detailed + waits)."""
+        result = []
+        for name, meta in self.metadata.items():
+            if meta.get("type") == "wait" and not include_waits:
+                continue
+            entry = {
+                "name": name,
+                "description": meta.get("description", ""),
+                "type": meta.get("type", "step"),
+            }
+            if detailed:
+                entry.update({k: v for k, v in meta.items() if k != "default_config"})
+            result.append(entry)
+        return sorted(result, key=lambda x: (x.get("type", ""), x["name"]))
+
+    def list_loops(self, detailed: bool = False) -> List[Dict[str, Any]]:
+        """List all registered loops with iteration/break info."""
+        result = []
+        for name, meta in self.loops.items():
+            max_val = meta.get("max_iterations")
+            entry = {
+                "name": name,
+                "description": meta.get("description", ""),
+                "max_iterations": "∞" if max_val is None or max_val <= 0 else max_val,
+                "break_condition": meta.get("break_condition") or "—",
+                "continue_condition": meta.get("continue_condition") or "—",
+            }
+            if detailed:
+                entry.update(meta)
+            result.append(entry)
+        return sorted(result, key=lambda x: x["name"])
+
+    def list_conditions(self) -> List[str]:
+        """Simple list of all custom condition names."""
+        return sorted(self.conditions.keys())
+
+    def list_waits(self, detailed: bool = False) -> List[Dict[str, Any]]:
+        """List all universal wait primitives."""
+        result = []
+        for name, meta in self.metadata.items():
+            if meta.get("type") != "wait":
+                continue
+            entry = {
+                "name": name,
+                "wait_type": meta.get("wait_type"),
+                "description": meta.get("description", ""),
+            }
+            if detailed:
+                entry["default_config"] = meta.get("default_config", {})
+            result.append(entry)
+        return sorted(result, key=lambda x: (x.get("wait_type", ""), x["name"]))
+
+    def list_all(self) -> Dict[str, Any]:
+        """Complete snapshot of the entire registry."""
+        return {
+            "workflows": self.list_workflows(),
+            "steps": self.list_steps(include_waits=False),
+            "loops": self.list_loops(),
+            "conditions": self.list_conditions(),
+            "waits": self.list_waits(),
+            "totals": {
+                "workflows": len(self.workflows),
+                "steps": len(
+                    [m for m in self.metadata.values() if m.get("type") != "wait"]
+                ),
+                "loops": len(self.loops),
+                "conditions": len(self.conditions),
+                "waits": len(self.list_waits()),
+            },
+        }
+
+    # ===================================================================
+    # SEARCH (NEW — uses provided keyword + fuzzy scoring)
+    # ===================================================================
+    def search(
+        self,
+        query: str,
+        top_k: int = 10,
+        category: Optional[str] = None,
+        use_fuzzy: bool = True,
+        min_score: float = 0.1,
+    ) -> List[Dict[str, Any]]:
+        """
+        Unified search across workflows, steps, loops, conditions, and waits.
+
+        Args:
+            query: free-text search string
+            top_k: max results to return
+            category: one of "workflow", "step", "loop", "condition", "wait" (None = all)
+            use_fuzzy: include rapidfuzz partial ratio
+            min_score: filter out very weak matches
+
+        Returns:
+            List of dicts sorted by relevance (highest first):
+            {type, name, score, description, ...extra}
+        """
+        if not query or not query.strip():
+            return []
+
+        q = query.strip()
+        query_words = TOKENIZER.findall(q.lower())
+        results: List[Dict[str, Any]] = []
+
+        cats = (
+            [category.lower()]
+            if category
+            else ["workflow", "step", "loop", "condition", "wait"]
+        )
+
+        for cat in cats:
+            if cat == "workflow":
+                for name, meta in self.workflows.items():
+                    text = f"{name} {meta.get('description', '')} {' '.join(meta.get('steps', []))}"
+                    score = keyword_score(query_words, text)
+                    if use_fuzzy:
+                        score = max(score, fuzzy_score(q, text))
+                    if score >= min_score:
+                        results.append(
+                            {
+                                "type": "workflow",
+                                "name": name,
+                                "score": round(score, 4),
+                                "description": meta.get("description", ""),
+                                "step_count": len(meta.get("steps", [])),
+                            }
+                        )
+
+            elif cat == "step":
+                for name, meta in self.metadata.items():
+                    if meta.get("type") == "wait":
+                        continue
+                    text = f"{name} {meta.get('description', '')} {meta.get('workflow', '')} {' '.join(meta.get('toolsets', []))}"
+                    score = keyword_score(query_words, text)
+                    if use_fuzzy:
+                        score = max(score, fuzzy_score(q, text))
+                    if score >= min_score:
+                        results.append(
+                            {
+                                "type": "step",
+                                "name": name,
+                                "score": round(score, 4),
+                                "description": meta.get("description", ""),
+                                "workflow": meta.get("workflow"),
+                                "toolsets": meta.get("toolsets", []),
+                            }
+                        )
+
+            elif cat == "loop":
+                for name, meta in self.loops.items():
+                    text = f"{name} {meta.get('description', '')} {meta.get('break_condition', '')} {meta.get('continue_condition', '')}"
+                    score = keyword_score(query_words, text)
+                    if use_fuzzy:
+                        score = max(score, fuzzy_score(q, text))
+                    if score >= min_score:
+                        max_val = meta.get("max_iterations")
+                        results.append(
+                            {
+                                "type": "loop",
+                                "name": name,
+                                "score": round(score, 4),
+                                "description": meta.get("description", ""),
+                                "max_iterations": "∞"
+                                if max_val is None or max_val <= 0
+                                else max_val,
+                                "break_condition": meta.get("break_condition") or "—",
+                            }
+                        )
+
+            elif cat == "condition":
+                for name in self.conditions.keys():
+                    score = keyword_score(query_words, name)
+                    if use_fuzzy:
+                        score = max(score, fuzzy_score(q, name) * 0.6)
+                    if score >= min_score:
+                        results.append(
+                            {
+                                "type": "condition",
+                                "name": name,
+                                "score": round(score, 4),
+                                "description": "Custom @workflow.condition",
+                            }
+                        )
+
+            elif cat == "wait":
+                for name, meta in self.metadata.items():
+                    if meta.get("type") != "wait":
+                        continue
+                    text = f"{name} {meta.get('description', '')} {meta.get('wait_type', '')}"
+                    score = keyword_score(query_words, text)
+                    if use_fuzzy:
+                        score = max(score, fuzzy_score(q, text))
+                    if score >= min_score:
+                        results.append(
+                            {
+                                "type": "wait",
+                                "name": name,
+                                "score": round(score, 4),
+                                "description": meta.get("description", ""),
+                                "wait_type": meta.get("wait_type"),
+                            }
+                        )
+
+        # Deduplicate by (type, name) keeping highest score
+        seen = {}
+        for r in results:
+            key = (r["type"], r["name"])
+            if key not in seen or r["score"] > seen[key]["score"]:
+                seen[key] = r
+
+        final = sorted(seen.values(), key=lambda x: x["score"], reverse=True)
+        return final[:top_k]
+
+    # ===================================================================
+    # BIND TO ENGINE (unchanged + minor log update)
     # ===================================================================
     def bind_to_engine(self, engine: "WorkflowEngine", instance=None):
         """Bind everything to the engine. Universal waits are specially handled."""
@@ -289,7 +520,6 @@ class Workflow:
             meta = self.metadata.get(step_name, {})
 
             if meta.get("type") == "wait" and meta.get("uses_universal_wait", False):
-                # Route to universal wait implementation
                 if hasattr(engine, "_step_wait"):
                     bound_handler = engine._step_wait
                     logger.info(
@@ -299,7 +529,6 @@ class Workflow:
                     logger.warning(f"Engine missing _step_wait for '{step_name}'")
                     bound_handler = handler
             else:
-                # Normal step or custom handler
                 bound_handler = handler
                 if instance is not None:
                     bound_handler = handler.__get__(instance, instance.__class__)
