@@ -415,16 +415,13 @@ new tool added and working), you MUST output exactly the marker
     @staticmethod
     def lightweight_agentic_context(
         agent_state,
+        is_final_step: bool = False,
     ) -> str:
         """Ultra-compact context optimized for long-running lightweight agentic loops.
-
-        Now receives the full AgentState object instead of individual extracted strings.
-        Completely generic and reusable — no client-specific assumptions.
+        Much more generous on the final step.
         """
-        # Core identity & goal
         objective_text = agent_state.get_objective_reminder()
 
-        # Current sub-task (safe lookup)
         current_subtask = ""
         if (
             agent_state.planned_tasks
@@ -433,36 +430,36 @@ new tool added and working), you MUST output exactly the marker
         ):
             current_subtask = agent_state.planned_tasks[agent_state.current_task_index]
 
-        # Currently loaded tools
         loaded_tools = ""
         if agent_state.loaded_tools:
             loaded_tools = PromptBuilder.loaded_tools_summary(agent_state.loaded_tools)
 
-        # Recent tool activity (compact)
+        # Recent tool activity — generous on final step
         compact_history = ""
         if hasattr(agent_state, "tool_results") and agent_state.tool_results:
             parts = []
-            # Use last 10 tool results for compact history
-            for entry in reversed(agent_state.tool_results[-10:]):
+            recent = (
+                agent_state.tool_results[-8:]
+                if is_final_step
+                else agent_state.tool_results[-5:]
+            )
+            for entry in reversed(recent):
                 tool_name = entry.get("name", "unknown")
                 raw_result = str(entry.get("result", ""))
 
-                if tool_name == "FindTool":
-                    loaded = (
-                        "loaded tools" in raw_result.lower()
-                        or "success" in raw_result.lower()
-                    )
-                    preview = raw_result[:180].replace("\n", " ")
-                    status = "SUCCESS" if loaded else "ATTEMPT"
-                    parts.append(f"[FindTool {status}] → {preview}...")
+                if is_final_step:
+                    preview = raw_result[:900].replace("\n", " ")
+                    if len(raw_result) > 900:
+                        preview += "\n... [truncated to fit context window]"
                 else:
-                    preview = raw_result[:140].replace("\n", " ")
-                    if len(raw_result) > 140:
+                    preview = raw_result[:160].replace("\n", " ")
+                    if len(raw_result) > 160:
                         preview += " [...]"
-                    parts.append(f"[{tool_name}] → {preview}...")
+
+                parts.append(f"[{tool_name}] → {preview}...")
+
             compact_history = "\n".join(parts)
 
-        # Tool expectations for current step
         tool_expectations = ""
         if (
             agent_state.task_expected_outcomes
@@ -476,7 +473,6 @@ new tool added and working), you MUST output exactly the marker
             ]
             tool_expectations = PromptBuilder.tool_expectations_helper(expected)
 
-        # Build the context
         parts = [f"=== OBJECTIVE ===\n{objective_text}"]
 
         if current_subtask.strip():
@@ -486,7 +482,12 @@ new tool added and working), you MUST output exactly the marker
             parts.append(f"=== CURRENTLY LOADED TOOLS ===\n{loaded_tools}")
 
         if compact_history.strip():
-            parts.append(f"=== RECENT TOOL ACTIVITY (last 10) ===\n{compact_history}")
+            label = (
+                "RECENT TOOL ACTIVITY (last 8 - FINAL STEP)"
+                if is_final_step
+                else "RECENT TOOL ACTIVITY (last 5)"
+            )
+            parts.append(f"=== {label} ===\n{compact_history}")
 
         if tool_expectations.strip():
             parts.append(f"=== CURRENT STEP EXPECTATIONS ===\n{tool_expectations}")

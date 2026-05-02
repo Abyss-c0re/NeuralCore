@@ -1294,10 +1294,16 @@ class ContextManager:
             f"lightweight_agentic={lightweight_agentic} | research_mode={research_mode} | "
             f"has_state={state is not None} | return_as_string={return_as_string} | include_logs={include_logs}"
         )
+
         if not len(query) > 0:
             return "No query was provided"
 
-        # ── UNIVERSAL LOGS HANDLING (works in EVERY mode) ──
+        # ── Detect final step ──
+        is_final_step = False
+        if state and state.planned_tasks and isinstance(state.current_task_index, int):
+            is_final_step = state.current_task_index >= len(state.planned_tasks) - 1
+
+        # ── UNIVERSAL LOGS HANDLING ──
         logs_section = ""
         if include_logs:
             try:
@@ -1308,7 +1314,7 @@ class ContextManager:
                 pass
 
         if chat:
-            # ── RICH CHAT MODE  ──
+            # ── RICH CHAT MODE ──
             logger.debug("→ Entering CHAT mode")
             if self.pure_chat_history:
                 recent = self.pure_chat_history[-12:]
@@ -1330,45 +1336,66 @@ class ContextManager:
             # ── AGENTIC MODE ──
             logger.debug("→ Entering AGENTIC mode")
             tokens_used = 0
+
             if lightweight_agentic and state is not None:
-                # ── LIGHTWEIGHT PATH FOR LONG-RUNNING LOOPS ──
+                # ── LIGHTWEIGHT PATH ──
                 logger.debug(
                     "→ Using IMPROVED LIGHTWEIGHT agentic context (long-running mode)"
                 )
                 warnings = state.validate_state_integrity()
                 if warnings:
-                    logger.warning(
-                        f"AgentState integrity warnings before lightweight context: {warnings}"
-                    )
-                full_context = PromptBuilder.lightweight_agentic_context(state)
+                    logger.warning(f"AgentState integrity warnings: {warnings}")
+
+                full_context = PromptBuilder.lightweight_agentic_context(
+                    state, is_final_step=is_final_step
+                )
                 messages.append({"role": "system", "content": full_context})
                 tokens_used = self.count_tokens(messages)
 
-                # === INJECT LAST FULL TOOL RESULT (via helper) ===
-                latest_tool = self._get_latest_tool_outcome()
-                if latest_tool:
-                    tool_block = (
-                        f"\n\n=== LAST TOOL RESULT (FULL) ===\n"
-                        f"Tool: {latest_tool['tool_name']}\n"
-                        f"Executed: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(latest_tool['timestamp']))}\n\n"
-                        f"{latest_tool['content']}\n"
-                        f"=== END LAST TOOL RESULT ==="
+                # === INJECT LAST FULL TOOL RESULT(S) ===
+                if is_final_step:
+                    # Final step → get more generous recent tools
+                    recent_tools_str = await self._get_recent_tool_outcomes(
+                        limit=5, max_tokens_per_result=1200, max_total_tokens=4500
                     )
-                    tool_tokens = self.count_tokens(
-                        [{"role": "user", "content": tool_block}]
-                    )
-                    if tokens_used + tool_tokens < (
-                        max_input_tokens - reserved_for_output - 800
-                    ):
-                        messages.append({"role": "system", "content": tool_block})
-                        tokens_used += tool_tokens
-                        logger.debug(
-                            f"→ [LIGHTWEIGHT] Injected FULL tool outcome "
-                            f"({latest_tool['tool_name']}, {len(latest_tool['content'])} chars)"
+                    if recent_tools_str:
+                        tool_block = f"\n\n=== RECENT TOOL OUTCOMES (FINAL STEP) ===\n{recent_tools_str}\n=== END RECENT TOOL OUTCOMES ==="
+                        tool_tokens = self.count_tokens(
+                            [{"role": "user", "content": tool_block}]
                         )
+                        if tokens_used + tool_tokens < (
+                            max_input_tokens - reserved_for_output - 600
+                        ):
+                            messages.append({"role": "system", "content": tool_block})
+                            tokens_used += tool_tokens
+                            logger.debug(
+                                "→ [LIGHTWEIGHT-FINAL] Injected generous recent tool outcomes"
+                            )
+                else:
+                    # Normal lightweight → just last one
+                    latest_tool = self._get_latest_tool_outcome()
+                    if latest_tool:
+                        tool_block = (
+                            f"\n\n=== LAST TOOL RESULT (FULL) ===\n"
+                            f"Tool: {latest_tool['tool_name']}\n"
+                            f"Executed: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(latest_tool['timestamp']))}\n\n"
+                            f"{latest_tool['content']}\n"
+                            f"=== END LAST TOOL RESULT ==="
+                        )
+                        tool_tokens = self.count_tokens(
+                            [{"role": "user", "content": tool_block}]
+                        )
+                        if tokens_used + tool_tokens < (
+                            max_input_tokens - reserved_for_output - 600
+                        ):
+                            messages.append({"role": "system", "content": tool_block})
+                            tokens_used += tool_tokens
+                            logger.debug(
+                                f"→ [LIGHTWEIGHT] Injected FULL tool outcome ({latest_tool['tool_name']})"
+                            )
 
             else:
-                # ── RICH AGENTIC MODE (includes research_mode) ──
+                # ── RICH AGENTIC MODE ──
                 summary = self.get_context_summary()
                 full_system = (
                     f"\n\n{summary}\n\n{PromptBuilder.context_summary_instruction()}"
@@ -1376,28 +1403,45 @@ class ContextManager:
                 messages.append({"role": "system", "content": full_system})
                 tokens_used = self.count_tokens(messages)
 
-                # === INJECT LAST FULL TOOL RESULT (via helper) ===
-                latest_tool = self._get_latest_tool_outcome()
-                if latest_tool:
-                    tool_block = (
-                        f"\n\n=== LAST TOOL RESULT (FULL) ===\n"
-                        f"Tool: {latest_tool['tool_name']}\n"
-                        f"Executed: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(latest_tool['timestamp']))}\n\n"
-                        f"{latest_tool['content']}\n"
-                        f"=== END LAST TOOL RESULT ==="
+                # === INJECT LAST FULL TOOL RESULT(S) ===
+                if is_final_step:
+                    recent_tools_str = await self._get_recent_tool_outcomes(
+                        limit=5, max_tokens_per_result=1200, max_total_tokens=4500
                     )
-                    tool_tokens = self.count_tokens(
-                        [{"role": "user", "content": tool_block}]
-                    )
-                    if tokens_used + tool_tokens < (
-                        max_input_tokens - reserved_for_output - 800
-                    ):
-                        messages.append({"role": "system", "content": tool_block})
-                        tokens_used += tool_tokens
-                        logger.debug(
-                            f"→ [RICH] Injected FULL tool outcome "
-                            f"({latest_tool['tool_name']}, {len(latest_tool['content'])} chars)"
+                    if recent_tools_str:
+                        tool_block = f"\n\n=== RECENT TOOL OUTCOMES (FINAL STEP) ===\n{recent_tools_str}\n=== END RECENT TOOL OUTCOMES ==="
+                        tool_tokens = self.count_tokens(
+                            [{"role": "user", "content": tool_block}]
                         )
+                        if tokens_used + tool_tokens < (
+                            max_input_tokens - reserved_for_output - 600
+                        ):
+                            messages.append({"role": "system", "content": tool_block})
+                            tokens_used += tool_tokens
+                            logger.debug(
+                                "→ [RICH-FINAL] Injected generous recent tool outcomes"
+                            )
+                else:
+                    latest_tool = self._get_latest_tool_outcome()
+                    if latest_tool:
+                        tool_block = (
+                            f"\n\n=== LAST TOOL RESULT (FULL) ===\n"
+                            f"Tool: {latest_tool['tool_name']}\n"
+                            f"Executed: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(latest_tool['timestamp']))}\n\n"
+                            f"{latest_tool['content']}\n"
+                            f"=== END LAST TOOL RESULT ==="
+                        )
+                        tool_tokens = self.count_tokens(
+                            [{"role": "user", "content": tool_block}]
+                        )
+                        if tokens_used + tool_tokens < (
+                            max_input_tokens - reserved_for_output - 600
+                        ):
+                            messages.append({"role": "system", "content": tool_block})
+                            tokens_used += tool_tokens
+                            logger.debug(
+                                f"→ [RICH] Injected FULL tool outcome ({latest_tool['tool_name']})"
+                            )
 
             # ── COMMON FINAL STEPS (KB + HISTORY) ──
             query_tokens = (
@@ -1407,6 +1451,7 @@ class ContextManager:
             )
             target = max_input_tokens - reserved_for_output
             remaining = max(0, target - tokens_used - query_tokens)
+
             if research_mode:
                 kb_tokens = min(18000, max(4000, remaining // 2))
             else:
@@ -1419,29 +1464,15 @@ class ContextManager:
             context_parts: List[str] = []
 
             if not lightweight_agentic and query.strip():
-                if research_mode and state is not None and state.executed_functions:
-                    executed_tools_summary = []
-                    for func in state.executed_functions[-8:]:
-                        name = func.get("name") or "tool"
-                        args = func.get("args", {})
-                        if args:
-                            args_str = ", ".join(
-                                f"{k}={v}" for k, v in list(args.items())[:5]
-                            )
-                            executed_tools_summary.append(
-                                f"Name: {name} Args: {args_str}"
-                            )
-                        else:
-                            executed_tools_summary.append(name)
-                    tools_str = " | ".join(executed_tools_summary)
-                    enriched_query = f"{query} [EXECUTED TOOLS: {tools_str}]"
-                else:
-                    enriched_query = query
+                enriched_query = query
+                if research_mode and state and state.executed_functions:
+                    executed = " | ".join(
+                        [f.get("name", "tool") for f in state.executed_functions[-8:]]
+                    )
+                    enriched_query = f"{query} [EXECUTED TOOLS: {executed}]"
 
                 kb_text = await self.ranked_retrieve(
-                    enriched_query,
-                    kb_tokens,
-                    research_mode=research_mode,
+                    enriched_query, kb_tokens, research_mode=research_mode
                 )
                 if kb_text:
                     context_parts.append(
@@ -1451,12 +1482,10 @@ class ContextManager:
             if lightweight_agentic:
                 logger.debug("→ LIGHTWEIGHT MODE: skipping full conversation history")
             elif research_mode:
-                logger.debug(
-                    "→ RESEARCH MODE: skipping conversation history, only relevant KB context"
-                )
+                logger.debug("→ RESEARCH MODE: skipping conversation history")
             else:
                 history_budget = max(remaining - kb_tokens, min_history_tokens)
-                recent_msgs: List[Dict[str, str]] = []
+                recent_msgs = []
                 for msg, t in zip(
                     reversed(self.current_topic.history),
                     reversed(self.current_topic.history_tokens),
@@ -1465,7 +1494,6 @@ class ContextManager:
                         break
                     recent_msgs.insert(0, msg)
                     history_budget -= t
-                    tokens_used += t
                 messages.extend(recent_msgs)
 
             provided_context = (
@@ -1474,76 +1502,48 @@ class ContextManager:
                 else "[No additional external context]"
             )
             user_query_text = query.strip() or "[AUTONOMOUS CONTINUATION]"
-            user_content = f"""{user_query_text}
-            {provided_context}"""
-            messages.append({"role": "user", "content": user_content})
+            messages.append(
+                {"role": "user", "content": f"{user_query_text}\n{provided_context}"}
+            )
 
-        # ═══════════════════════════════════════════════════════════════
-        # ── FINAL NORMALIZATION: SYSTEM MESSAGE ALWAYS FIRST + LOGS COMBINED ──
-        # ═══════════════════════════════════════════════════════════════
+        # ── FINAL NORMALIZATION ──
         system_idx = next(
             (i for i, m in enumerate(messages) if m.get("role") == "system"), None
         )
-
         if system_idx is None:
-            if chat:
-                default_system = PromptBuilder.casual_chat_system_prompt()
-            else:
-                default_system = getattr(
+            default_system = (
+                PromptBuilder.casual_chat_system_prompt()
+                if chat
+                else getattr(
                     self.client,
                     "system_message",
                     PromptBuilder.default_agent_system_prompt(),
                 )
-            messages.insert(0, {"role": "system", "content": default_system})
-            system_idx = 0
-            logger.debug(
-                f"→ Injected {'chat-friendly' if chat else 'default'} system message "
-                f"via PromptBuilder (include_logs={include_logs})"
             )
+            messages.insert(0, {"role": "system", "content": default_system})
         else:
             if system_idx != 0:
                 sys_msg = messages.pop(system_idx)
                 messages.insert(0, sys_msg)
-                logger.debug(
-                    f"→ Moved system message from index {system_idx} to position 0"
-                )
 
         if logs_section and logs_section not in messages[0].get("content", ""):
-            current_content = messages[0]["content"].rstrip()
-            messages[0]["content"] = f"{current_content}\n\n{logs_section}"
-            logger.debug("→ Combined recent logs into the first system message")
-
-        # ── FINAL PRUNE (if needed) ──
-        final_tokens = self.count_tokens(messages)
-        target = max_input_tokens - reserved_for_output
-        if final_tokens > target:
-            removed, pruned_turns = self.prune_to_fit_context(
-                messages,
-                max_tokens=target,
-                min_keep_messages=2 if lightweight_agentic else 4,
-                system_role="system",
-                user_role="user",
-                assistant_role="assistant",
-                tool_role="tool",
+            messages[0]["content"] = (
+                messages[0]["content"].rstrip() + f"\n\n{logs_section}"
             )
-            if pruned_turns and not lightweight_agentic:
-                self.current_topic.archived_history.extend(pruned_turns)
-            logger.debug(f"Pruned {removed} turns to fit token limit")
 
-        logger.debug(
-            f"provide_context finished | messages={len(messages)} | first_role={messages[0]['role'] if messages else 'empty'} | "
-            f"lightweight={lightweight_agentic} | research_mode={research_mode} | "
-            f"include_logs={include_logs} | return_as_string={return_as_string} | tokens={final_tokens}"
-        )
+        # Final prune
+        final_tokens = self.count_tokens(messages)
+        if final_tokens > max_input_tokens - reserved_for_output:
+            self.prune_to_fit_context(
+                messages,
+                max_tokens=max_input_tokens - reserved_for_output,
+                min_keep_messages=2 if lightweight_agentic else 4,
+            )
 
         if return_as_string:
-            formatted = []
-            for msg in messages:
-                role = msg.get("role", "unknown").upper()
-                content = str(msg.get("content", "")).strip()
-                formatted.append(f"{role}:\n{content}")
-            return "\n\n".join(formatted)
-
+            return "\n\n".join(
+                f"{msg['role'].upper()}:\n{msg['content']}" for msg in messages
+            )
         return messages
 
     def prune_to_fit_context(
