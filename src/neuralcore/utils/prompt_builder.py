@@ -892,7 +892,7 @@ EXPECTED OUTCOME THAT MUST BE VERIFIED:
 {current_task.expected_outcome or "Step completed successfully"}
 
 MOST RECENT TOOL RESULT:
-{last_result_str[:2500] or "No tool results available yet."}
+{last_result_str or "No tool results available yet."}
 
 QUESTION:
 Has the expected outcome been FULLY achieved based on the tool result above?
