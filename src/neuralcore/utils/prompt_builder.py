@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Any, Dict, List, Optional
-from neuralcore.agents.task import Task
+from neuralcore.tasks.task import Task
 from neuralcore.actions.registry import registry
 from neuralcore.utils.os_info import get_os_info
 from neuralcore.utils.logger import Logger

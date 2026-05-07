@@ -2,7 +2,7 @@ import json
 from typing import AsyncIterator, Any, Tuple, List, Dict, Optional
 
 from neuralcore.agents.state import AgentState
-from neuralcore.agents.task import Task
+from neuralcore.tasks.task import Task
 
 from neuralcore.utils.logger import Logger
 from neuralcore.utils.prompt_builder import PromptBuilder

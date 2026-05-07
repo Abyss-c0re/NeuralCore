@@ -3,7 +3,7 @@ from typing import Any, List, Dict, Optional, Set
 import time
 
 from neuralcore.utils.formatting import prepare_chat_messages
-from neuralcore.agents.task import Task
+from neuralcore.tasks.task import Task
 from neuralcore.utils.prompt_builder import PromptBuilder
 from neuralcore.utils.logger import Logger
 
