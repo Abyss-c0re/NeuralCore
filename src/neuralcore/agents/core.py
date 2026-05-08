@@ -11,6 +11,7 @@ from neuralcore.cognition.memory import ContextManager
 from neuralcore.clients.factory import get_clients
 from neuralcore.utils.logger import Logger
 from neuralcore.tasks.task import Task
+from neuralcore.tasks.manager import TaskManager
 from neuralcore.agents.state import AgentState
 from neuralcore.actions.registry import registry
 from neuralcore.actions.manager import (
@@ -84,6 +85,7 @@ class Agent:
 
         self.context_manager = ContextManager(self)
         self.action_manager = DynamicActionManager(self.registry, self)
+        self.task_manager = TaskManager(self)
 
         self._last_sync_ts = 0.0
         self.workflow = WorkflowEngine(self, workflow)
@@ -282,9 +284,7 @@ class Agent:
                 )
             else:
                 core = ["FindTool", "GetContext"]
-                self.action_manager.load_tools(
-                    [t for t in core if t in registry.all_actions]
-                )
+                self.action_manager.load_tools([t for t in core if t in registry.all_actions])
         else:
             tool_sets = self.config.get("tool_sets", [])
             if tool_sets:
@@ -1054,9 +1054,7 @@ class Agent:
         workflow_name = self._resolve_workflow(workflow_override=workflow)
 
         if not chat_mode:
-            self.action_manager.reset_to_default_package(
-                "headless_bootstrap", self.workflow
-            )
+            self.action_manager.reset_to_default_package("headless_bootstrap", self.workflow)
             self.attach_tools()
 
         try:
@@ -1264,9 +1262,8 @@ class Agent:
 
             # Always ensure core tools
             for core in ["GetContext", "GetDeploymentStatus"]:
-                if (
-                    core in registry.all_actions
-                    and not sub_agent.action_manager.is_loaded(core)
+                if core in registry.all_actions and not sub_agent.action_manager.is_loaded(
+                    core
                 ):
                     sub_agent.action_manager.load_tools([core])
 
