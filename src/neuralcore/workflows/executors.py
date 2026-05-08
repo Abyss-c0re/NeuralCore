@@ -176,14 +176,14 @@ async def goal_driven_task_loop(
 
             if last_tool and last_tool != suggested_tool:
                 try:
-                    agent.manager.unload_tools([last_tool])
+                    agent.action_manager.unload_tools([last_tool])
                     logger.debug(f"[TOOL MGMT] Unloaded previous tool: {last_tool}")
                 except Exception as e:
                     logger.warning(f"[TOOL MGMT] Failed to unload {last_tool}: {e}")
 
-            if not agent.manager.is_loaded(suggested_tool):
+            if not agent.action_manager.is_loaded(suggested_tool):
                 try:
-                    agent.manager.load_tools([suggested_tool])
+                    agent.action_manager.load_tools([suggested_tool])
                     logger.info(
                         f"[TOOL MGMT] Loaded suggested tool for step: {suggested_tool}"
                     )
@@ -222,7 +222,7 @@ async def goal_driven_task_loop(
     logger.debug(f"Task Context: {(str(messages))}")
 
     queue = await agent.client.stream_with_tools(
-        manager=agent.manager,
+        manager=agent.action_manager,
         messages=messages,
         temperature=agent.temperature,
         max_tokens=agent.max_tokens,

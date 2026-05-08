@@ -83,11 +83,11 @@ class Agent:
         # ====================== INFRASTRUCTURE ======================
 
         self.context_manager = ContextManager(self)
-        self.manager = DynamicActionManager(self.registry, self)
+        self.action_manager = DynamicActionManager(self.registry, self)
 
         self._last_sync_ts = 0.0
         self.workflow = WorkflowEngine(self, workflow)
-        ToolBrowser(self.registry, self.manager)
+        ToolBrowser(self.registry, self.action_manager)
 
         # Async runtime only
         self.message_queue: asyncio.Queue[Any] = asyncio.Queue()
@@ -167,7 +167,7 @@ class Agent:
             logger.info("   ✓ Background queue listener started")
 
             # 4. Optional: Pre-load tools if not already loaded (can be heavy)
-            if not self.manager.loaded_tools:
+            if not self.action_manager.loaded_tools:
                 self.attach_tools()
                 logger.info("   ✓ Default tools attached")
 
@@ -182,8 +182,8 @@ class Agent:
             "agent_id": self.agent_id,
             "name": self.name,
             "state": self.state.to_dict(),
-            "loaded_tools": self.manager.loaded_tools,
-            "loaded_toolsets": self.manager.loaded_toolsets,
+            "loaded_tools": self.action_manager.loaded_tools,
+            "loaded_toolsets": self.action_manager.loaded_toolsets,
             "sub_tasks": self.get_sub_tasks(),
             "context_summary": self.context_manager.get_context_summary(
                 max_messages=12, max_chars=2000
@@ -245,8 +245,8 @@ class Agent:
 
     def _sync_loaded_tools_to_state(self) -> None:
         """Keep AgentState in sync with the real DynamicActionManager."""
-        if hasattr(self, "manager") and hasattr(self.manager, "loaded_tools"):
-            self.state.update_loaded_tools(self.manager.loaded_tools)
+        if hasattr(self, "manager") and hasattr(self.action_manager, "loaded_tools"):
+            self.state.update_loaded_tools(self.action_manager.loaded_tools)
 
     # ====================== CONFIG & TOOLS ======================
     def reload_config(self, new_config: dict | str | Path) -> None:
@@ -274,22 +274,24 @@ class Agent:
         if self.sub_agent and assigned_tools:
             valid_tools = [t for t in assigned_tools if t in registry.all_actions]
             if valid_tools:
-                self.manager.unload_all()
-                self.manager.load_tools(valid_tools)
+                self.action_manager.unload_all()
+                self.action_manager.load_tools(valid_tools)
                 self._sync_loaded_tools_to_state()
                 logger.info(
                     f"[SUB-AGENT] '{self.name}' loaded {len(valid_tools)} tools"
                 )
             else:
                 core = ["FindTool", "GetContext"]
-                self.manager.load_tools([t for t in core if t in registry.all_actions])
+                self.action_manager.load_tools(
+                    [t for t in core if t in registry.all_actions]
+                )
         else:
             tool_sets = self.config.get("tool_sets", [])
             if tool_sets:
                 self.loader.load_tool_sets(sets_to_load=tool_sets)
             for action_name in list(registry.all_actions.keys()):
                 try:
-                    self.manager.load_tools([action_name])
+                    self.action_manager.load_tools([action_name])
                 except Exception as e:
                     logger.warning(f"Failed to load tool '{action_name}': {e}")
 
@@ -681,7 +683,7 @@ class Agent:
 
         logger.info(f"[CONFIRMATION] User approved {tool_name} – re-executing")
 
-        action = self.manager.get_executor(tool_name)
+        action = self.action_manager.get_executor(tool_name)
         if action is None:
             logger.error(f"[CONFIRMATION] Executor for {tool_name} not found")
             self.state.needs_approval = False
@@ -1052,7 +1054,9 @@ class Agent:
         workflow_name = self._resolve_workflow(workflow_override=workflow)
 
         if not chat_mode:
-            self.manager.reset_to_default_package("headless_bootstrap", self.workflow)
+            self.action_manager.reset_to_default_package(
+                "headless_bootstrap", self.workflow
+            )
             self.attach_tools()
 
         try:
@@ -1252,18 +1256,19 @@ class Agent:
             if assigned:
                 valid_tools = [t for t in assigned if t in registry.all_actions]
                 if valid_tools:
-                    sub_agent.manager.unload_all()
-                    sub_agent.manager.load_tools(valid_tools)
+                    sub_agent.action_manager.unload_all()
+                    sub_agent.action_manager.load_tools(valid_tools)
                     logger.info(f"[SUB-AGENT] Loaded {len(valid_tools)} valid tools")
                 else:
                     logger.warning(f"[SUB-AGENT] No valid tools in list: {assigned}")
 
             # Always ensure core tools
             for core in ["GetContext", "GetDeploymentStatus"]:
-                if core in registry.all_actions and not sub_agent.manager.is_loaded(
-                    core
+                if (
+                    core in registry.all_actions
+                    and not sub_agent.action_manager.is_loaded(core)
                 ):
-                    sub_agent.manager.load_tools([core])
+                    sub_agent.action_manager.load_tools([core])
 
             # 3. SYSTEM PROMPT
             sub_system = getattr(

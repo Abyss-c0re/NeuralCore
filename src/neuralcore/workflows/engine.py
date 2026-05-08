@@ -802,7 +802,7 @@ class WorkflowEngine:
 
             # Tool configuration
             if hasattr(self.agent, "manager"):
-                self.agent.manager.configure_for_step(step_name, self)
+                self.agent.action_manager.configure_for_step(step_name, self)
 
             # Apply per-step overrides
             original_client = self.agent.client
@@ -1334,7 +1334,7 @@ class WorkflowEngine:
         # Optional tool configuration (safe if manager exists)
         if hasattr(self.agent, "manager"):
             try:
-                self.agent.manager.configure_for_step(step_name, self)
+                self.agent.action_manager.configure_for_step(step_name, self)
             except Exception:
                 logger.debug(f"No tool config applied for isolated step '{step_name}'")
 
@@ -1490,13 +1490,13 @@ class WorkflowEngine:
                         getattr(self.agent, "sub_agent", False)
                         and self.current_workflow_name == "sub_agent_execute"
                     ):
-                        self.agent.manager.configure_for_step(step_name, self)
+                        self.agent.action_manager.configure_for_step(step_name, self)
                     else:
                         if step_name == "llm_stream":
                             logger.debug(
                                 "Sub-agent llm_stream: preserving tools (assigned_tools take precedence)"
                             )
-                            self.agent.manager.unload_tools(["FindTool"])
+                            self.agent.action_manager.unload_tools(["FindTool"])
                 else:
                     logger.warning(
                         f"Agent has no manager. Skipping tool config for '{step_name}'."
@@ -1546,7 +1546,7 @@ class WorkflowEngine:
                 if "toolset" in overrides:
                     toolset_value = overrides.pop("toolset")
                     if toolset_value:
-                        loaded_count = self.agent.manager.load_toolsets(toolset_value)
+                        loaded_count = self.agent.action_manager.load_toolsets(toolset_value)
                         yield (
                             "toolset_switched",
                             {
