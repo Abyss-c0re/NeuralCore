@@ -19,11 +19,12 @@ class TaskManager:
     def __init__(self, agent):
         self.agent = agent
 
-    async def plan(self, state: AgentState) -> AsyncIterator[Tuple[str, Any]]:
+    async def plan(self) -> AsyncIterator[Tuple[str, Any]]:
         """plan_tasks_unified migrated here (renamed .plan).
         Full logic preserved exactly."""
         logger.info("[PLANNING START] TaskManager.plan called")
         yield ("phase_changed", {"phase": "planning"})
+        state = self.agent.state
 
         planning_prompt = PromptBuilder.task_decomposition(state.task)
         plan_text = ""
@@ -451,10 +452,11 @@ class TaskManager:
             yield ("phase_changed", {"phase": "restarting_loop"})
 
     async def run_goal_driven_loop(
-        self, state: AgentState, target_loop: str
+        self, state: AgentState, target_loop: str, **kwargs
     ) -> AsyncIterator[Tuple[str, Any]]:
         """Clean goal-driven loop orchestrator.
-        Delegates everything to .execute."""
+        Delegates everything to .execute.
+        **kwargs added for robustness (workflow engine / calls may pass extra args)."""
         state.increment_loop()
 
         current_task: Optional[Task] = state.get_current_task()
@@ -463,5 +465,5 @@ class TaskManager:
             if current_task.status == "pending":
                 current_task.start(self.agent)
 
-            async for event in self.execute(current_task, state, target_loop):
+            async for event in self.execute(current_task, state, target_loop, **kwargs):
                 yield event
