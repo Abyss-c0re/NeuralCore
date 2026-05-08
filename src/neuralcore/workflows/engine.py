@@ -801,7 +801,7 @@ class WorkflowEngine:
                 continue
 
             # Tool configuration
-            if hasattr(self.agent, "manager"):
+            if hasattr(self.agent, "action_manager"):
                 self.agent.action_manager.configure_for_step(step_name, self)
 
             # Apply per-step overrides
@@ -1332,7 +1332,7 @@ class WorkflowEngine:
             return
 
         # Optional tool configuration (safe if manager exists)
-        if hasattr(self.agent, "manager"):
+        if hasattr(self.agent, "action_manager"):
             try:
                 self.agent.action_manager.configure_for_step(step_name, self)
             except Exception:
@@ -1485,7 +1485,7 @@ class WorkflowEngine:
                 # =============================================================
                 # Configure tools for this specific step
                 # =============================================================
-                if hasattr(self.agent, "manager"):
+                if hasattr(self.agent, "action_manager"):
                     if not (
                         getattr(self.agent, "sub_agent", False)
                         and self.current_workflow_name == "sub_agent_execute"
