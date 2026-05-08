@@ -10,6 +10,7 @@ from neuralcore.workflows.registry import workflow
 from neuralcore.cognition.memory import ContextManager
 from neuralcore.clients.factory import get_clients
 from neuralcore.utils.logger import Logger
+from neuralcore.tasks.task import Task
 from neuralcore.agents.state import AgentState
 from neuralcore.actions.registry import registry
 from neuralcore.actions.manager import (
@@ -232,13 +233,14 @@ class Agent:
         return getattr(self, "parent", None)
 
     def _reset_state(self) -> None:
-        """Reset everything through the state object."""
+        """Reset everything through the state object (SSOT)."""
         self.state.reset_for_new_task()
         self.message_queue = asyncio.Queue()
         self._input_event.clear()
         self._input_counter = 0
         self.sub_tasks.clear()
         self._sub_task_counter = 0
+        self._sub_task_events.clear()
         self._sync_loaded_tools_to_state()
 
     def _sync_loaded_tools_to_state(self) -> None:
@@ -1135,6 +1137,7 @@ class Agent:
         max_iterations: Optional[int] = None,
         depends_on: Optional[str] = None,
     ) -> str:
+        """Start a background sub-agent deployment (cleaned & modular)."""
         self._sub_task_counter += 1
         task_id = f"deploy_{self.agent_id}_{self._sub_task_counter:03d}"
         self._sub_task_events[task_id] = asyncio.Event()
@@ -1142,18 +1145,28 @@ class Agent:
 
         logger.info(
             f"[DEPLOY] Starting sub-task {task_id}: {display_name} | "
-            f"depends_on={depends_on or 'None'} | tools={len(assigned_tools) if assigned_tools else 'all'}"
+            f"depends_on={depends_on or 'None'} | tools={len(assigned_tools or [])}"
+        )
+
+        # Use Task for internal consistency with SSOT (reusable)
+        sub_task = Task(
+            description=task_description,
+            expected_outcome="Deployment completed successfully",
+            metadata={
+                "display_name": display_name,
+                "assigned_tools": assigned_tools or ["DynamicCore"],
+                "depends_on": depends_on,
+            },
         )
 
         self.sub_tasks[task_id] = {
             "id": task_id,
-            "display_name": display_name,
+            "task_obj": sub_task,  # link to Task for consistency
             "status": "pending",
             "started_at": asyncio.get_event_loop().time(),
             "description": task_description,
             "assigned_tools": assigned_tools or ["DynamicCore"],
             "progress": 0,
-            "task_obj": None,
             "result": None,
             "error": None,
             "depends_on": depends_on,
@@ -1204,8 +1217,6 @@ class Agent:
             )
             return f"ERROR_{task_id}"
 
-    # ====================== IMPROVED SUB-AGENT RUNNER ======================
-
     async def _run_sub_agent_internal(
         self,
         sub_agent: "SubAgent",
@@ -1213,8 +1224,9 @@ class Agent:
         task_description: str,
         depends_on: Optional[str] = None,
     ):
+        """Cleaned internal runner for sub-agent background task."""
         try:
-            # === 1. WAIT FOR DEPENDENCY ===
+            # 1. WAIT FOR DEPENDENCY (unchanged)
             if depends_on:
                 logger.info(f"Sub-task {task_id} waiting for dependency {depends_on}")
                 self.sub_tasks[task_id]["status"] = "waiting"
@@ -1235,21 +1247,16 @@ class Agent:
                         metadata={"dependency_task_id": depends_on},
                     )
 
-            # === 2. SAFEGUARDED TOOL LOADING ===
+            # 2. TOOL LOADING (SAFEGUARDED)
             assigned = getattr(sub_agent, "assigned_tools", None) or []
             if assigned:
-                # Filter only tools that actually exist
                 valid_tools = [t for t in assigned if t in registry.all_actions]
                 if valid_tools:
                     sub_agent.manager.unload_all()
                     sub_agent.manager.load_tools(valid_tools)
-                    logger.info(
-                        f"[SUB-AGENT] Loaded {len(valid_tools)} valid tools: {valid_tools}"
-                    )
+                    logger.info(f"[SUB-AGENT] Loaded {len(valid_tools)} valid tools")
                 else:
-                    logger.warning(
-                        f"[SUB-AGENT] No valid tools found in assigned list: {assigned}"
-                    )
+                    logger.warning(f"[SUB-AGENT] No valid tools in list: {assigned}")
 
             # Always ensure core tools
             for core in ["GetContext", "GetDeploymentStatus"]:
@@ -1258,14 +1265,14 @@ class Agent:
                 ):
                     sub_agent.manager.load_tools([core])
 
-            # === 3. SYSTEM PROMPT ===
-            sub_system = getattr(sub_agent, "system_prompt", "")
-            if not sub_system or "precise sub-agent" not in sub_system.lower():
-                sub_system = PromptBuilder.sub_agent_system_prompt(
-                    task_desc=task_description, assigned_tools=assigned
-                )
+            # 3. SYSTEM PROMPT
+            sub_system = getattr(
+                sub_agent, "system_prompt", ""
+            ) or PromptBuilder.sub_agent_system_prompt(
+                task_desc=task_description, assigned_tools=assigned
+            )
 
-            # === 4. EXECUTE ===
+            # 4. EXECUTE
             async for event, payload in sub_agent.run(
                 user_prompt=task_description,
                 system_prompt=sub_system,
@@ -1355,6 +1362,7 @@ class Agent:
                 self._sub_task_events[task_id].set()
 
     def get_sub_tasks(self) -> Dict[str, Dict]:
+        """Cleaned — returns current sub-tasks (uses Task where possible)."""
         now = asyncio.get_event_loop().time()
         return {
             tid: {
@@ -1362,7 +1370,7 @@ class Agent:
                 "runtime_seconds": round(now - info["started_at"], 1)
                 if "started_at" in info
                 else 0,
-                "task_obj": None,
+                "task_obj": None,  # do not serialize async task
             }
             for tid, info in self.sub_tasks.items()
         }
@@ -1381,6 +1389,7 @@ class Agent:
         return False
 
     def cleanup_finished_sub_tasks(self, older_than_seconds: int = 3600):
+        """Cleaned cleanup of finished sub-tasks."""
         now = asyncio.get_event_loop().time()
         to_remove = [
             tid
@@ -1393,6 +1402,7 @@ class Agent:
             self.sub_tasks.pop(tid, None)
 
     def purge_sub_agents(self, only_completed: bool = True, force: bool = False) -> int:
+        """Cleaned purge — removes finished sub-agents."""
         if not self.sub_tasks:
             return 0
 
@@ -1404,11 +1414,12 @@ class Agent:
             status = info.get("status", "unknown")
             age = now - info.get("started_at", 0)
 
-            should_purge = False
-            if only_completed:
-                if status in ("completed", "failed", "cancelled"):
-                    should_purge = True
-            else:
+            should_purge = only_completed and status in (
+                "completed",
+                "failed",
+                "cancelled",
+            )
+            if not only_completed:
                 should_purge = True
 
             if status == "running" and age < 30 and not force:
@@ -1420,13 +1431,11 @@ class Agent:
         for task_id in to_purge:
             info = self.sub_tasks[task_id]
             task_obj = info.get("task_obj")
-
             if task_obj and not task_obj.done() and force:
                 try:
                     task_obj.cancel()
-                    logger.info(f"Purged (cancelled) running sub-task: {task_id}")
-                except Exception as e:
-                    logger.warning(f"Failed to cancel task {task_id}: {e}")
+                except Exception:
+                    pass
 
             self.sub_tasks.pop(task_id, None)
 
@@ -1434,7 +1443,6 @@ class Agent:
                 self.context_manager._task_contexts.pop(task_id, None)
 
             purged_count += 1
-            logger.debug(f"Purged sub-agent: {task_id} (status: {info.get('status')})")
 
         if purged_count > 0:
             logger.info(
@@ -1444,6 +1452,7 @@ class Agent:
         return purged_count
 
     async def _generate_deployment_summary(self, sub_agent: "Agent", task: str) -> str:
+        """Cleaned summary generator — uses centralized PromptBuilder."""
         tool_results_str = "\n".join(
             f"• {r.get('name', 'unknown')}: {str(r.get('result', ''))[:350]}"
             for r in getattr(sub_agent, "tool_results", [])[-12:]
@@ -1463,10 +1472,7 @@ class Agent:
         event: str = "sub_task_completed",
         timeout: Optional[float] = None,
     ) -> Optional[Dict[str, Any]]:
-        """
-        Wait for a specific event from a particular sub-agent.
-        Always returns a dict (or None). Strings are parsed if possible.
-        """
+        """Cleaned event waiter for sub-agent completion."""
         if task_id not in self.sub_tasks:
             logger.warning(f"[wait_for_sub_agent_event] task_id {task_id} not found")
             return None
@@ -1483,7 +1489,6 @@ class Agent:
         if isinstance(result, dict):
             return result
 
-        # Try to parse string as JSON
         if isinstance(result, str):
             try:
                 import json
@@ -1493,8 +1498,6 @@ class Agent:
                     return parsed
             except Exception:
                 pass
-
-            # Fallback: wrap string in a dict
             return {"raw_message": result}
 
         return None

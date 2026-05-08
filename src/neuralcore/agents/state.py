@@ -41,15 +41,15 @@ class AgentState:
     findtool_call_count: int = 0
     last_findtool_loop: int = -1
 
-    # ==================== Task Management ====================
+    # ==================== Task Management - SINGLE SOURCE OF TRUTH ====================
     root_task: Optional[Task] = None
     tasks: List[Task] = field(default_factory=list)
     completed_task_ids: Set[str] = field(default_factory=set)
 
-    # ==================== Planning & Orchestration ====================
-    planned_tasks: List[str] = field(default_factory=list)
-    task_expected_outcomes: List[str] = field(default_factory=list)
+    # Planning index (persisted across external loop restarts)
     current_task_index: int = 0
+
+    # Legacy compatibility structures (still populated for transition)
     task_tool_assignments: Dict[int, List[str]] = field(default_factory=dict)
     task_dependencies: Dict[int, List[int]] = field(default_factory=dict)
 
@@ -98,18 +98,26 @@ class AgentState:
     # ==================== Loop Control Signals ====================
     pending_loop_signals: List[Dict[str, Any]] = field(default_factory=list)
 
-    # ==================== Properties ====================
+    # ==================== Properties - SINGLE SOURCE OF TRUTH ====================
+    @property
+    def planned_tasks(self) -> List[str]:
+        """Derived from tasks list — single source of truth."""
+        return [t.description for t in self.tasks]
+
+    @property
+    def task_expected_outcomes(self) -> List[str]:
+        """Derived from tasks list — single source of truth."""
+        return [t.expected_outcome for t in self.tasks]
+
     @property
     def current_task_name(self) -> Optional[str]:
-        tasks: List[str] = self.planned_tasks
-        idx: int = self.current_task_index
-        if isinstance(idx, int) and 0 <= idx < len(tasks):
-            return tasks[idx]
+        if 0 <= self.current_task_index < len(self.tasks):
+            return self.tasks[self.current_task_index].description
         return None
 
     @property
     def has_sub_tasks(self) -> bool:
-        return len(self.planned_tasks) > 0
+        return len(self.tasks) > 0
 
     @property
     def goal_reached(self) -> bool:
@@ -127,8 +135,7 @@ class AgentState:
 
     @property
     def used_tools_str(self) -> str:
-        """Clean, type-safe comma-separated list of tool names used so far.
-        Never returns 'unknown'. Returns 'none' when empty."""
+        """Clean, type-safe comma-separated list of tool names used so far."""
         names: List[str] = [
             str(r.get("name", "")) for r in self.tool_results if r.get("name")
         ]
@@ -259,11 +266,6 @@ class AgentState:
     def validate_state_integrity(self) -> List[str]:
         warnings = []
 
-        if len(self.planned_tasks) != len(self.task_expected_outcomes):
-            warnings.append(
-                f"planned_tasks ({len(self.planned_tasks)}) and task_expected_outcomes ({len(self.task_expected_outcomes)}) length mismatch"
-            )
-
         if not isinstance(self.task_dependencies, dict):
             warnings.append("task_dependencies is not a dict")
             self.ensure_dependencies_structure()
@@ -273,47 +275,31 @@ class AgentState:
             self.task_tool_assignments = {}
 
         if self.current_task_index < 0 or (
-            self.planned_tasks and self.current_task_index >= len(self.planned_tasks)
+            self.tasks and self.current_task_index >= len(self.tasks)
         ):
             warnings.append(
                 f"current_task_index {self.current_task_index} out of bounds"
             )
-            if self.planned_tasks:
+            if self.tasks:
                 self.current_task_index = min(
-                    max(0, self.current_task_index), len(self.planned_tasks) - 1
+                    max(0, self.current_task_index), len(self.tasks) - 1
                 )
-
-        if self.planned_tasks and not self.task_expected_outcomes:
-            warnings.append("planned_tasks exist but task_expected_outcomes is empty")
 
         return warnings
 
     # ==================== Core Methods ====================
     def reset_for_new_task(self, new_task: str = "") -> None:
-        """
-        Reset for a new top-level goal.
-
-        Args:
-            new_task: The new goal
-            hard: If True, also clears investigation state (hypotheses/findings/unknowns).
-                  Default = False (recommended for multi-step tasks).
-        """
-        # === Always reset planning & execution state ===
-        self.planned_tasks.clear()
-        self.task_expected_outcomes.clear()
-        self.task_tool_assignments.clear()
-        self.task_dependencies.clear()
-        self.sub_task_ids.clear()
-        self.task_id_map.clear()
-        self.sub_agent_results.clear()
-        self.active_sub_agents.clear()
+        """Reset for a new top-level goal. Tasks list is now the single source of truth."""
+        # Clear task structures (SSOT)
         self.tasks.clear()
         self.completed_task_ids.clear()
         self.root_task = None
+        self.current_task_index = 0
+        self.task_tool_assignments.clear()
+        self.task_dependencies.clear()
 
         self.phase = None
         self.status = "idle"
-        self.current_task_index = 0
         self.is_complete = False
         self.goal_achieved = False
         self.tool_calls = None
@@ -469,22 +455,105 @@ class AgentState:
                 f"Wait completed ({self.wait_type}) after {duration:.1f}s | reason={reason}"
             )
 
-    def get_objective_reminder(self) -> str:
-        parts: List[str] = []
-        goal_text = self.task or "No goal set"
-        parts.append(f"Current goal: {goal_text}")
+    # ==================== Task Management Helpers (SSOT) ====================
+    def build_tasks_from_plan(self, steps: List[Dict[str, Any]]) -> None:
+        """Simplified — ONLY populates canonical tasks list + root_task (single source of truth)."""
+        self.tasks.clear()
+        self.completed_task_ids.clear()
+        self.task_tool_assignments.clear()
+        self.task_dependencies.clear()
 
-        if self.planned_tasks:
-            total = len(self.planned_tasks)
+        task_map: Dict[int, Task] = {}
+
+        for i, step in enumerate(steps):
+            expected = step.get("expected_outcome", "") or "Tool executed successfully"
+            suggested_tool = step.get("suggested_tool") or step.get(
+                "suggested_tool_category", ""
+            )
+
+            t = Task(
+                description=step.get("description", f"Step {i + 1}"),
+                expected_outcome=expected,
+                suggested_tool=suggested_tool,
+                metadata={
+                    "original_index": i,
+                    "suggested_tool_category": step.get("suggested_tool_category"),
+                },
+            )
+            self.tasks.append(t)
+            task_map[i] = t
+
+            if suggested_tool:
+                self.task_tool_assignments[i] = [suggested_tool]
+            else:
+                self.task_tool_assignments[i] = []
+
+        for i, step in enumerate(steps):
+            deps_indices = step.get("dependencies", [])
+            dep_ids = []
+            for d in deps_indices:
+                if isinstance(d, (int, str)) and str(d).isdigit():
+                    idx = int(d)
+                    if idx in task_map:
+                        dep_ids.append(task_map[idx].task_id)
+            self.tasks[i].dependencies = dep_ids
+            self.tasks[i]._dependency_set = set(dep_ids)
+            self.task_dependencies[i] = deps_indices
+
+        if self.tasks:
+            self.root_task = Task(description=self.task or "Root task")
+            for t in self.tasks:
+                self.root_task.add_subtask(t)
+
+        logger.info(
+            f"[TASK BUILD] Created {len(self.tasks)} tasks from plan (single source of truth)"
+        )
+
+    def get_current_task(self) -> Optional[Task]:
+        if 0 <= self.current_task_index < len(self.tasks):
+            return self.tasks[self.current_task_index]
+        return None
+
+    def mark_current_task_complete(
+        self, result: Any = None, error: Optional[str] = None
+    ) -> None:
+        current = self.get_current_task()
+        if current:
+            current.complete(result=result, error=error)
+            if current.status == "completed":
+                self.completed_task_ids.add(current.task_id)
+
+        if error:
+            self.last_error = error
+            self.error_count += 1
+        else:
+            self.goal_achieved = self.current_task_index >= len(self.tasks) - 1
+
+    def advance_to_next_ready_task(self) -> bool:
+        for i in range(self.current_task_index, len(self.tasks)):
+            task = self.tasks[i]
+            if task.is_ready(self.completed_task_ids):
+                self.current_task_index = i
+                return True
+        return False
+
+    def validate_task_integrity(self) -> List[str]:
+        warnings = self.validate_state_integrity()
+        return warnings
+
+    def get_objective_reminder(self) -> str:
+        """Uses single source of truth (tasks list)."""
+        parts: List[str] = [f"Current goal: {self.task or 'No goal set'}"]
+
+        if self.tasks:
+            total = len(self.tasks)
             current = self.current_task_index + 1
             if total > 1:
                 parts.append(f"Progress: Sub-task {current}/{total}")
                 if self.current_task_name:
                     parts.append(f"Current sub-task: {self.current_task_name[:120]}...")
 
-            if self.task_expected_outcomes and 0 <= self.current_task_index < len(
-                self.task_expected_outcomes
-            ):
+            if 0 <= self.current_task_index < len(self.task_expected_outcomes):
                 expected = self.task_expected_outcomes[self.current_task_index]
                 if expected:
                     parts.append(f"Expected outcome for current step: {expected}")
@@ -518,6 +587,7 @@ class AgentState:
         return PromptBuilder.objective_reminder(reminder_body)
 
     def to_dict(self) -> Dict[str, Any]:
+        """Public snapshot — uses derived properties (SSOT)."""
         exclude = {
             "message_queue",
             "_input_event",
@@ -531,7 +601,7 @@ class AgentState:
             if not k.startswith("_") and k not in exclude
         }
 
-        # === Limit large lists for serialization ===
+        # Limit large lists for serialization
         data["tool_results"] = self.tool_results[-20:]
         data["executed_functions"] = self.executed_functions[-15:]
         data["iteration_history"] = self.iteration_history[-10:]
@@ -542,10 +612,13 @@ class AgentState:
         data["tool_calls"] = self.tool_calls or []
         data["loaded_tools"] = self.loaded_tools[:]
 
-        data["duration"] = round(self.duration, 2)
+        # Derived fields from SSOT
+        data["planned_tasks"] = self.planned_tasks
+        data["task_expected_outcomes"] = self.task_expected_outcomes
         data["current_task_name"] = self.current_task_name
         data["has_sub_tasks"] = self.has_sub_tasks
         data["goal_reached"] = self.goal_reached
+        data["duration"] = round(self.duration, 2)
 
         data["waiting"] = getattr(self, "waiting", False)
         data["wait_type"] = getattr(self, "wait_type", None)
@@ -564,96 +637,3 @@ class AgentState:
         data["pending_loop_signals"] = self.pending_loop_signals[:]
 
         return data
-
-    # ==================== Task Management Helpers ====================
-    def build_tasks_from_plan(self, steps: List[Dict[str, Any]]) -> None:
-        self.tasks.clear()
-        self.completed_task_ids.clear()
-        self.planned_tasks.clear()
-        self.task_expected_outcomes.clear()
-        self.task_tool_assignments.clear()
-        self.task_dependencies.clear()
-
-        task_map: Dict[int, Task] = {}
-
-        for i, step in enumerate(steps):
-            expected = step.get("expected_outcome", "") or "Tool executed successfully"
-
-            suggested_tool = step.get("suggested_tool") or step.get(
-                "suggested_tool_category", ""
-            )
-
-            t = Task(
-                description=step.get("description", f"Step {i + 1}"),
-                expected_outcome=expected,
-                suggested_tool=suggested_tool,  # ← NEW
-                metadata={
-                    "original_index": i,
-                    "suggested_tool_category": step.get("suggested_tool_category"),
-                },
-            )
-            self.tasks.append(t)
-            self.planned_tasks.append(t.description)
-            self.task_expected_outcomes.append(t.expected_outcome)
-            task_map[i] = t
-
-            # Populate tool assignment for quick lookup
-            if suggested_tool:
-                self.task_tool_assignments[i] = [suggested_tool]
-            else:
-                self.task_tool_assignments[i] = []
-
-        for i, step in enumerate(steps):
-            deps_indices = step.get("dependencies", [])
-            dep_ids = []
-            for d in deps_indices:
-                if isinstance(d, (int, str)) and str(d).isdigit():
-                    idx = int(d)
-                    if idx in task_map:
-                        dep_ids.append(task_map[idx].task_id)
-            self.tasks[i].dependencies = dep_ids
-            self.tasks[i]._dependency_set = set(dep_ids)
-            self.task_dependencies[i] = deps_indices
-
-        if self.tasks:
-            self.root_task = Task(description=self.task or "Root task")
-            for t in self.tasks:
-                self.root_task.add_subtask(t)
-
-        logger.info(f"[TASK BUILD] Created {len(self.tasks)} tasks from plan")
-
-    def get_current_task(self) -> Optional[Task]:
-        if 0 <= self.current_task_index < len(self.tasks):
-            return self.tasks[self.current_task_index]
-        return None
-
-    def mark_current_task_complete(
-        self, result: Any = None, error: Optional[str] = None
-    ) -> None:
-        current = self.get_current_task()
-        if current:
-            current.complete(result=result, error=error)
-            if current.status == "completed":
-                self.completed_task_ids.add(current.task_id)
-
-        if error:
-            self.last_error = error
-            self.error_count += 1
-        else:
-            self.goal_achieved = self.current_task_index >= len(self.tasks) - 1
-
-    def advance_to_next_ready_task(self) -> bool:
-        for i in range(self.current_task_index, len(self.tasks)):
-            task = self.tasks[i]
-            if task.is_ready(self.completed_task_ids):
-                self.current_task_index = i
-                return True
-        return False
-
-    def validate_task_integrity(self) -> List[str]:
-        warnings = self.validate_state_integrity()
-        if len(self.tasks) != len(self.planned_tasks):
-            warnings.append(
-                f"tasks list ({len(self.tasks)}) out of sync with planned_tasks ({len(self.planned_tasks)})"
-            )
-        return warnings

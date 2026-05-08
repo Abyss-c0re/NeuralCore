@@ -28,15 +28,11 @@ async def plan_tasks_unified(
     agent, state: "AgentState"
 ) -> AsyncIterator[Tuple[str, Any]]:
     """
-    UNIFIED PLANNING METHOD (combines task_decomposition + is_multi_step_task logic).
+    PLANNING METHOD (combines task_decomposition + is_multi_step_task logic).
 
     Always performs structured planning via LLM.
-    Then decides SINGLE vs MULTI based on the **size** (len(steps)) of the generated plan:
-    - len(steps) <= 1  → treat as singular / simple task
-    - len(steps) >= 2  → treat as multi-step with dependencies
-
-    This replaces the previous two-LLM-call approach (is_multi_step_task + separate planning)
-    with a single, more efficient LLM call. The plan itself is the source of truth for complexity.
+    Then decides SINGLE vs MULTI based on the size of the generated plan.
+    Now uses the SSOT build_tasks_from_plan (no direct list assignment).
     """
     logger.info("[PLANNING START] Unified plan_tasks_unified called")
     yield ("phase_changed", {"phase": "planning"})
@@ -52,6 +48,7 @@ async def plan_tasks_unified(
 
         plan = json.loads(plan_text.strip())
         steps: List[Dict] = plan.get("steps", [])
+
         if hasattr(agent, "consolidator") and agent.consolidator:
             for step in steps:
                 suggested = step.get("suggested_tool", "").strip()
@@ -64,7 +61,7 @@ async def plan_tasks_unified(
             f"[PLANNING] LLM proposed {len(steps)} step(s) for query: {state.task[:80]}..."
         )
 
-        # === Normalize expected_outcome for safety (used in both branches) ===
+        # Normalize expected_outcome (used by Task objects)
         for step in steps:
             expected = step.get("expected_outcome", "")
             if not expected or not str(expected).strip():
@@ -73,7 +70,7 @@ async def plan_tasks_unified(
                 )
 
         if len(steps) <= 1:
-            # ── SINGLE-STEP PATH (based on plan size) ──
+            # SINGLE-STEP PATH
             if steps:
                 step0 = steps[0]
                 description = step0.get("description", state.task or "Single-step goal")
@@ -91,36 +88,35 @@ async def plan_tasks_unified(
             state.tasks = [simple_task]
             state.root_task = Task(description=state.task or "Root task")
             state.root_task.add_subtask(simple_task)
-            state.planned_tasks = [description]
-            state.task_expected_outcomes = [expected_outcome]
             state.current_task_index = 0
 
             logger.info("[SINGLE-STEP] Plan size=1 → initialized single Task object")
             yield (
                 "planning_complete",
                 {
-                    "planned_tasks": state.planned_tasks,
+                    "planned_tasks": state.planned_tasks,  # property
                     "is_single_step": True,
                     "num_steps": 1,
                 },
             )
 
         else:
+            # MULTI-STEP PATH — use SSOT builder
             state.build_tasks_from_plan(steps)
             state.current_task_index = 0
 
             logger.info(
-                f"[MULTI-STEP] Plan size={len(steps)} → created {len(state.tasks)} Task objects via build_tasks_from_plan"
+                f"[MULTI-STEP] Plan size={len(steps)} → created {len(state.tasks)} Task objects"
             )
             for i, task in enumerate(state.tasks):
                 logger.debug(
-                    f"  Task {i}: {task.description[:80]}... | expected='{task.expected_outcome}' | deps={task.dependencies}"
+                    f"  Task {i}: {task.description[:80]}... | expected='{task.expected_outcome}'"
                 )
 
             yield (
                 "planning_complete",
                 {
-                    "planned_tasks": state.planned_tasks,
+                    "planned_tasks": state.planned_tasks,  # property
                     "is_single_step": False,
                     "num_steps": len(steps),
                 },
@@ -135,8 +131,6 @@ async def plan_tasks_unified(
         state.tasks = [fallback]
         state.root_task = Task(description=state.task)
         state.root_task.add_subtask(fallback)
-        state.planned_tasks = [state.task]
-        state.task_expected_outcomes = ["Task completed successfully"]
         state.current_task_index = 0
         yield (
             "planning_fallback",
@@ -151,8 +145,6 @@ async def plan_tasks_unified(
         state.tasks = [fallback]
         state.root_task = Task(description=state.task)
         state.root_task.add_subtask(fallback)
-        state.planned_tasks = [state.task]
-        state.task_expected_outcomes = ["Task completed successfully"]
         state.current_task_index = 0
         yield ("planning_fallback", {"reason": str(e), "is_single_step": True})
 
@@ -161,8 +153,7 @@ async def goal_driven_task_loop(
     agent, state: AgentState, target_loop: str
 ) -> AsyncIterator[Tuple[str, Any]]:
     """Robust multi-step loop with persistent tool management + reliable final synthesis.
-    NOTE: This generator is driven externally (e.g. chat_tool_loop). Only AgentState persists
-    across iterations. All local variables are reset on every call."""
+    Now works with the new SSOT AgentState (properties instead of direct list assignment)."""
     is_multi_step = len(state.tasks) > 1
     marker = PromptBuilder.FINAL_ANSWER_MARKER
     state.increment_loop()
@@ -201,64 +192,7 @@ async def goal_driven_task_loop(
                         f"[TOOL MGMT] Could not pre-load {suggested_tool}: {e}"
                     )
 
-        # Rich previous-results context (from persisted state.tool_results)
-        previous_results_context = ""
-        if state.tool_results:
-            file_contents = []
-            for r in state.tool_results[-5:]:
-                name = r.get("name", "")
-                result = r.get("result", "")
-                if any(
-                    k in name.lower() for k in ["read_file", "read_pdf", "pdf", "read "]
-                ):
-                    content = str(result)[:12000]
-                    file_contents.append(
-                        f"### Previously read file ({name}):\n{content}\n---"
-                    )
-            if file_contents:
-                previous_results_context = "\n\n".join(file_contents)
-
-    
-        used_tools_str = state.used_tools_str
-
-        completed = []
-        for i in range(state.current_task_index):
-            if i < len(state.tool_results):
-                tool_name = state.tool_results[i].get("name") or f"step-{i}"
-                raw = str(state.tool_results[i].get("result", ""))
-                if len(raw) > 400:
-                    preview = (
-                        raw[:350]
-                        + " … [FULL CONTENT RECORDED IN CONTEXT — use previous_results_context / tool_results. DO NOT re-read.]"
-                    )
-                else:
-                    preview = raw
-                completed.append(f"Step {i} ({tool_name}) done: {preview}")
-
-        completed_context = (
-            "\n".join(completed) if completed else "No steps completed yet."
-        )
-        remaining = [
-            f"Step {i}: {state.tasks[i].description}"
-            for i in range(state.current_task_index + 1, len(state.tasks))
-        ]
-        remaining_context = "\n".join(remaining) if remaining else "No more steps."
-
-        expected_outcome = current_task.expected_outcome or "Tool executed successfully"
-
-        current_query = PromptBuilder.sub_task_execution(
-            original_query=state.task,
-            task_desc=task_desc,
-            current_index=state.current_task_index,
-            total_tasks=len(state.tasks),
-            completed_context=completed_context,
-            used_tools_str=used_tools_str,
-            remaining_context=remaining_context,
-            marker=marker,
-            loop_count=state.loop_count,
-            expected_outcome=expected_outcome,
-            previous_results_context=previous_results_context,
-        )
+        current_query = task_desc
     else:
         current_query = (
             state.task
@@ -347,8 +281,7 @@ async def goal_driven_task_loop(
     if tools_called_this_turn and current_task:
         result = state.tool_results[-1].get("result") if state.tool_results else None
 
-        # Record actual tool usage for training
-        tool_name = state.last_used_tool  # can be None — consolidator handles it
+        tool_name = state.last_used_tool
         current_task.used_tool = tool_name
 
         if hasattr(agent, "consolidator") and agent.consolidator:
@@ -359,12 +292,10 @@ async def goal_driven_task_loop(
                 success=success,
             )
 
-        # === EXPLICIT + CLEAR ===
         current_task.complete(result=result)
         if current_task.status == "completed":
             state.completed_task_ids.add(current_task.task_id)
 
-        # === ADVANCE TO NEXT TASK ===
         if not is_multi_step or state.current_task_index >= len(state.tasks) - 1:
             state.full_reply = f"Task completed successfully. {marker}"
             state.is_complete = True
@@ -418,7 +349,6 @@ async def goal_driven_task_loop(
                 lightweight_agentic=False,
                 return_as_string=True,
             )
-            logger.debug(f"Validation Context: {validation_context}")
             validation_result = await agent.client.chat(
                 validation_context, temperature=0.0, max_tokens=20
             )
