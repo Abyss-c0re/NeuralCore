@@ -14,7 +14,14 @@ class TaskManager:
     """Clean, reusable TaskManager.
     Injected with full Agent instance.
     Keeps Task class exactly as-is.
-    All task orchestration lives here."""
+    All task orchestration lives here.
+
+    Refactored per requirements:
+    - execute() = executes a SINGLE tool + validates results for one task (no is_multi_step awareness)
+    - run_goal_driven_loop() = manages steps / calls execute(task) and advances on validation success
+    - No domain-specific advancement or plan-size logic inside execute()
+    - Reduced redundancy between AgentState (coordination) and Task (per-task state)
+    - Modular, reusable, single-responsibility methods."""
 
     def __init__(self, agent):
         self.agent = agent
@@ -141,17 +148,68 @@ class TaskManager:
             state.current_task_index = 0
             yield ("planning_fallback", {"reason": str(e), "is_single_step": True})
 
-    async def validate(self, task: Task) -> bool:
-        """Validation logic extracted from original goal_driven_task_loop."""
+    async def validate(self, task: Optional[Task]) -> bool:
+        """Validation logic extracted from original goal_driven_task_loop.
+        Accepts Optional[Task] for safety."""
         if not task or task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
             return False
         return True
 
+    async def _validate_task_outcome(self, task: Task, state: AgentState) -> bool:
+        """Unified task outcome validation (called for every task, single-step or multi-step).
+        No is_multi_step check inside execute – validation is always performed.
+        Safe fallback for last_tool_success (avoids None.get error)."""
+        if not task:
+            return False
+
+        logger.info(f"[TASK VALIDATION] Validating outcome for task: {task.description[:80]}...")
+
+        last_result_str = (
+            str(state.tool_results[-1].get("result", ""))
+            if state.tool_results
+            else "No tool results yet."
+        )
+
+        validation_query = PromptBuilder.step_validation_prompt(
+            current_task=task,
+            last_result_str=last_result_str,
+            total_tasks=len(state.tasks),
+            current_idx=state.current_task_index,
+        )
+
+        try:
+            validation_context = await self.agent.context_manager.provide_context(
+                query=validation_query,
+                max_input_tokens=self.agent.max_tokens * 0.45,
+                reserved_for_output=self.agent.client.max_tokens * 0.25,
+                include_logs=True,
+                chat=False,
+                lightweight_agentic=False,
+                return_as_string=True,
+            )
+            validation_result = await self.agent.client.chat(
+                validation_context, temperature=0.0, max_tokens=20
+            )
+            outcome_met = "YES" in validation_result.strip().upper()
+            logger.info(f"[TASK VALIDATION] Outcome met: {outcome_met}")
+            return outcome_met
+        except Exception as e:
+            logger.warning(f"Validation LLM failed: {e}. Falling back to marker/tool success.")
+            # Safe fallback – last_tool_success may be None
+            last_success = getattr(state, "last_tool_success", None)
+            return bool(last_success and last_success.get("success"))
+
     async def execute(
-        self, task: Task, state: AgentState, target_loop: str
+        self, task: Optional[Task], state: AgentState, target_loop: str, **kwargs
     ) -> AsyncIterator[Tuple[str, Any]]:
-        """Full execution logic (tool management, context, streaming, completion, validation, anti-repeat).
-        Everything that used to live inside goal_driven_task_loop is now here."""
+        """EXECUTES A SINGLE TOOL + VALIDATES RESULTS for one task.
+        Focused responsibility:
+          - Tool management
+          - Context + streaming
+          - Tool result processing
+          - Task.complete() + per-task validation (always, no is_multi_step awareness)
+        Does NOT manage task index advancement, overall goal completion, or step orchestration
+        (those belong in run_goal_driven_loop for clean separation and reusability)."""
         if not await self.validate(task):
             yield ("phase_changed", {"phase": "restarting_loop"})
             state.request_loop_restart(
@@ -159,8 +217,8 @@ class TaskManager:
             )
             return
 
-        # === PERSISTENT TOOL MANAGEMENT ===
-        if not state.skip_manager_this_turn and task.suggested_tool:
+        # === PERSISTENT TOOL MANAGEMENT (single task only) ===
+        if task and not state.skip_manager_this_turn and task.suggested_tool:
             last_tool = state.last_used_tool
             if last_tool and last_tool != task.suggested_tool:
                 try:
@@ -180,7 +238,7 @@ class TaskManager:
                         f"[TOOL MGMT] Could not pre-load {task.suggested_tool}: {e}"
                     )
 
-        current_query = task.description
+        current_query = task.description if task else state.task
 
         yield ("phase_changed", {"phase": "thinking"})
 
@@ -260,7 +318,7 @@ class TaskManager:
         if has_marker:
             final_reply = final_reply.replace(marker, "").strip()
 
-        # ====================== UNIFIED COMPLETION LOGIC ======================
+        # ====================== SINGLE-TASK COMPLETION + VALIDATION ======================
         last_success = getattr(state, "last_tool_success", None)
         tool_reported_success = bool(last_success and last_success.get("success"))
         strong_completion = has_marker or tool_reported_success
@@ -273,125 +331,29 @@ class TaskManager:
             task.used_tool = tool_name
 
             if hasattr(self.agent, "consolidator") and self.agent.consolidator:
-                success = bool(result) and task.status != "failed"
+                success = bool(result) and task.status != TaskStatus.FAILED
                 await self.agent.consolidator.record_actual_tool_usage(
                     query=task.description, tool_name=tool_name, success=success
                 )
 
             task.complete(result=result)
-            if task.status == "completed":
+            if task.status == TaskStatus.COMPLETED:
                 state.completed_task_ids.add(task.task_id)
 
-            is_multi_step = len(state.tasks) > 1
-            if not is_multi_step or state.current_task_index >= len(state.tasks) - 1:
-                state.full_reply = f"Task completed successfully. {marker}"
-                state.is_complete = True
-                state.last_tool_success = {"success": True}
-                state.mark_goal_achieved("All sub-tasks completed")
-                yield (
-                    "llm_response",
-                    {
-                        "full_reply": state.full_reply,
-                        "tool_calls": [],
-                        "is_complete": True,
-                    },
-                )
-                yield ("phase_changed", {"phase": "completed"})
-                state.goal_achieved = True
+        # Always validate the task outcome (single-step or multi-step – no is_multi_step check here)
+        validated = False
+        if task and (tools_called_this_turn or strong_completion):
+            validated = await self._validate_task_outcome(task, state)
+            if validated:
+                logger.info("[TASK VALIDATION PASSED] Task validated")
+                if task.status != TaskStatus.FAILED:
+                    task.status = TaskStatus.COMPLETED
+                    state.completed_task_ids.add(task.task_id)
             else:
-                state.current_task_index += 1
-                if hasattr(state, "advance_to_next_ready_task"):
-                    state.advance_to_next_ready_task()
-                logger.info(
-                    f"[ADVANCE] Sub-task {state.current_task_index} ready → next"
-                )
-                yield ("phase_changed", {"phase": "restarting_loop"})
-                state.request_loop_restart(
-                    reason="Tool executed — advancing to next sub-task",
-                    target_loop=target_loop,
-                )
-
-        # ====================== LLM VALIDATION (multi-step only) ======================
-        is_multi_step = len(state.tasks) > 1
-        if is_multi_step and strong_completion and task and not state.goal_reached:
-            logger.info(
-                f"[STEP VALIDATION] Starting LLM validation for step {state.current_task_index + 1}"
-            )
-            last_result_str = (
-                str(state.tool_results[-1].get("result", ""))
-                if state.tool_results
-                else "No tool results yet."
-            )
-
-            validation_query = PromptBuilder.step_validation_prompt(
-                current_task=task,
-                last_result_str=last_result_str,
-                total_tasks=len(state.tasks),
-                current_idx=state.current_task_index,
-            )
-
-            try:
-                validation_context = await self.agent.context_manager.provide_context(
-                    query=validation_query,
-                    max_input_tokens=self.agent.max_tokens * 0.45,
-                    reserved_for_output=self.agent.client.max_tokens * 0.25,
-                    include_logs=True,
-                    chat=False,
-                    lightweight_agentic=False,
-                    return_as_string=True,
-                )
-                validation_result = await self.agent.client.chat(
-                    validation_context, temperature=0.0, max_tokens=20
-                )
-                outcome_met = "YES" in validation_result.strip().upper()
-            except Exception as e:
-                logger.warning(f"Validation LLM failed: {e}. Falling back to marker.")
-                outcome_met = has_marker
-
-            if not outcome_met and not has_marker:
-                logger.warning(
-                    f"[STEP VALIDATION FAILED] Step {state.current_task_index} not met."
-                )
+                logger.warning("[TASK VALIDATION FAILED] Outcome not met")
                 state.increment_empty_loop()
-                yield ("phase_changed", {"phase": "restarting_loop"})
-                state.request_loop_restart(
-                    reason="LLM validation failed — outcome not met",
-                    target_loop=target_loop,
-                )
 
-            logger.info(
-                f"[STEP VALIDATION PASSED] Step {state.current_task_index + 1} validated"
-            )
-            state.current_task_index += 1
-
-            if state.current_task_index >= len(state.tasks):
-                state.mark_goal_achieved(
-                    "All planned sub-tasks completed and validated"
-                )
-                state.goal_achieved = True
-            else:
-                if hasattr(state, "advance_to_next_ready_task"):
-                    state.advance_to_next_ready_task()
-                state.empty_loops = 0
-                state.action_restarts = 0
-                yield ("phase_changed", {"phase": "restarting_loop"})
-                state.request_loop_restart(
-                    reason="Sub-task validated → advancing",
-                    target_loop=target_loop,
-                    reset_counters=False,
-                )
-
-        # ====================== SAFE ANTI-REPEAT / ACTION / EMPTY LOOP ======================
-        if tools_called_this_turn and is_multi_step and not strong_completion:
-            logger.warning(
-                f"[ANTI-REPEAT] Tool called on step {state.current_task_index} but no strong completion."
-            )
-            state.increment_empty_loop()
-            yield ("phase_changed", {"phase": "restarting_loop"})
-            state.request_loop_restart(
-                reason="Tool called but no strong completion.", target_loop=target_loop
-            )
-
+        # ====================== PER-TURN SAFETY (anti-repeat, empty loop, action restart) ======================
         action_restart_triggered = False
         action_continuation = None
 
@@ -412,15 +374,14 @@ class TaskManager:
             state.increment_action_restart()
             if state.action_restarts > 3:
                 state.mark_goal_achieved("Max action restarts reached")
-                yield ("phase_changed", {"phase": "restarting_loop"})
                 state.request_loop_stop(
                     reason="Max action restarts reached", target_loop=target_loop
                 )
             else:
-                yield ("phase_changed", {"phase": "restarting_loop"})
                 state.request_loop_restart(
                     reason="Action restart requested", target_loop=target_loop
                 )
+                yield ("phase_changed", {"phase": "restarting_loop"})
 
         if (
             not tools_called_this_turn
@@ -435,14 +396,75 @@ class TaskManager:
                     target_loop=target_loop,
                 )
             else:
-                yield ("phase_changed", {"phase": "restarting_loop"})
                 state.request_loop_restart(
                     reason="Empty loop continuation", target_loop=target_loop
                 )
+                yield ("phase_changed", {"phase": "restarting_loop"})
         else:
             state.empty_loops = 0
 
-        if not state.goal_reached:
+        # Yield final task result event so run_goal_driven_loop can react
+        yield (
+            "task_result",
+            {
+                "task_id": getattr(task, "task_id", None),
+                "success": bool(task and task.status == TaskStatus.COMPLETED),
+                "tools_called": tools_called_this_turn,
+                "strong_completion": strong_completion,
+                "validated": validated,
+            },
+        )
+
+    async def run_goal_driven_loop(
+        self, state: AgentState, target_loop: str, **kwargs
+    ) -> AsyncIterator[Tuple[str, Any]]:
+        """CLEAN GOAL-DRIVEN LOOP ORCHESTRATOR.
+        Delegates execution to .execute (single task/tool + validation).
+        Manages steps: if validated → advance or complete goal.
+        No early-stop else clause – let the break condition handle completion.
+        This removes redundancy and keeps orchestration at the right level."""
+        state.increment_loop()
+
+        current_task: Optional[Task] = state.get_current_task()
+
+        # Execute the current task (single tool + validation)
+        async for event in self.execute(current_task, state, target_loop, **kwargs):
+            yield event
+
+        # === STEP MANAGEMENT (if validated → move on) ===
+        if current_task and current_task.status == TaskStatus.COMPLETED:
+            is_last_task = state.current_task_index >= len(state.tasks) - 1
+
+            if is_last_task:
+                state.full_reply = f"Task completed successfully. {PromptBuilder.FINAL_ANSWER_MARKER}"
+                state.is_complete = True
+                state.last_tool_success = {"success": True}
+                state.mark_goal_achieved("All sub-tasks completed")
+                yield (
+                    "llm_response",
+                    {
+                        "full_reply": state.full_reply,
+                        "tool_calls": [],
+                        "is_complete": True,
+                    },
+                )
+                yield ("phase_changed", {"phase": "completed"})
+                state.goal_achieved = True
+            else:
+                # Advance to next task
+                state.current_task_index += 1
+                if hasattr(state, "advance_to_next_ready_task"):
+                    state.advance_to_next_ready_task()
+                logger.info(
+                    f"[ADVANCE] Sub-task {state.current_task_index} ready → next"
+                )
+                yield ("phase_changed", {"phase": "restarting_loop"})
+                state.request_loop_restart(
+                    reason="Task completed — advancing to next sub-task",
+                    target_loop=target_loop,
+                )
+
+        elif not state.goal_reached:
             logger.warning(
                 "Loop iteration ended without goal_achieved — forcing restart"
             )
@@ -450,20 +472,3 @@ class TaskManager:
                 reason="Loop ended without goal", target_loop=target_loop
             )
             yield ("phase_changed", {"phase": "restarting_loop"})
-
-    async def run_goal_driven_loop(
-        self, state: AgentState, target_loop: str, **kwargs
-    ) -> AsyncIterator[Tuple[str, Any]]:
-        """Clean goal-driven loop orchestrator.
-        Delegates everything to .execute.
-        **kwargs added for robustness (workflow engine / calls may pass extra args)."""
-        state.increment_loop()
-
-        current_task: Optional[Task] = state.get_current_task()
-
-        if current_task:
-            if current_task.status == "pending":
-                current_task.start(self.agent)
-
-            async for event in self.execute(current_task, state, target_loop, **kwargs):
-                yield event
