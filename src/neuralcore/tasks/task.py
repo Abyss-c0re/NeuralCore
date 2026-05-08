@@ -1,17 +1,26 @@
+from enum import Enum
 from dataclasses import dataclass, field
+from typing import Optional, List, Dict, Set, Any
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set
 import uuid
+import logging
 
-from neuralcore.utils.logger import Logger
+logger = logging.getLogger(__name__)
 
-logger = Logger.get_logger()
+
+class TaskStatus(str, Enum):
+    """Generic task lifecycle states."""
+
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
 
 
 @dataclass
 class Task:
     """
-    Generic, reusable Task for NeuralCore.
     Supports flat lists (for easy AgentState compatibility) + hierarchical subtasks.
     Completely abstract — no domain-specific logic.
     """
@@ -20,13 +29,13 @@ class Task:
     description: str = ""
     parent_task_id: Optional[str] = None
 
-    status: str = "pending"  # pending | in_progress | completed | failed | skipped
+    status: TaskStatus = TaskStatus.PENDING
     dependencies: List[str] = field(default_factory=list)
     assigned_agent: Optional[Any] = None
     expected_outcome: str = ""
 
     suggested_tool: str = ""
-    used_tool: Optional[str] = None  # ← FIXED: now Optional
+    used_tool: Optional[str] = None
 
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
@@ -43,13 +52,13 @@ class Task:
 
     def start(self, agent: Optional[Any] = None) -> None:
         """Mark task as in progress."""
-        if self.status not in ("pending", "failed"):
+        if self.status not in (TaskStatus.PENDING, TaskStatus.FAILED):
             logger.warning(
                 f"Task {self.task_id[:8]} cannot start from status '{self.status}'"
             )
             return
 
-        self.status = "in_progress"
+        self.status = TaskStatus.IN_PROGRESS
         self.start_time = datetime.now()
         if agent is not None:
             self.assigned_agent = agent
@@ -59,11 +68,11 @@ class Task:
         """Mark task completed or failed."""
         self.end_time = datetime.now()
         if error:
-            self.status = "failed"
+            self.status = TaskStatus.FAILED
             self.error = error
             logger.error(f"[TASK FAILED] {self.task_id[:8]} | {error}")
         else:
-            self.status = "completed"
+            self.status = TaskStatus.COMPLETED
             self.result = result
             logger.info(
                 f"[TASK COMPLETE] {self.task_id[:8]} | outcome met: {bool(self.expected_outcome)}"
@@ -86,7 +95,7 @@ class Task:
             "task_id": self.task_id,
             "description": self.description,
             "parent_task_id": self.parent_task_id,
-            "status": self.status,
+            "status": self.status.value,
             "dependencies": self.dependencies,
             "assigned_agent": getattr(
                 self.assigned_agent, "agent_id", str(self.assigned_agent)
@@ -95,7 +104,7 @@ class Task:
             else None,
             "expected_outcome": self.expected_outcome,
             "suggested_tool": self.suggested_tool,
-            "used_tool": self.used_tool,  # ← now safely accepts None
+            "used_tool": self.used_tool,
             "start_time": self.start_time.isoformat() if self.start_time else None,
             "end_time": self.end_time.isoformat() if self.end_time else None,
             "result": str(self.result)[:1000] if self.result is not None else None,
@@ -111,6 +120,6 @@ class Task:
             else ""
         )
         tool_info = f" | suggested={self.suggested_tool}" if self.suggested_tool else ""
-        if self.used_tool:  # ← works perfectly with None or ""
+        if self.used_tool:
             tool_info += f" | used={self.used_tool}"
         return f"[{self.status.upper()}] {self.task_id[:8]}… | {self.description[:80]}{tool_info}{duration}"
