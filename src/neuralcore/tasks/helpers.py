@@ -16,4 +16,3 @@ async def classify_intent(agent, query: str) -> str:
     except Exception as e:
         logger.warning(f"classify_intent failed, falling back: {e}")
         return "CASUAL" if len(query.split()) < 25 else "TASK"
-

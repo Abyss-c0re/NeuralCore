@@ -185,84 +185,6 @@ class ContextManager:
         self.tool_call_history.clear()
         logger.info("Tool history cleared (KB and conversation preserved)")
 
-    class TaskContext:
-        def __init__(self, name: str, parent: "ContextManager"):
-            self.name = name
-            self.parent = parent
-            self.important_files: set[str] = set()
-            self.key_results: List[Dict[str, Any]] = []
-            self.findings: List[str] = []
-            self.hypotheses: List[str] = []
-            self.max_results = 15
-
-        async def add_important_result(
-            self,
-            title: str,
-            content: str,
-            source: str = "tool",
-            metadata: dict | None = None,
-        ) -> None:
-            if not content or not content.strip():
-                return
-            summary = content[:600] + ("..." if len(content) > 600 else "")
-            entry = {
-                "title": title,
-                "summary": summary,
-                "source": source,
-                "ts": time.time(),
-                "metadata": metadata or {},
-            }
-            self.key_results.append(entry)
-            if len(self.key_results) > self.max_results:
-                self.key_results.pop(0)
-            await self.parent.add_external_content(
-                source_type=f"task_result_{self.name}",
-                content=f"[{title}] {summary}\nMetadata: {metadata or {}}",
-                metadata={"task": self.name, **(metadata or {})},
-            )
-            self.parent._log_action(
-                "task_result", f"Task {self.name} → {title}", metadata
-            )
-
-        def add_important_file(self, filepath: str):
-            self.important_files.add(filepath)
-            self.parent.files_checked.add(filepath)
-
-        def get_context(self, max_tokens: int = 3500) -> str:
-            lines = [PromptBuilder.task_context_header(self.name)]
-            if self.important_files:
-                lines.append(
-                    PromptBuilder.task_context_important_files_section(
-                        list(self.important_files)
-                    )
-                )
-            if self.key_results:
-                lines.append(
-                    PromptBuilder.task_context_key_results_section(self.key_results)
-                )
-            if self.findings:
-                lines.append(PromptBuilder.task_context_findings_section(self.findings))
-            if self.hypotheses:
-                lines.append(
-                    PromptBuilder.task_context_hypotheses_section(self.hypotheses)
-                )
-            text = "\n".join(lines)
-            return text[: max_tokens * 4]
-
-    def create_task_context(self, task_name: str) -> "ContextManager.TaskContext":
-        if not hasattr(self, "_task_contexts"):
-            self._task_contexts: Dict[str, ContextManager.TaskContext] = {}
-        if task_name not in self._task_contexts:
-            self._task_contexts[task_name] = self.TaskContext(task_name, self)
-            logger.info(f"Created new task context: {task_name}")
-        return self._task_contexts[task_name]
-
-    def get_task_context(self, task_name: str) -> "ContextManager.TaskContext | None":
-        return getattr(self, "_task_contexts", {}).get(task_name)
-
-    def list_active_tasks(self) -> List[str]:
-        return list(getattr(self, "_task_contexts", {}).keys())
-
     async def fetch_embedding(
         self, text: str, size: int = 500, prefix: str | None = None
     ) -> np.ndarray:
@@ -2069,12 +1991,7 @@ class ContextManager:
             {"name": t, "timestamp": time.time()} for t in self.tools_executed[-20:]
         ]
         # 3. Investigation / Planning state
-        if hasattr(self, "_task_contexts") and self._task_contexts:
-            state.planned_tasks = list(self._task_contexts.keys())
-            state.task_expected_outcomes = [
-                f"Complete task: {name}" for name in state.planned_tasks
-            ]
-        # else: leave whatever is already in state (from build_tasks_from_plan etc.)
+
         if state.planned_tasks and isinstance(state.current_task_index, int):
             if 0 <= state.current_task_index < len(state.planned_tasks):
                 state.current_task = state.planned_tasks[state.current_task_index]

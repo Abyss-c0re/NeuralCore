@@ -613,26 +613,6 @@ new tool added and working), you MUST output exactly the marker
         )
 
     @staticmethod
-    def task_context_header(task_name: str) -> str:
-        return f"🔹 TASK CONTEXT: {task_name.upper()}"
-
-    @staticmethod
-    def task_context_important_files_section(files: List[str]) -> str:
-        return f"Important files: {', '.join(sorted(files))[:12]}"
-
-    @staticmethod
-    def task_context_key_results_section(results: List[Dict]) -> str:
-        return "\n".join(f"• {r['title']}: {r['summary']}" for r in results[-10:])
-
-    @staticmethod
-    def task_context_findings_section(findings: List[str]) -> str:
-        return "Key Findings:\n" + "\n".join(f"   - {f}" for f in findings[-8:])
-
-    @staticmethod
-    def task_context_hypotheses_section(hypotheses: List[str]) -> str:
-        return "Hypotheses:\n" + "\n".join(f"   - {h}" for h in hypotheses[-5:])
-
-    @staticmethod
     def latest_tool_block(
         tool_name: str, timestamp_str: str, size: int, content: str
     ) -> str:
@@ -679,26 +659,6 @@ new tool added and working), you MUST output exactly the marker
         - Use tool browser to load missing tools.
         - Keep responses short and natural after tool results.
         - Current goal: {goal}"""
-        return PromptBuilder.inject_final_answer_instruction(base)
-
-    @staticmethod
-    def sub_agent_system_prompt(task_desc: str, assigned_tools: List[str] = []) -> str:
-        """System prompt for sub-agents executing a single micro-task."""
-        tools_hint = ""
-        if assigned_tools:
-            tools_list = ", ".join(assigned_tools[:15])
-            if len(assigned_tools) > 15:
-                tools_list += ", ..."
-            tools_hint = f"\n\nAvailable tools: {tools_list}"
-
-        base = f"""You are a precise sub-agent executing **ONE single micro-task only**.
-
-        TASK: {task_desc}{tools_hint}
-
-        CRITICAL RULES:
-        - Complete ONLY this exact task.
-        - If the task involves reading a file, use open_file_async or open_file_sync directly.
-        - When you have finished the task, output a short summary and end with exactly: {PromptBuilder.FINAL_ANSWER_MARKER}"""
         return PromptBuilder.inject_final_answer_instruction(base)
 
     @staticmethod
@@ -795,23 +755,6 @@ Tone: professional but warm and clear. No JSON. No technical jargon unless neces
     def sub_agent_objective_reminder(state) -> str:
         """Convenience alias — currently identical to objective_reminder but kept separate for future divergence."""
         return PromptBuilder.objective_reminder(state)
-
-    @staticmethod
-    def task_execution_summary_prompt(task: str, tool_results_str: str = "") -> str:
-        """Exact relocation of the original _generate_deployment_summary prompt.
-        Centralized, reusable, and free of any client-specific logic."""
-        return f"""You are a helpful Deploy Agent. A complex background task has just finished.
-
-Task: {task}
-
-Key results from tools:
-{tool_results_str or "No detailed tool output available."}
-
-Write a friendly, concise summary (3-7 sentences) for the user.
-- Mention what was accomplished
-- Highlight any important outcomes or warnings
-- Use natural language and light emojis if appropriate
-- Keep it easy to read"""
 
     @staticmethod
     def abstract_concept_extraction(

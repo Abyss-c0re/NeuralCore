@@ -267,7 +267,6 @@ class ConfigLoader:
         if not agent_cfg:
             raise ValueError(f"No agent config found for '{agent_id}'")
 
-        # Lazy factory creation — this is what actually breaks the circular import
         if self.agent_factory is None:
             from neuralcore.agents.factory import AgentFactory
 

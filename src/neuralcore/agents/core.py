@@ -2,7 +2,6 @@ import time
 import asyncio
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Union
-from neuralcore.utils.prompt_builder import PromptBuilder
 
 
 from neuralcore.workflows.engine import WorkflowEngine
@@ -10,7 +9,7 @@ from neuralcore.workflows.registry import workflow
 from neuralcore.cognition.memory import ContextManager
 from neuralcore.clients.factory import get_clients
 from neuralcore.utils.logger import Logger
-from neuralcore.tasks.task import Task
+
 from neuralcore.tasks.manager import TaskManager
 from neuralcore.agents.state import AgentState
 from neuralcore.actions.registry import registry
@@ -34,6 +33,7 @@ class Agent:
         config_override: Optional[dict] = None,
         config: Optional[dict] = None,
         sub_agent: bool = False,
+        parent: Optional["Agent"] = None,
         action_registry: ActionRegistry = registry,
     ):
         self.agent_id: str = agent_id
@@ -46,6 +46,7 @@ class Agent:
 
         # ====================== CONFIG HANDLING ======================
         self.sub_agent: bool = sub_agent
+        self.parent = parent
 
         if config is not None and isinstance(config, dict):
             self.config = dict(config)
@@ -99,10 +100,6 @@ class Agent:
 
         # Light operational containers
 
-        self.sub_tasks: Dict[str, Dict[str, Any]] = {}
-        self._sub_task_events: Dict[str, asyncio.Event] = {}
-        self._sub_task_counter: int = 0
-        self.task_context: Optional["ContextManager.TaskContext"] = None
         self.assigned_tools: Optional[List[str]] = None
 
         self._reset_state()
@@ -186,7 +183,6 @@ class Agent:
             "state": self.state.to_dict(),
             "loaded_tools": self.action_manager.loaded_tools,
             "loaded_toolsets": self.action_manager.loaded_toolsets,
-            "sub_tasks": self.get_sub_tasks(),
             "context_summary": self.context_manager.get_context_summary(
                 max_messages=12, max_chars=2000
             ),
@@ -220,7 +216,6 @@ class Agent:
             "loop_count": self.state.loop_count,
             "total_tool_calls": self.state.total_tool_calls,
             "error_count": self.state.error_count,
-            "sub_tasks_count": len(self.sub_tasks),
             "waiting": getattr(self.state, "waiting", False),
             "wait_type": getattr(self.state, "wait_type", None),
             "wait_elapsed": wait_elapsed,  # ← now type-safe
@@ -240,9 +235,6 @@ class Agent:
         self.message_queue = asyncio.Queue()
         self._input_event.clear()
         self._input_counter = 0
-        self.sub_tasks.clear()
-        self._sub_task_counter = 0
-        self._sub_task_events.clear()
         self._sync_loaded_tools_to_state()
 
     def _sync_loaded_tools_to_state(self) -> None:
@@ -470,40 +462,6 @@ class Agent:
             logger.debug(f"wait_for_incoming_message error: {e}")
             return None
 
-    async def wait_for_sub_task(
-        self,
-        task_id: str,
-        timeout: Optional[float] = None,
-        raise_on_timeout: bool = False,
-    ) -> Dict[str, Any]:
-        """
-        Wait until a sub-task reaches a terminal state.
-        Uses asyncio.Event when available (clean & efficient).
-        Falls back to polling for legacy tasks.
-        """
-        if task_id not in self.sub_tasks:
-            return {"error": f"Sub-task {task_id} not found", "status": "not_found"}
-
-        event = self._sub_task_events.get(task_id)
-
-        if event is None:
-            # Legacy fallback (polling)
-            return await self._poll_sub_task_status(task_id, timeout)
-
-        try:
-            if timeout is not None:
-                await asyncio.wait_for(event.wait(), timeout=timeout)
-            else:
-                await event.wait()
-
-            return self.sub_tasks.get(task_id, {})
-        except asyncio.TimeoutError:
-            if raise_on_timeout:
-                raise TimeoutError(
-                    f"Sub-task {task_id} did not complete within {timeout}s"
-                )
-            return {"status": "timeout", "task_id": task_id}
-
     async def _auto_sync_state(self) -> None:
         """Lightweight auto-sync with rate limiting + learning trigger."""
         now = time.time()
@@ -515,18 +473,6 @@ class Agent:
 
         # Direct call — no wrapper needed
         asyncio.create_task(self.context_manager.consolidator.extract_and_consolidate())
-
-    async def _poll_sub_task_status(
-        self, task_id: str, timeout: Optional[float] = None
-    ) -> Dict[str, Any]:
-        start = time.time()
-        while True:
-            info = self.sub_tasks.get(task_id, {})
-            if info.get("status") in ("completed", "failed", "cancelled"):
-                return info
-            if timeout and (time.time() - start) > timeout:
-                return {"status": "timeout", "task_id": task_id}
-            await asyncio.sleep(0.1)
 
     async def on_background_event(self, event: str, payload: Any) -> None:
         """Generic hook for background/headless events.
@@ -557,7 +503,7 @@ class Agent:
             Status: {self.state.status}
             Phase: {self.state.phase}
             Duration: {self.state.duration:.1f}s
-            Sub-tasks: {len(self.sub_tasks)}
+          
 
             Waiting: {
                 "YES (" + str(getattr(self.state, "wait_type", "unknown")) + ")"
@@ -596,7 +542,6 @@ class Agent:
                 "background_running": bool(
                     self._background_task and not self._background_task.done()
                 ),
-                "sub_tasks_count": len(self.sub_tasks),
                 "context_summary": context_summary[:800] + "..."
                 if len(context_summary) > 800
                 else context_summary,
@@ -839,87 +784,7 @@ class Agent:
         ):
             yield event, payload
 
-    async def start_background_loop(
-        self,
-        loop_name: str,
-        task_description: Optional[str] = None,
-        initial_state: Optional[dict] = None,
-        **kwargs,
-    ) -> str:
-        """Launch a named loop from WorkflowEngine as a true background task.
-        Returns the task_id for monitoring/cancellation."""
-        self._sub_task_counter += 1
-        task_id = f"bg_loop_{self.agent_id}_{self._sub_task_counter:03d}"
-
-        display_name = task_description or f"Background loop: {loop_name}"
-
-        self.sub_tasks[task_id] = {
-            "id": task_id,
-            "display_name": display_name,
-            "type": "background_loop",
-            "loop_name": loop_name,
-            "status": "running",
-            "started_at": asyncio.get_event_loop().time(),
-            "task_obj": None,
-            "result": None,
-            "error": None,
-        }
-
-        async def _background_loop_runner():
-            try:
-                async for event, payload in self.execute_loop(
-                    loop_name=loop_name,
-                    initial_state=initial_state,
-                    **kwargs,
-                ):
-                    # Forward important events to parent
-                    await self.post_control(
-                        {
-                            "event": "background_loop_event",
-                            "task_id": task_id,
-                            "loop_name": loop_name,
-                            "type": event,
-                            "payload": payload
-                            if isinstance(payload, dict)
-                            else {"data": str(payload)},
-                        }
-                    )
-
-                    # Auto-update sub_task status on completion signals
-                    if event in ("loop_completed", "loop_broken"):
-                        self.sub_tasks[task_id]["status"] = (
-                            "completed" if event == "loop_completed" else "broken"
-                        )
-
-            except asyncio.CancelledError:
-                self.sub_tasks[task_id]["status"] = "cancelled"
-                await self.post_control(
-                    {"event": "background_loop_cancelled", "task_id": task_id}
-                )
-                raise
-            except Exception as exc:
-                logger.error(f"Background loop {loop_name} failed", exc_info=True)
-                self.sub_tasks[task_id].update({"status": "failed", "error": str(exc)})
-                await self.post_control(
-                    {
-                        "event": "background_loop_failed",
-                        "task_id": task_id,
-                        "error": str(exc),
-                    }
-                )
-            finally:
-                if self.sub_tasks[task_id]["status"] == "running":
-                    self.sub_tasks[task_id]["status"] = "completed"
-
-        task = asyncio.create_task(_background_loop_runner(), name=f"bg_loop_{task_id}")
-        self.sub_tasks[task_id]["task_obj"] = task
-
-        logger.info(
-            f"Agent '{self.name}' started background loop '{loop_name}' → task_id={task_id}"
-        )
-        return task_id
-
-    # ====================== REFACTORED RUN METHODS ======================
+    # ======================  RUN METHODS ======================
 
     def _setup_for_run(
         self,
@@ -1129,456 +994,3 @@ class Agent:
         finally:
             self.state.status = "idle"
             logger.info(f"Agent '{self.name}' run finished")
-
-    # ====================== IMPROVED COMPLEX DEPLOYMENT ======================
-
-    async def start_complex_deployment(
-        self,
-        task_description: str,
-        user_facing_name: Optional[str] = None,
-        sub_profile: Optional[str] = None,
-        assigned_tools: Optional[List[str]] = None,
-        custom_system_prompt: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_iterations: Optional[int] = None,
-        depends_on: Optional[str] = None,
-    ) -> str:
-        """Start a background sub-agent deployment (cleaned & modular)."""
-        self._sub_task_counter += 1
-        task_id = f"deploy_{self.agent_id}_{self._sub_task_counter:03d}"
-        self._sub_task_events[task_id] = asyncio.Event()
-        display_name = user_facing_name or task_description[:65]
-
-        logger.info(
-            f"[DEPLOY] Starting sub-task {task_id}: {display_name} | "
-            f"depends_on={depends_on or 'None'} | tools={len(assigned_tools or [])}"
-        )
-
-        # Use Task for internal consistency with SSOT (reusable)
-        sub_task = Task(
-            description=task_description,
-            expected_outcome="Deployment completed successfully",
-            metadata={
-                "display_name": display_name,
-                "assigned_tools": assigned_tools or ["DynamicCore"],
-                "depends_on": depends_on,
-            },
-        )
-
-        self.sub_tasks[task_id] = {
-            "id": task_id,
-            "task_obj": sub_task,  # link to Task for consistency
-            "status": "pending",
-            "started_at": asyncio.get_event_loop().time(),
-            "description": task_description,
-            "assigned_tools": assigned_tools or ["DynamicCore"],
-            "progress": 0,
-            "result": None,
-            "error": None,
-            "depends_on": depends_on,
-            "dependents": [],
-            "completed_at": None,
-            "custom_system_prompt": custom_system_prompt,
-        }
-
-        if depends_on and depends_on in self.sub_tasks:
-            self.sub_tasks[depends_on]["dependents"].append(task_id)
-
-        try:
-            sub_agent = SubAgent(
-                parent=self,
-                task_name=display_name,
-                assigned_tools=assigned_tools,
-                custom_system_prompt=custom_system_prompt,
-                temperature=temperature or 0.25,
-                max_iterations=max_iterations,
-                profile=sub_profile,
-                agent_id_override=f"{self.agent_id}_sub_{self._sub_task_counter}",
-            )
-
-            sub_agent.state.task = task_description
-            sub_agent.current_task = task_description
-            sub_agent.current_role = f"sub-agent:{display_name}"
-
-            coro = self._run_sub_agent_internal(
-                sub_agent, task_id, task_description, depends_on
-            )
-            background_task = asyncio.create_task(coro, name=task_id)
-
-            self.sub_tasks[task_id]["task_obj"] = background_task
-            self.sub_tasks[task_id]["status"] = "waiting" if depends_on else "running"
-
-            return task_id
-
-        except Exception as e:
-            logger.error(
-                f"[DEPLOY] Failed to create sub-agent {task_id}", exc_info=True
-            )
-            self.sub_tasks[task_id].update(
-                {
-                    "status": "failed",
-                    "error": str(e),
-                    "completed_at": asyncio.get_event_loop().time(),
-                }
-            )
-            return f"ERROR_{task_id}"
-
-    async def _run_sub_agent_internal(
-        self,
-        sub_agent: "SubAgent",
-        task_id: str,
-        task_description: str,
-        depends_on: Optional[str] = None,
-    ):
-        """Cleaned internal runner for sub-agent background task."""
-        try:
-            # 1. WAIT FOR DEPENDENCY (unchanged)
-            if depends_on:
-                logger.info(f"Sub-task {task_id} waiting for dependency {depends_on}")
-                self.sub_tasks[task_id]["status"] = "waiting"
-                while True:
-                    dep = self.sub_tasks.get(depends_on)
-                    if dep and dep.get("status") in (
-                        "completed",
-                        "failed",
-                        "cancelled",
-                    ):
-                        break
-                    await asyncio.sleep(0.25)
-
-                if dep and dep.get("result"):
-                    await sub_agent.context_manager.add_external_content(
-                        source_type="dependency_result",
-                        content=f"Result from previous step ({depends_on}):\n{dep['result']}",
-                        metadata={"dependency_task_id": depends_on},
-                    )
-
-            # 2. TOOL LOADING (SAFEGUARDED)
-            assigned = getattr(sub_agent, "assigned_tools", None) or []
-            if assigned:
-                valid_tools = [t for t in assigned if t in registry.all_actions]
-                if valid_tools:
-                    sub_agent.action_manager.unload_all()
-                    sub_agent.action_manager.load_tools(valid_tools)
-                    logger.info(f"[SUB-AGENT] Loaded {len(valid_tools)} valid tools")
-                else:
-                    logger.warning(f"[SUB-AGENT] No valid tools in list: {assigned}")
-
-            # Always ensure core tools
-            for core in ["GetContext", "GetDeploymentStatus"]:
-                if (
-                    core in registry.all_actions
-                    and not sub_agent.action_manager.is_loaded(core)
-                ):
-                    sub_agent.action_manager.load_tools([core])
-
-            # 3. SYSTEM PROMPT
-            sub_system = getattr(
-                sub_agent, "system_prompt", ""
-            ) or PromptBuilder.sub_agent_system_prompt(
-                task_desc=task_description, assigned_tools=assigned
-            )
-
-            # 4. EXECUTE
-            async for event, payload in sub_agent.run(
-                user_prompt=task_description,
-                system_prompt=sub_system,
-                temperature=getattr(sub_agent, "temperature", 0.25),
-                max_tokens=10000,
-                workflow="sub_agent_execute",
-                chat_mode=False,
-            ):
-                if event in (
-                    "tool_result",
-                    "step_completed",
-                    "iteration_finished",
-                    "final_answer",
-                ):
-                    await self.post_control(
-                        {
-                            "event": "sub_agent_progress",
-                            "task_id": task_id,
-                            "type": event,
-                            "payload": payload,
-                            "sub_agent_name": sub_agent.name,
-                            "origin": sub_agent.agent_id,
-                        }
-                    )
-
-        except asyncio.CancelledError:
-            self.sub_tasks[task_id].update(
-                {"status": "cancelled", "completed_at": asyncio.get_event_loop().time()}
-            )
-            await self.post_control(
-                {"event": "sub_task_failed", "task_id": task_id, "error": "cancelled"}
-            )
-            raise
-        except Exception as exc:
-            logger.error(f"Sub-agent {task_id} failed", exc_info=True)
-            self.sub_tasks[task_id].update(
-                {
-                    "status": "failed",
-                    "completed_at": asyncio.get_event_loop().time(),
-                    "error": str(exc),
-                }
-            )
-            await self.post_control(
-                {"event": "sub_task_failed", "task_id": task_id, "error": str(exc)}
-            )
-        finally:
-            summary = await self._generate_deployment_summary(
-                sub_agent, task_description
-            )
-            self.sub_tasks[task_id].update(
-                {
-                    "completed_at": asyncio.get_event_loop().time(),
-                    "result": summary,
-                    "progress": 100,
-                    "status": "failed"
-                    if self.sub_tasks[task_id].get("status") == "failed"
-                    else "completed",
-                }
-            )
-
-            await self.post_control(
-                {
-                    "event": "sub_task_completed",
-                    "task_id": task_id,
-                    "summary": summary[:500],
-                    "success": self.sub_tasks[task_id]["status"] == "completed",
-                    "origin": sub_agent.agent_id,
-                }
-            )
-
-            for dep_id in self.sub_tasks[task_id].get("dependents", []):
-                await self.post_control(
-                    {
-                        "event": "dependency_satisfied",
-                        "task_id": dep_id,
-                        "depends_on": task_id,
-                    }
-                )
-
-            await self.post_system_message(
-                f"✅ Step completed: {self.sub_tasks[task_id].get('display_name', task_id)}\n{summary[:300]}{'...' if len(summary) > 300 else ''}"
-            )
-
-            sub_agent.context_manager.prune_sub_agent_noise()
-
-            if task_id in self._sub_task_events:
-                self._sub_task_events[task_id].set()
-
-    def get_sub_tasks(self) -> Dict[str, Dict]:
-        """Cleaned — returns current sub-tasks (uses Task where possible)."""
-        now = asyncio.get_event_loop().time()
-        return {
-            tid: {
-                **info,
-                "runtime_seconds": round(now - info["started_at"], 1)
-                if "started_at" in info
-                else 0,
-                "task_obj": None,  # do not serialize async task
-            }
-            for tid, info in self.sub_tasks.items()
-        }
-
-    async def get_sub_task_status(self, task_id: str) -> Optional[Dict]:
-        return self.sub_tasks.get(task_id)
-
-    def cancel_sub_task(self, task_id: str) -> bool:
-        if task_id not in self.sub_tasks:
-            return False
-        task = self.sub_tasks[task_id].get("task_obj")
-        if task and not task.done():
-            task.cancel()
-            self.sub_tasks[task_id]["status"] = "cancelling"
-            return True
-        return False
-
-    def cleanup_finished_sub_tasks(self, older_than_seconds: int = 3600):
-        """Cleaned cleanup of finished sub-tasks."""
-        now = asyncio.get_event_loop().time()
-        to_remove = [
-            tid
-            for tid, info in self.sub_tasks.items()
-            if info.get("status") in ("completed", "failed", "cancelled")
-            and (now - info.get("completed_at", info["started_at"]))
-            > older_than_seconds
-        ]
-        for tid in to_remove:
-            self.sub_tasks.pop(tid, None)
-
-    def purge_sub_agents(self, only_completed: bool = True, force: bool = False) -> int:
-        """Cleaned purge — removes finished sub-agents."""
-        if not self.sub_tasks:
-            return 0
-
-        now = asyncio.get_event_loop().time()
-        to_purge = []
-        purged_count = 0
-
-        for task_id, info in list(self.sub_tasks.items()):
-            status = info.get("status", "unknown")
-            age = now - info.get("started_at", 0)
-
-            should_purge = only_completed and status in (
-                "completed",
-                "failed",
-                "cancelled",
-            )
-            if not only_completed:
-                should_purge = True
-
-            if status == "running" and age < 30 and not force:
-                continue
-
-            if should_purge:
-                to_purge.append(task_id)
-
-        for task_id in to_purge:
-            info = self.sub_tasks[task_id]
-            task_obj = info.get("task_obj")
-            if task_obj and not task_obj.done() and force:
-                try:
-                    task_obj.cancel()
-                except Exception:
-                    pass
-
-            self.sub_tasks.pop(task_id, None)
-
-            if hasattr(self.context_manager, "_task_contexts"):
-                self.context_manager._task_contexts.pop(task_id, None)
-
-            purged_count += 1
-
-        if purged_count > 0:
-            logger.info(
-                f"Purged {purged_count} sub-agent(s). Remaining: {len(self.sub_tasks)}"
-            )
-
-        return purged_count
-
-    async def _generate_deployment_summary(self, sub_agent: "Agent", task: str) -> str:
-        """Cleaned summary generator — uses centralized PromptBuilder."""
-        tool_results_str = "\n".join(
-            f"• {r.get('name', 'unknown')}: {str(r.get('result', ''))[:350]}"
-            for r in getattr(sub_agent, "tool_results", [])[-12:]
-        )
-
-        prompt = PromptBuilder.task_execution_summary_prompt(task, tool_results_str)
-
-        try:
-            summary = await self.client.chat([{"role": "user", "content": prompt}])
-            return summary.strip()
-        except Exception:
-            return f"✅ The deployment task **{task}** has been completed successfully."
-
-    async def wait_for_sub_agent_event(
-        self,
-        task_id: str,
-        event: str = "sub_task_completed",
-        timeout: Optional[float] = None,
-    ) -> Optional[Dict[str, Any]]:
-        """Cleaned event waiter for sub-agent completion."""
-        if task_id not in self.sub_tasks:
-            logger.warning(f"[wait_for_sub_agent_event] task_id {task_id} not found")
-            return None
-
-        result = await self.wait_for_incoming_message(
-            timeout=timeout,
-            contains=f'"task_id": "{task_id}"',
-            return_content_only=False,
-        )
-
-        if result is None:
-            return None
-
-        if isinstance(result, dict):
-            return result
-
-        if isinstance(result, str):
-            try:
-                import json
-
-                parsed = json.loads(result)
-                if isinstance(parsed, dict):
-                    return parsed
-            except Exception:
-                pass
-            return {"raw_message": result}
-
-        return None
-
-
-class SubAgent(Agent):
-    def __init__(
-        self,
-        parent: "Agent",
-        task_name: str,
-        assigned_tools: Optional[List[str]] = None,
-        custom_system_prompt: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_iterations: Optional[int] = None,
-        profile: Optional[str] = None,
-        agent_id_override: Optional[str] = None,
-    ):
-        loader_config = getattr(parent.loader, "config", {}) or {}
-        agents_section = loader_config.get("agents", {})
-
-        if profile and profile in agents_section:
-            template = dict(agents_section[profile])
-            chosen_profile = profile
-        elif f"sub_{parent.agent_id}" in agents_section:
-            template = dict(agents_section[f"sub_{parent.agent_id}"])
-            chosen_profile = f"sub_{parent.agent_id}"
-        elif "sub_default" in agents_section:
-            template = dict(agents_section["sub_default"])
-            chosen_profile = "sub_default"
-        else:
-            template = {}
-            chosen_profile = "fallback"
-
-        if agent_id_override is None:
-            agent_id_override = f"{parent.agent_id}_sub_unknown"
-
-        super().__init__(
-            agent_id=agent_id_override,
-            loader=parent.loader,
-            app_root=parent.app_root,
-            config_override=template,
-            sub_agent=True,
-        )
-
-        self.message_queue = asyncio.Queue()
-        self.dispatcher = parent.agent_id
-        self.assigned_tools = assigned_tools or None
-        self.task_context = parent.context_manager.create_task_context(task_name)
-
-        self.temperature = temperature or self.config.get("temperature", 0.25)
-        self.max_iterations = max_iterations or self.config.get("max_iterations", 15)
-        self.max_tokens = self.config.get("max_tokens", 20000)
-        self.max_reflections = self.config.get("max_reflections", 4)
-        self.max_sub_agents = self.config.get("max_sub_agents", 4)
-
-        if custom_system_prompt:
-            self.system_prompt = custom_system_prompt
-        elif not self.system_prompt.strip():
-            self.system_prompt = (
-                "You are a precise sub-agent. Complete the assigned task efficiently "
-                "using only the tools you have been given."
-            )
-
-        self.attach_tools(assigned_tools=assigned_tools)
-
-        if hasattr(parent, "workflow") and parent.workflow is not None:
-            self.workflow.inherit_workflows_from_parent(parent.workflow)
-        else:
-            logger.warning(
-                f"Parent agent has no workflow engine - sub-agent '{self.name}' may miss workflows"
-            )
-
-        logger.info(
-            f"[SUB-AGENT] '{self.name}' created successfully | "
-            f"profile='{chosen_profile}' | "
-            f"tools loaded: {len(assigned_tools) if assigned_tools else 'full set'}"
-        )
