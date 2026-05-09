@@ -143,8 +143,7 @@ class WebSocketBridge:
                         )
                     )
                 elif cmd == "stop":
-                    if self.agent._stop_event:
-                        self.agent._stop_event.set()
+                    self.agent.stop_event.set()
                     await websocket.send(json.dumps({"type": "ack", "action": "stop"}))
                 elif cmd == "reload_config":
                     self.agent.reload_config(msg.get("config"))
