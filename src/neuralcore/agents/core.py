@@ -284,7 +284,9 @@ class Agent:
                 )
             else:
                 core = ["FindTool", "GetContext"]
-                self.action_manager.load_tools([t for t in core if t in registry.all_actions])
+                self.action_manager.load_tools(
+                    [t for t in core if t in registry.all_actions]
+                )
         else:
             tool_sets = self.config.get("tool_sets", [])
             if tool_sets:
@@ -713,16 +715,17 @@ class Agent:
             self.state.last_confirmation_request = None
 
     async def _generic_queue_consumer(self) -> None:
-        logger.info(
-            f"[QUEUE LISTENER] Generic background queue listener STARTED for '{self.name}'"
-        )
+        """Pure notifier — does NOT consume messages from the queue.
+        Lets _run_headless_loop / wait_for_incoming_message be the real consumer.
+        This removes the redundancy we are cleaning up for TaskManager."""
+        logger.info(f"[QUEUE LISTENER] Pure notifier started for '{self.name}'")
         try:
             while True:
-                try:
-                    # Wait for any item to appear
-                    await self.message_queue.get()  # blocks until something is there
+                # Just wait for any wake-up signal (no consumption)
+                await self._input_event.wait()
+                self._input_event.clear()
 
-                    self._input_event.set()  # wake the main loop
+                if not self.message_queue.empty():
                     await self.on_background_event(
                         "queue_message_received",
                         {
@@ -730,12 +733,11 @@ class Agent:
                             "agent_id": self.agent_id,
                         },
                     )
-                except asyncio.CancelledError:
-                    break
-                except Exception:
-                    pass
+                # No task_done() needed because we never called get()
+        except asyncio.CancelledError:
+            pass
         finally:
-            logger.info("[QUEUE LISTENER] ... STOPPED")
+            logger.info("[QUEUE LISTENER] Notifier stopped")
 
     async def start_background_queue_listener(self) -> asyncio.Task[None]:
         """Generic persistent background listener for message_queue.
@@ -1054,7 +1056,9 @@ class Agent:
         workflow_name = self._resolve_workflow(workflow_override=workflow)
 
         if not chat_mode:
-            self.action_manager.reset_to_default_package("headless_bootstrap", self.workflow)
+            self.action_manager.reset_to_default_package(
+                "headless_bootstrap", self.workflow
+            )
             self.attach_tools()
 
         try:
@@ -1262,8 +1266,9 @@ class Agent:
 
             # Always ensure core tools
             for core in ["GetContext", "GetDeploymentStatus"]:
-                if core in registry.all_actions and not sub_agent.action_manager.is_loaded(
-                    core
+                if (
+                    core in registry.all_actions
+                    and not sub_agent.action_manager.is_loaded(core)
                 ):
                     sub_agent.action_manager.load_tools([core])
 
