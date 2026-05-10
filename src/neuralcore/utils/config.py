@@ -375,7 +375,6 @@ class ConfigLoader:
         agent.name = agent_cfg.get("name", f"Agent-{agent_id}")
         agent.description = agent_cfg.get("description", "")
         agent.max_iterations = agent_cfg.get("max_iterations", 25)
-        agent.max_reflections = agent_cfg.get("max_reflections", 4)
         agent.temperature = agent_cfg.get("temperature", 0.3)
         agent.max_tokens = agent_cfg.get("max_tokens", 12048)
         agent.system_prompt = agent_cfg.get(

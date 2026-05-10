@@ -74,7 +74,6 @@ class Agent:
         self.name = self.config.get("name", f"Agent-{agent_id}")
         self.description = self.config.get("description", "")
         self.max_iterations = self.config.get("max_iterations", 25)
-        self.max_reflections = self.config.get("max_reflections", 2)
         self.temperature = self.config.get("temperature", 0.75)
         self.max_tokens = self.config.get("max_tokens", 12048)
         self.system_prompt: str = self.config.get(

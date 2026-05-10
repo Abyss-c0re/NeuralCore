@@ -57,7 +57,6 @@ class AgentFactory:
         agent.name = final_config.get("name", f"Agent-{agent_id}")
         agent.description = final_config.get("description", "")
         agent.max_iterations = final_config.get("max_iterations", 25)
-        agent.max_reflections = final_config.get("max_reflections", 4)
         agent.temperature = final_config.get("temperature", 0.3)
         agent.max_tokens = final_config.get("max_tokens", 12048)
         agent.system_prompt = final_config.get(
