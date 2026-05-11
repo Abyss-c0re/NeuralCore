@@ -6,7 +6,7 @@ readme = "README.md"
 authors = [
     { name = "Abyss-c0re", email = "dev@abyss-core.com" }
 ]
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 
 # Runtime dependencies
 dependencies = [
