@@ -44,8 +44,7 @@ clients:
 embeddings:
     use_fastembed: true # ← set false to force original llama.cpp
     fastembed_model: "BAAI/bge-small-en-v1.5"
-    fastembed_local_path: "~/.neuralcore/fastembed"
-    local_files_only: True
+
 
 tools:
   FileEditingTools: #Defined client side, creatae your own first then set them up here. Per agent.
