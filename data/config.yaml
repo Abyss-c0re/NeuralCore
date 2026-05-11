@@ -1,0 +1,116 @@
+clients:
+  main:
+    type: chat
+    base_url: http://localhost:1212/v1
+    model: qwen3.5-9b
+    tokenizer: ../NeuralCore/data/tokenizer/tokenizer.json
+    api_key_env: LLM_API_KEY
+
+    # generation tuning
+    presence_penalty: 1.5
+    top_k: 20
+    temperature: 0.85
+    max_tokens: 64000
+    enable_thinking: false
+
+    system_prompt: "You are a helpful and efficient terminal assistant."
+
+  reasoning:
+    type: chat
+    model: qwen3.5-9b
+    tokenizer: ../NeuralCore/data/tokenizer/tokenizer.json
+
+    # reasoning tuning
+    presence_penalty: 1.2
+    top_k: 30
+    enable_thinking: true
+    temperature: 0.4
+    max_tokens: 64000
+
+    system_prompt: "You are a deep reasoning assistant. Think step by step before answering."
+
+    # 🧠 expose as high-level reasoning tool
+    register_as_tool: True
+    tool_name: ReasoningTools #becomes a set name in the registry
+    description: "Strong reasoning model for planning and complex multi-step tasks"
+
+    methods:
+      - target: ask
+        name: deep_think #this will be actual tool name that can be executed.
+        description: "Careful multi-step reasoning for complex problems"
+        tags: ["reasoning", "planning", "slow", "accurate"]
+
+
+embeddings:
+    use_fastembed: true # ← set false to force original llama.cpp
+    fastembed_model: "BAAI/bge-small-en-v1.5"
+    fastembed_local_path: "~/.neuralcore/fastembed"
+    local_files_only: True
+
+tools:
+  FileEditingTools: #Defined client side, creatae your own first then set them up here. Per agent.
+    modules:
+      - file_set
+
+  ResearchTools:
+    modules:
+      - research_set
+    
+      
+workflows:
+  deploy_agent:
+    name: "deploy_agent" # not part of the framework. #Defined client side, creatae your own first then set them up here. Per agent.
+    description: "Persistent natural conversation mode for Deploy Agent"
+    steps:
+      - name: deploy_agent_loop
+
+agents:
+
+  agent_002:
+    id: "agent_002"
+    name: "Terminal Chat Agent"
+    description: "Terminal assistant - starts in natural chat mode"
+    client: main
+    max_iterations: 100
+    temperature: 0.8
+    max_tokens: 64000
+    max_sub_agents: 5
+    system_prompt: "You are a helpful and efficient terminal assistant."
+    tool_sets:
+      - FileEditingTools
+      - ReasoningTools
+    workflow: deploy_agent
+
+
+# Optional: Global defaults / settings
+settings:
+  default_max_sub_agents: 6
+  sub_agent_temperature: 0.25
+  sub_agent_max_iterations: 15 # ← simple string, this is what you want for chat
+
+app:
+  max_iterations: -1
+  max_tokens: 64000
+  logging_enabled: true
+  log_level: debug
+  log_to_file: true
+  log_to_ui: false
+  log_file: ../NeuralCore/data/neuralvoid.log
+  tool_info_level: compact
+  models_dir: ../NeuralCore/data/models
+  cognition:
+    reranker_enabled: true
+    novelty_threshold: 0.82
+    novelty_k: 100
+    max_rerank_candidates: 100      # ← how many to rerank
+    semantic_weight: 0.45
+    recency_decay_lambda: 0.06
+  knowledge_base:
+    enabled: false
+    base_folder: ../NeuralCore/data/kb"     # Root folder for all indexed data
+    auto_reindex: true                  # Automatically watch for file changes
+    reindex_interval_seconds: 300
+    default_retrieve_k: 100
+    min_similarity_threshold: 0.13
+    direct_match_boost: 0.18
+    direct_match_threshold: 0.23
