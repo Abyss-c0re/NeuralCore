@@ -8,8 +8,6 @@ import json
 from typing import Tuple, List, Dict, Any, AsyncIterable, Optional
 from neuralcore.utils.logger import Logger
 from neuralcore.utils.prompt_builder import PromptBuilder
-from neuralcore.utils.config import get_loader
-from neuralcore.clients.factory import get_clients
 from neuralcore.utils.text_tokenizer import TextTokenizer
 from neuralcore.utils.search import keyword_score, cosine_sim, cosine_sim_batch
 from neuralcore.agents.state import AgentState
@@ -41,23 +39,22 @@ class ContextManager:
     def __init__(self, agent) -> None:
         self.agent = agent
         self.max_tokens = agent.max_tokens
-        clients = get_clients()
-        self.client = clients.get("main")
-        self.embeddings = clients.get("embeddings")
-        loader = get_loader()
-        embed_config = loader.get_client_config("embeddings") or {}
+        # Get client and embeddings from pre-resolved agent attributes
+        self.client = agent.client
+        self.embeddings: Optional[Any] = getattr(agent, "embeddings", None)
+        # Initialize fastembed from agent's pre-resolved embeddings config
+        embed_config = getattr(agent, "embeddings_config", {}) or {}
         self.fast_embedder = self._init_fastembed(embed_config)
         self.tokenizer = None
         try:
             self.tokenizer = TextTokenizer.get_instance()
         except ValueError:
-            if self.client:
-                loader = get_loader()
-                cfg = loader.get_client_config("main")
-                tokenizer_source = cfg.get("tokenizer")
-                if not tokenizer_source:
-                    raise ValueError("Tokenizer not found in main client config")
-                self.tokenizer = TextTokenizer(tokenizer_source)
+            if (
+                self.client
+                and hasattr(self.client, "tokenizer")
+                and self.client.tokenizer
+            ):
+                self.tokenizer = self.client.tokenizer
         if self.client and not getattr(self.client, "tokenizer", None):
             self.client.tokenizer = self.tokenizer
         if self.embeddings and not getattr(self.embeddings, "tokenizer", None):

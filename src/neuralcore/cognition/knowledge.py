@@ -26,11 +26,9 @@ class KnowledgeBase:
     def __init__(self, context_manager):
         self.context_manager = context_manager
         self.agent = context_manager.agent
-        self.loader = context_manager.agent.loader
 
-        # === CONFIG ===
-        app_config = self.loader.get_app_config() or {}
-        kb_config = app_config.get("knowledge_base", {})
+        # === CONFIG (from agent, resolved by factory) ===
+        kb_config = getattr(self.agent, "kb_config", {}) or {}
 
         self.enabled: bool = kb_config.get("enabled", True)
 

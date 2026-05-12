@@ -1,0 +1,68 @@
+clients:
+  main:
+    type: chat
+    base_url: "http://127.0.0.1:9111/v1"
+    model: mock-model
+    tokenizer: data/tokenizer/tokenizer.json
+    api_key: test-key
+    presence_penalty: 0.0
+    top_k: 20
+    temperature: 0.7
+    max_tokens: 4096
+    enable_thinking: false
+    system_prompt: "You are a helpful test assistant."
+
+embeddings:
+  use_fastembed: true
+  fastembed_model: "BAAI/bge-small-en-v1.5"
+
+tools:
+  TestTools:
+    folder: "tests/test_tools"
+    modules:
+      - test_toolset
+
+workflows:
+  deploy_agent:
+    name: "deploy_agent"
+    description: "Test workflow for agent deployment"
+    steps:
+      - name: deploy_agent_loop
+
+agents:
+  test_agent:
+    id: "test_agent"
+    name: "Test Agent"
+    description: "Agent for unit testing"
+    client: main
+    max_iterations: 10
+    temperature: 0.7
+    max_tokens: 4096
+    system_prompt: "You are a helpful test assistant."
+    tool_sets:
+      - TestTools
+    workflow: deploy_agent
+
+settings:
+  default_max_sub_agents: 2
+  sub_agent_temperature: 0.3
+  sub_agent_max_iterations: 5
+
+app:
+  max_iterations: 10
+  max_tokens: 4096
+  logging_enabled: true
+  log_level: debug
+  log_to_file: true
+  log_to_ui: false
+  log_file: /tmp/neuralcore_test.log
+  tool_info_level: compact
+  cognition:
+    reranker_enabled: false
+    novelty_threshold: 0.82
+    novelty_k: 100
+    max_rerank_candidates: 100
+    semantic_weight: 0.45
+    recency_decay_lambda: 0.06
+  knowledge_base:
+    enabled: false

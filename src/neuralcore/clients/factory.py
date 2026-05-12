@@ -24,8 +24,23 @@ class ClientFactory:
         self.clients: Dict[str, Any] = {}
 
     def build(self) -> Dict[str, Any]:
-        """Create all clients defined in the config"""
+        """Create all clients defined in the config. Initializes TextTokenizer singleton."""
         clients_cfg = self.loader.config.get("clients", {})
+
+        # Initialize TextTokenizer singleton from the first client that has a tokenizer
+        from neuralcore.utils.text_tokenizer import TextTokenizer
+
+        if not TextTokenizer._initialized:
+            for name, cfg in clients_cfg.items():
+                tokenizer_source = (
+                    cfg.get("tokenizer") if isinstance(cfg, dict) else None
+                )
+                if tokenizer_source:
+                    try:
+                        TextTokenizer(tokenizer_source=tokenizer_source)
+                    except Exception:
+                        pass
+                    break
 
         for name in clients_cfg:
             self.clients[name] = self._create(name)

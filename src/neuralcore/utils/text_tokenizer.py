@@ -1,6 +1,5 @@
 from typing import List, Optional
 from tokenizers import Tokenizer
-from neuralcore.utils.config import get_loader
 
 
 class TextTokenizer:
@@ -14,22 +13,14 @@ class TextTokenizer:
         cls, tokenizer_source: Optional[str] = None, client_name: Optional[str] = None
     ):
         if cls._instance is None:
-            loader = get_loader()
-
-            client_name = client_name or "main"
-            cfg = loader.get_client_config(client_name)
-
-            resolved_source = tokenizer_source or cfg.get("tokenizer")
-
-            if not resolved_source:
+            if not tokenizer_source:
                 raise ValueError(
-                    f"Tokenizer source not provided and not found in config for client '{client_name}'"
+                    "Tokenizer source must be provided on first initialization"
                 )
 
             instance = super().__new__(cls)
 
-            # now type checker is happy
-            instance._tokenizer_source = resolved_source
+            instance._tokenizer_source = tokenizer_source
             instance._client_name = client_name
 
             cls._instance = instance

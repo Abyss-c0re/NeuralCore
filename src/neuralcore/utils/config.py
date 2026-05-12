@@ -188,61 +188,6 @@ class ConfigLoader:
             except ImportError:
                 pass
 
-    def load_workflow_sets(self, engine, config_override: dict | None = None):
-        """
-        Now supports live workflow dict injection — perfect for VR canvas edits.
-        """
-        global_workflows = (config_override or self.config).get("workflows", {})
-        agent_cfg = getattr(engine.agent, "config", {})
-        agent_workflow_cfg = agent_cfg.get("workflow")
-
-        resolved = {}
-        primary_workflow_name = None
-
-        if isinstance(agent_workflow_cfg, str):
-            workflow_name = agent_workflow_cfg.strip()
-            primary_workflow_name = workflow_name
-            if workflow_name in global_workflows:
-                resolved[workflow_name] = global_workflows[workflow_name]
-            else:
-                resolved[workflow_name] = {"name": workflow_name}
-        elif isinstance(agent_workflow_cfg, dict):
-            # backward compat
-            for wf_key, wf_ref in agent_workflow_cfg.items():
-                if isinstance(wf_ref, dict) and "name" in wf_ref:
-                    wf_name = wf_ref["name"]
-                    resolved[wf_key] = global_workflows.get(wf_name, wf_ref)
-                else:
-                    resolved[wf_key] = wf_ref
-            if resolved:
-                primary_workflow_name = next(iter(resolved.keys()))
-        else:
-            primary_workflow_name = "default"
-            resolved["default"] = global_workflows.get("default", {})
-
-        engine.agent.config["workflow"] = resolved
-
-        if primary_workflow_name and primary_workflow_name in global_workflows:
-            wf_data = global_workflows[primary_workflow_name]
-            engine.current_workflow_name = primary_workflow_name
-            engine.workflow_description = wf_data.get("description", "No description")
-            steps = wf_data.get("steps", getattr(engine, "DEFAULT_WORKFLOW", []))
-            engine.workflow_steps = engine._resolve_steps(steps)
-            print(
-                f"[DEBUG] Using workflow '{primary_workflow_name}' for agent '{engine.agent.name}'"
-            )
-        else:
-            engine.current_workflow_name = "default"
-            engine.workflow_description = "Default workflow"
-            engine.workflow_steps = engine._resolve_steps(
-                getattr(engine, "DEFAULT_WORKFLOW", [])
-            )
-            print(
-                f"[DEBUG] Fallback to default workflow for agent '{engine.agent.name}'"
-            )
-
-        print("[DEBUG] Single-config mode: workflow sets loaded")
-
     # ===================================================================
     # HIGH-LEVEL CREATORS FOR EXTERNAL MANAGMENT
     # ===================================================================
@@ -349,44 +294,6 @@ class ConfigLoader:
         else:
             print(f"[WARNING] Expected dict from YAML, got {type(data).__name__}")
             return {}
-
-    def load_agent_from_config(self, agent_id: str):
-        app_root = self.app_root
-        agent_cfg = self.get_agent_config(agent_id)
-        if not agent_cfg:
-            raise ValueError(f"No agent config found for '{agent_id}'")
-
-        from neuralcore.clients.factory import get_clients
-
-        clients = get_clients()
-        client_name = agent_cfg.get("client")
-        if client_name not in clients:
-            raise ValueError(f"Client '{client_name}' not found for agent '{agent_id}'")
-        client = clients[client_name]
-
-        from neuralcore.agents.core import Agent
-
-        agent = Agent(
-            agent_id=agent_cfg.get("id", agent_id),
-            loader=self,
-            app_root=app_root,
-        )
-        agent.client = client
-        agent.name = agent_cfg.get("name", f"Agent-{agent_id}")
-        agent.description = agent_cfg.get("description", "")
-        agent.max_iterations = agent_cfg.get("max_iterations", 25)
-        agent.temperature = agent_cfg.get("temperature", 0.3)
-        agent.max_tokens = agent_cfg.get("max_tokens", 12048)
-        agent.system_prompt = agent_cfg.get(
-            "system_prompt", getattr(client, "system_prompt", "")
-        )
-
-        tools_to_load = agent_cfg.get("tool_sets", [])
-        if tools_to_load:
-            self.load_tool_sets(sets_to_load=tools_to_load)
-
-        print(f"[INFO] Agent '{agent.name}' created from config")
-        return agent
 
 
 # --------------------------

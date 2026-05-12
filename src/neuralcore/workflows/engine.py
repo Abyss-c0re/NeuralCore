@@ -7,8 +7,6 @@ from neuralcore.agents.state import AgentState
 from neuralcore.utils.prompt_builder import PromptBuilder
 from neuralcore.utils.logger import Logger
 
-from neuralcore.utils.config import get_loader
-
 
 logger = Logger.get_logger()
 
@@ -80,8 +78,6 @@ class WorkflowEngine:
         - Loads/overides from YAML/config (live support)
         - Applies primary workflow
         """
-        loader = get_loader()
-
         # ── 1. SYNC DECORATOR REGISTRY ──
         # Workflows
         for name, wf_data in self.workflow.workflows.items():
@@ -118,11 +114,11 @@ class WorkflowEngine:
             )
 
         # ── 2. LOAD / OVERRIDE FROM YAML / LIVE CONFIG ──
-        global_workflows = (
-            config_override.get("workflows", {})
-            if config_override
-            else loader.config.get("workflows", {})
-        )
+        if config_override:
+            global_workflows = config_override.get("workflows", {})
+        else:
+            # Get workflow config from the workflow factory (already populated by ConfigLoader)
+            global_workflows = getattr(self.workflow, "workflows", {})
 
         for name, wf_data in global_workflows.items():
             if name not in self.registered_workflows:
@@ -979,7 +975,8 @@ class WorkflowEngine:
             raise ValueError(f"Loop '{loop_name}' not found.")
 
         # === MERGE YAML STEPS INTO THE LOOP ===
-        self.workflow.merge_yaml_loop_steps(self)
+        loops_config = getattr(self.agent, "config", {}).get("loops", {})
+        self.workflow.merge_yaml_loop_steps(self, loops_config=loops_config)
 
         state: AgentState = (
             initial_state if isinstance(initial_state, AgentState) else AgentState()
@@ -1519,9 +1516,9 @@ class WorkflowEngine:
                 if "client" in overrides:
                     client_name = overrides["client"]
                     try:
-                        from neuralcore.clients.factory import get_clients
+                        from neuralcore.clients.factory import get_client_factory
 
-                        all_clients = get_clients()
+                        all_clients = get_client_factory().clients
                         if client_name in all_clients:
                             self.agent.client = all_clients[client_name]
                             client_overridden = True
@@ -1546,7 +1543,9 @@ class WorkflowEngine:
                 if "toolset" in overrides:
                     toolset_value = overrides.pop("toolset")
                     if toolset_value:
-                        loaded_count = self.agent.action_manager.load_toolsets(toolset_value)
+                        loaded_count = self.agent.action_manager.load_toolsets(
+                            toolset_value
+                        )
                         yield (
                             "toolset_switched",
                             {

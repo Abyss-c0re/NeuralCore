@@ -28,11 +28,8 @@ class KnowledgeConsolidator:
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
         self.concept_graph: Dict[str, Any] = {}
 
-        # ====================== CONFIG ======================
-        app_config = getattr(getattr(self.agent, "loader", None), "config", {}).get(
-            "app", {}
-        )
-        cognition_config = app_config.get("cognition", {})
+        # ====================== CONFIG (from agent, resolved by factory) ======================
+        cognition_config = getattr(agent, "cognition_config", {}) or {}
 
         self.reranker_enabled: bool = cognition_config.get("reranker_enabled", True)
         self.novelty_threshold: float = cognition_config.get("novelty_threshold", 0.85)
@@ -516,11 +513,7 @@ class KnowledgeConsolidator:
     async def _get_novel_relevant(self, goal: str, k: Optional[int] = None):
         """Get novel + relevant items with configurable k."""
         if k is None:
-            cognition_config = (
-                getattr(getattr(self.agent, "loader", None), "config", {})
-                .get("app", {})
-                .get("cognition", {})
-            )
+            cognition_config = getattr(self.agent, "cognition_config", {}) or {}
             k = cognition_config.get("novelty_k", self.max_rerank_candidates)
 
         candidates = self._get_all_candidates()
@@ -640,7 +633,7 @@ class KnowledgeConsolidator:
             logger.error(f"[TRAINING] Failed during scheduling: {e}", exc_info=True)
 
     def _get_model_path(self) -> str:
-        app_config = getattr(self.agent.loader, "config", {}).get("app", {})
+        app_config = getattr(self.agent, "app_config", {}) or {}
         models_dir = app_config.get("models_dir", "~/.neuralcore/models")
         path = Path(os.path.expanduser(models_dir)).resolve()
         path.mkdir(parents=True, exist_ok=True)

@@ -3,7 +3,6 @@ from typing import Any, Callable, Dict, List, Optional, Union
 from inspect import signature, iscoroutinefunction
 
 
-from neuralcore.utils.config import get_loader
 from neuralcore.workflows.engine import WorkflowEngine
 from neuralcore.utils.search import TOKENIZER, keyword_score, fuzzy_score
 from neuralcore.utils.logger import Logger
@@ -568,10 +567,12 @@ class Workflow:
     def get_condition(self, name: str) -> Optional[Callable]:
         return self.conditions.get(name)
 
-    def merge_yaml_loop_steps(self, engine: "WorkflowEngine"):
+    def merge_yaml_loop_steps(
+        self, engine: "WorkflowEngine", loops_config: Optional[Dict[str, Any]] = None
+    ):
         """Merge steps from YAML 'loops:' section into decorator-defined loops."""
-        loader = get_loader()
-        for loop_name, loop_cfg in loader.config.get("loops", {}).items():
+        resolved_loops = loops_config or {}
+        for loop_name, loop_cfg in resolved_loops.items():
             if loop_name not in self.loops:
                 logger.warning(
                     f"Loop '{loop_name}' defined in YAML but not registered via @workflow.loop"

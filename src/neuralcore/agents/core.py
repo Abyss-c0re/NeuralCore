@@ -7,7 +7,6 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Union
 from neuralcore.workflows.engine import WorkflowEngine
 from neuralcore.workflows.registry import workflow
 from neuralcore.cognition.memory import ContextManager
-from neuralcore.clients.factory import get_clients
 from neuralcore.utils.logger import Logger
 
 from neuralcore.tasks.manager import TaskManager
@@ -27,59 +26,48 @@ class Agent:
     def __init__(
         self,
         agent_id: str,
-        loader,
+        name: str,
+        description: str,
+        client,
         app_root: Path,
-        config_file: Optional[Path] = None,
-        config_override: Optional[dict] = None,
+        system_prompt: str = "",
+        max_iterations: int = 25,
+        temperature: float = 0.75,
+        max_tokens: int = 12048,
         config: Optional[dict] = None,
+        loader=None,
         sub_agent: bool = False,
         parent: Optional["Agent"] = None,
         action_registry: ActionRegistry = registry,
+        app_config: Optional[dict] = None,
+        embeddings_config: Optional[dict] = None,
     ):
         self.agent_id: str = agent_id
+        self.name = name
+        self.description = description
+        self.client = client
         self.loader = loader
         self.app_root = app_root
+        self.system_prompt: str = system_prompt or getattr(client, "system_prompt", "")
+        self.max_iterations = max_iterations
+        self.temperature = temperature
+        self.max_tokens = max_tokens
         self.registry = action_registry
+
+        # Config dict kept for runtime reference (workflow/tool_sets lookup)
+        self.config = dict(config) if isinstance(config, dict) else {}
+
+        # Resolved config sections for infrastructure components
+        self.app_config = app_config or {}
+        self.cognition_config = self.app_config.get("cognition", {})
+        self.kb_config = self.app_config.get("knowledge_base", {})
+        self.embeddings_config = embeddings_config or {}
 
         # ====================== STATE - THE SOURCE OF TRUTH ======================
         self.state: AgentState = AgentState(agent_id=agent_id)
 
-        # ====================== CONFIG HANDLING ======================
         self.sub_agent: bool = sub_agent
         self.parent = parent
-
-        if config is not None and isinstance(config, dict):
-            self.config = dict(config)
-        # 2. config_override (still supported for SubAgent and direct calls)
-        elif config_override is not None:
-            self.config = dict(config_override)
-        # 3. Legacy fallback (old direct Agent(...) calls)
-        else:
-            if config_file:
-                full_config = self.loader.parse_config(config_file)
-                agent_cfg = full_config.get("agents", {}).get(agent_id, {})
-                self.config = dict(agent_cfg) if isinstance(agent_cfg, dict) else {}
-            else:
-                self.config = self.loader.get_agent_config(agent_id)
-
-        if not isinstance(self.config, dict) or not self.config:
-            raise ValueError(f"Agent config for '{agent_id}' is empty or not found")
-
-        clients = get_clients()
-        client_name = self.config.get("client", "main")
-        if client_name not in clients:
-            raise ValueError(f"Client '{client_name}' not found for agent '{agent_id}'")
-        self.client = clients[client_name]
-
-        self.name = self.config.get("name", f"Agent-{agent_id}")
-        self.description = self.config.get("description", "")
-        self.max_iterations = self.config.get("max_iterations", 25)
-        self.temperature = self.config.get("temperature", 0.75)
-        self.max_tokens = self.config.get("max_tokens", 12048)
-        self.system_prompt: str = self.config.get(
-            "system_prompt",
-            getattr(self.client, "system_prompt", ""),
-        )
 
         # ====================== INFRASTRUCTURE ======================
 
@@ -244,7 +232,14 @@ class Agent:
     # ====================== CONFIG & TOOLS ======================
     def reload_config(self, new_config: dict | str | Path) -> None:
         try:
-            parsed = self.loader.parse_config(new_config)
+            if isinstance(new_config, dict):
+                parsed = new_config
+            elif self.loader is not None:
+                parsed = self.loader.parse_config(new_config)
+            else:
+                logger.error("reload_config: no loader and config is not a dict")
+                return
+
             agent_cfg = parsed.get("agents", {}).get(self.agent_id, {}) or parsed
 
             if isinstance(agent_cfg, dict) and agent_cfg:
@@ -280,7 +275,7 @@ class Agent:
                 )
         else:
             tool_sets = self.config.get("tool_sets", [])
-            if tool_sets:
+            if tool_sets and self.loader:
                 self.loader.load_tool_sets(sets_to_load=tool_sets)
             for action_name in list(registry.all_actions.keys()):
                 try:
@@ -298,10 +293,11 @@ class Agent:
         if isinstance(workflow_cfg, dict) and workflow_cfg:
             return next(iter(workflow_cfg.keys()))
 
-        if hasattr(self.loader, "config"):
-            global_workflows = self.loader.config.get("workflows", {})
-            if global_workflows:
-                return next(iter(global_workflows.keys()))
+        # Check registered workflows in the engine
+        if hasattr(self, "workflow") and hasattr(self.workflow, "registered_workflows"):
+            registered = self.workflow.registered_workflows
+            if registered:
+                return next(iter(registered.keys()))
 
         logger.warning("No workflow found, using fallback")
         return "deploy_chat"
