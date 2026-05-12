@@ -15,7 +15,7 @@ import asyncio
 import json
 import time
 import uuid
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 from aiohttp import web
 
 
@@ -38,8 +38,9 @@ class ResponseEngine:
     def register_tool_handler(self, matcher: Callable, responder: Callable):
         self._tool_handlers.append((matcher, responder))
 
-    def generate_response(self, messages: List[Dict],
-                          tools: Optional[List[Dict]] = None) -> Dict[str, Any]:
+    def generate_response(
+        self, messages: List[Dict], tools: Optional[List[Dict]] = None
+    ) -> Dict[str, Any]:
         """Analyze messages and produce a response dict with content and/or tool_calls."""
         # Custom tool handlers
         if tools:
@@ -61,8 +62,9 @@ class ResponseEngine:
 
         return self._default_analyze(messages, tools)
 
-    def _default_analyze(self, messages: List[Dict],
-                         tools: Optional[List[Dict]] = None) -> Dict[str, Any]:
+    def _default_analyze(
+        self, messages: List[Dict], tools: Optional[List[Dict]] = None
+    ) -> Dict[str, Any]:
         """Intelligent default response based on message content analysis."""
         last_user = self._get_last_user_message(messages)
         all_text = " ".join(
@@ -74,8 +76,10 @@ class ResponseEngine:
 
         # Intent classification
         if "classify" in lower and ("casual" in lower or "task" in lower):
-            if any(w in last_user.lower() for w in
-                   ["hello", "hi", "hey", "thanks", "joke", "how are"]):
+            if any(
+                w in last_user.lower()
+                for w in ["hello", "hi", "hey", "thanks", "joke", "how are"]
+            ):
                 return {"content": "CASUAL", "tool_calls": None}
             return {"content": "TASK", "tool_calls": None}
 
@@ -84,20 +88,27 @@ class ResponseEngine:
             return {"content": "SIMPLE", "tool_calls": None}
 
         # Task decomposition / planning
-        if ("task decomposition" in lower or "break this request" in lower
-                or "actionable steps" in lower or "minimal number of clear" in lower):
+        if (
+            "task decomposition" in lower
+            or "break this request" in lower
+            or "actionable steps" in lower
+            or "minimal number of clear" in lower
+        ):
             return {"content": self._generate_plan(last_user), "tool_calls": None}
 
         # Validation (YES/NO)
-        if ("validation" in lower or "has the expected outcome" in lower
-                or "fully achieved" in lower):
+        if (
+            "validation" in lower
+            or "has the expected outcome" in lower
+            or "fully achieved" in lower
+        ):
             return {"content": "YES", "tool_calls": None}
 
         # Tool result messages (after tool execution) -- complete the task
         if any(m.get("role") == "tool" for m in messages):
             return {
                 "content": "Task completed successfully. [FINAL_ANSWER_COMPLETE]",
-                "tool_calls": None
+                "tool_calls": None,
             }
 
         # Tool calling -- if tools are provided and action is needed
@@ -107,18 +118,20 @@ class ResponseEngine:
         # JSON response requests
         if "json" in lower and ("topic_name" in lower or "topic_description" in lower):
             return {
-                "content": json.dumps({
-                    "topic_name": "General",
-                    "topic_description": "General conversation"
-                }),
-                "tool_calls": None
+                "content": json.dumps(
+                    {
+                        "topic_name": "General",
+                        "topic_description": "General conversation",
+                    }
+                ),
+                "tool_calls": None,
             }
 
         # Multi-query generation
         if "search queries" in lower and "json array" in lower:
             return {
                 "content": json.dumps(["query one", "query two", "query three"]),
-                "tool_calls": None
+                "tool_calls": None,
             }
 
         # Default chat response
@@ -132,31 +145,44 @@ class ResponseEngine:
                     return content
                 if isinstance(content, list):
                     return " ".join(
-                        item.get("text", "") for item in content
+                        item.get("text", "")
+                        for item in content
                         if isinstance(item, dict)
                     )
         return ""
 
     def _generate_plan(self, query: str) -> str:
-        return json.dumps({
-            "steps": [{
-                "description": f"Execute: {query[:100]}",
-                "dependencies": [],
-                "suggested_tool": "",
-                "expected_outcome": "Task completed successfully"
-            }]
-        })
+        return json.dumps(
+            {
+                "steps": [
+                    {
+                        "description": f"Execute: {query[:100]}",
+                        "dependencies": [],
+                        "suggested_tool": "",
+                        "expected_outcome": "Task completed successfully",
+                    }
+                ]
+            }
+        )
 
     def _should_use_tools(self, message: str, tools: List[Dict]) -> bool:
         action_words = [
-            "read", "write", "search", "find", "create",
-            "execute", "list", "run", "analyze"
+            "read",
+            "write",
+            "search",
+            "find",
+            "create",
+            "execute",
+            "list",
+            "run",
+            "analyze",
         ]
         msg_lower = message.lower()
         return any(w in msg_lower for w in action_words) and len(tools) > 0
 
-    def _generate_tool_call(self, messages: List[Dict],
-                            tools: List[Dict]) -> Dict[str, Any]:
+    def _generate_tool_call(
+        self, messages: List[Dict], tools: List[Dict]
+    ) -> Dict[str, Any]:
         last_msg = self._get_last_user_message(messages)
         msg_lower = last_msg.lower()
 
@@ -190,14 +216,13 @@ class ResponseEngine:
 
         return {
             "content": None,
-            "tool_calls": [{
-                "id": f"call_{uuid.uuid4().hex[:8]}",
-                "type": "function",
-                "function": {
-                    "name": fn["name"],
-                    "arguments": json.dumps(args)
+            "tool_calls": [
+                {
+                    "id": f"call_{uuid.uuid4().hex[:8]}",
+                    "type": "function",
+                    "function": {"name": fn["name"], "arguments": json.dumps(args)},
                 }
-            }]
+            ],
         }
 
     def _contextual_reply(self, message: str) -> str:
@@ -246,35 +271,46 @@ class MockLLMServer:
             await self._runner.cleanup()
 
     async def _handle_models(self, request: web.Request) -> web.Response:
-        return web.json_response({
-            "object": "list",
-            "data": [{"id": "mock-model", "object": "model", "owned_by": "test"}]
-        })
+        return web.json_response(
+            {
+                "object": "list",
+                "data": [{"id": "mock-model", "object": "model", "owned_by": "test"}],
+            }
+        )
 
     async def _handle_embeddings(self, request: web.Request) -> web.Response:
         import numpy as np
+
         body = await request.json()
         dim = 384
         seed = hash(str(body.get("input", ""))) % (2**31)
         rng = np.random.RandomState(seed)
         vec = rng.randn(dim).astype(float)
         vec = vec / (np.linalg.norm(vec) + 1e-9)
-        return web.json_response({
-            "object": "list",
-            "data": [{"object": "embedding", "embedding": vec.tolist(), "index": 0}],
-            "model": body.get("model", "mock-embed"),
-            "usage": {"prompt_tokens": 10, "total_tokens": 10}
-        })
+        return web.json_response(
+            {
+                "object": "list",
+                "data": [
+                    {"object": "embedding", "embedding": vec.tolist(), "index": 0}
+                ],
+                "model": body.get("model", "mock-embed"),
+                "usage": {"prompt_tokens": 10, "total_tokens": 10},
+            }
+        )
 
-    async def _handle_chat(self, request: web.Request) -> web.Response:
+    async def _handle_chat(
+        self, request: web.Request
+    ) -> Union[web.Response, web.StreamResponse]:
         body = await request.json()
-        self.request_log.append({
-            "timestamp": time.time(),
-            "model": body.get("model"),
-            "stream": body.get("stream", False),
-            "message_count": len(body.get("messages", [])),
-            "has_tools": bool(body.get("tools")),
-        })
+        self.request_log.append(
+            {
+                "timestamp": time.time(),
+                "model": body.get("model"),
+                "stream": body.get("stream", False),
+                "message_count": len(body.get("messages", [])),
+                "has_tools": bool(body.get("tools")),
+            }
+        )
 
         messages = body.get("messages", [])
         tools = body.get("tools")
@@ -290,35 +326,38 @@ class MockLLMServer:
         else:
             return self._non_stream_response(content, tool_calls, model)
 
-    def _non_stream_response(self, content: Optional[str],
-                              tool_calls: Optional[List[Dict]],
-                              model: str) -> web.Response:
+    def _non_stream_response(
+        self, content: Optional[str], tool_calls: Optional[List[Dict]], model: str
+    ) -> web.Response:
         message: Dict[str, Any] = {"role": "assistant", "content": content}
         if tool_calls:
             message["tool_calls"] = tool_calls
         finish_reason = "tool_calls" if tool_calls else "stop"
 
-        return web.json_response({
-            "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
-            "object": "chat.completion",
-            "created": int(time.time()),
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "message": message,
-                "finish_reason": finish_reason
-            }],
-            "usage": {
-                "prompt_tokens": 50,
-                "completion_tokens": max(len(content or "") // 4, 10),
-                "total_tokens": 60 + max(len(content or "") // 4, 10)
+        return web.json_response(
+            {
+                "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": model,
+                "choices": [
+                    {"index": 0, "message": message, "finish_reason": finish_reason}
+                ],
+                "usage": {
+                    "prompt_tokens": 50,
+                    "completion_tokens": max(len(content or "") // 4, 10),
+                    "total_tokens": 60 + max(len(content or "") // 4, 10),
+                },
             }
-        })
+        )
 
-    async def _stream_response(self, request: web.Request,
-                                content: Optional[str],
-                                tool_calls: Optional[List[Dict]],
-                                model: str) -> web.StreamResponse:
+    async def _stream_response(
+        self,
+        request: web.Request,
+        content: Optional[str],
+        tool_calls: Optional[List[Dict]],
+        model: str,
+    ) -> web.StreamResponse:
         """SSE streaming response compatible with openai.AsyncOpenAI."""
         resp = web.StreamResponse(
             status=200,
@@ -326,7 +365,7 @@ class MockLLMServer:
                 "Content-Type": "text/event-stream",
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
-            }
+            },
         )
         await resp.prepare(request)
 
@@ -341,57 +380,82 @@ class MockLLMServer:
                 args_str = fn.get("arguments", "{}")
 
                 # First chunk: tool call id + name
-                await _write_chunk({
-                    "id": chat_id,
-                    "object": "chat.completion.chunk",
-                    "created": int(time.time()),
-                    "model": model,
-                    "choices": [{
-                        "index": 0,
-                        "delta": {
-                            "role": "assistant",
-                            "content": None,
-                            "tool_calls": [{
-                                "index": tc_idx,
-                                "id": tc.get("id", f"call_{uuid.uuid4().hex[:8]}"),
-                                "type": "function",
-                                "function": {"name": fn.get("name", ""), "arguments": ""}
-                            }]
-                        },
-                        "finish_reason": None
-                    }]
-                })
+                await _write_chunk(
+                    {
+                        "id": chat_id,
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": model,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {
+                                    "role": "assistant",
+                                    "content": None,
+                                    "tool_calls": [
+                                        {
+                                            "index": tc_idx,
+                                            "id": tc.get(
+                                                "id", f"call_{uuid.uuid4().hex[:8]}"
+                                            ),
+                                            "type": "function",
+                                            "function": {
+                                                "name": fn.get("name", ""),
+                                                "arguments": "",
+                                            },
+                                        }
+                                    ],
+                                },
+                                "finish_reason": None,
+                            }
+                        ],
+                    }
+                )
                 await asyncio.sleep(0.005)
 
                 # Stream arguments in chunks
                 chunk_size = max(10, len(args_str) // 3)
                 for i in range(0, len(args_str), chunk_size):
-                    await _write_chunk({
-                        "id": chat_id,
-                        "object": "chat.completion.chunk",
-                        "created": int(time.time()),
-                        "model": model,
-                        "choices": [{
-                            "index": 0,
-                            "delta": {
-                                "tool_calls": [{
-                                    "index": tc_idx,
-                                    "function": {"arguments": args_str[i:i + chunk_size]}
-                                }]
-                            },
-                            "finish_reason": None
-                        }]
-                    })
+                    await _write_chunk(
+                        {
+                            "id": chat_id,
+                            "object": "chat.completion.chunk",
+                            "created": int(time.time()),
+                            "model": model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "tool_calls": [
+                                            {
+                                                "index": tc_idx,
+                                                "function": {
+                                                    "arguments": args_str[
+                                                        i : i + chunk_size
+                                                    ]
+                                                },
+                                            }
+                                        ]
+                                    },
+                                    "finish_reason": None,
+                                }
+                            ],
+                        }
+                    )
                     await asyncio.sleep(0.005)
 
             # Finish
-            await _write_chunk({
-                "id": chat_id,
-                "object": "chat.completion.chunk",
-                "created": int(time.time()),
-                "model": model,
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]
-            })
+            await _write_chunk(
+                {
+                    "id": chat_id,
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": model,
+                    "choices": [
+                        {"index": 0, "delta": {}, "finish_reason": "tool_calls"}
+                    ],
+                }
+            )
 
         elif content:
             words = content.split(" ")
@@ -400,40 +464,51 @@ class MockLLMServer:
                 delta = {"content": token}
                 if i == 0:
                     delta["role"] = "assistant"
-                await _write_chunk({
+                await _write_chunk(
+                    {
+                        "id": chat_id,
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": model,
+                        "choices": [
+                            {"index": 0, "delta": delta, "finish_reason": None}
+                        ],
+                    }
+                )
+                await asyncio.sleep(0.002)
+
+            await _write_chunk(
+                {
                     "id": chat_id,
                     "object": "chat.completion.chunk",
                     "created": int(time.time()),
                     "model": model,
-                    "choices": [{
-                        "index": 0,
-                        "delta": delta,
-                        "finish_reason": None
-                    }]
-                })
-                await asyncio.sleep(0.002)
-
-            await _write_chunk({
-                "id": chat_id,
-                "object": "chat.completion.chunk",
-                "created": int(time.time()),
-                "model": model,
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
-            })
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                }
+            )
         else:
-            await _write_chunk({
-                "id": chat_id,
-                "object": "chat.completion.chunk",
-                "created": int(time.time()),
-                "model": model,
-                "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": "stop"}]
-            })
+            await _write_chunk(
+                {
+                    "id": chat_id,
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"role": "assistant", "content": ""},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                }
+            )
 
         await resp.write(b"data: [DONE]\n\n")
         return resp
 
 
 if __name__ == "__main__":
+
     async def main():
         server = MockLLMServer(port=9111)
         await server.start()

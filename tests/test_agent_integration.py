@@ -1,8 +1,7 @@
 """Integration tests for the Agent using mock LLM server."""
+
 import sys
-import asyncio
 import pytest
-import pytest_asyncio
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -14,13 +13,17 @@ TOKENIZER_PATH = str(PROJECT_ROOT / "data" / "tokenizer" / "tokenizer.json")
 
 def _reset_all():
     import neuralcore.utils.config as cfg_mod
+
     cfg_mod.loader = None
     import neuralcore.clients.factory as cf_mod
+
     cf_mod._factory = None
     from neuralcore.utils.text_tokenizer import TextTokenizer
+
     TextTokenizer._instance = None
     TextTokenizer._initialized = False
     from neuralcore.actions.registry import registry
+
     registry.sets.clear()
     registry.all_actions.clear()
     registry._index.clear()
@@ -39,12 +42,14 @@ def _create_agent(mock_server):
     cfg_mod.loader = loader
 
     from neuralcore.utils.logger import Logger
+
     Logger._logger = None
     Logger._config = None
     Logger.get_logger()
 
     from neuralcore.clients.factory import ClientFactory
     import neuralcore.clients.factory as cf_mod
+
     cf_mod._factory = None
     factory = ClientFactory(loader)
     factory.build()
@@ -52,6 +57,7 @@ def _create_agent(mock_server):
 
     # Force reload of test_toolset to re-register decorators
     import importlib
+
     if "test_toolset" in sys.modules:
         importlib.reload(sys.modules["test_toolset"])
     loader.load_tool_sets(sets_to_load=["TestTools"])
@@ -82,6 +88,7 @@ class TestAgentCreation:
         agent = _create_agent(mock_server)
         # Tools are registered in the global registry
         from neuralcore.actions.registry import registry
+
         assert len(registry.all_actions) > 0
 
 
@@ -148,18 +155,20 @@ class TestAgentMessaging:
 class TestAgentToolExecution:
     async def test_tool_call_via_client(self, mock_server):
         agent = _create_agent(mock_server)
-        tools = [{
-            "type": "function",
-            "function": {
-                "name": "echo_tool",
-                "description": "Echo input",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"message": {"type": "string"}},
-                    "required": ["message"]
-                }
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "echo_tool",
+                    "description": "Echo input",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"message": {"type": "string"}},
+                        "required": ["message"],
+                    },
+                },
             }
-        }]
+        ]
         result = await agent.client.call_tools(
             messages=[{"role": "user", "content": "Read the test file"}],
             tools=tools,

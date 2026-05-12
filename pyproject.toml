@@ -11,6 +11,7 @@ requires-python = ">=3.12"
 # Runtime dependencies
 dependencies = [
     "aiofiles>=25.1.0",
+    "aiohttp>=3.13.5",
     "fastembed>=0.8.0",
     "lightgbm>=4.6.0",
     "numpy>=2.4.3",

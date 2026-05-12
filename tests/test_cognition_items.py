@@ -1,14 +1,14 @@
 """Unit tests for neuralcore.cognition.items -- KnowledgeItem and Topic."""
+
 import sys
-import asyncio
+
 import numpy as np
 import pytest
 from pathlib import Path
+from neuralcore.cognition.items import KnowledgeItem, Topic
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
-
-from neuralcore.cognition.items import KnowledgeItem, Topic
 
 
 class TestKnowledgeItem:

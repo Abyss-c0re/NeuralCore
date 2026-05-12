@@ -1,7 +1,6 @@
 """Unit tests for neuralcore.agents.state -- AgentState."""
+
 import sys
-import time
-import pytest
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -10,8 +9,10 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 def _reset():
     import neuralcore.utils.config as cfg_mod
+
     cfg_mod.loader = None
     from neuralcore.utils.text_tokenizer import TextTokenizer
+
     TextTokenizer._instance = None
     TextTokenizer._initialized = False
 
@@ -19,6 +20,7 @@ def _reset():
 def _setup():
     _reset()
     from neuralcore.utils.config import ConfigLoader
+
     ConfigLoader(
         cli_path=str(PROJECT_ROOT / "data" / "test_config.yaml"),
         app_root=PROJECT_ROOT,
@@ -29,6 +31,7 @@ class TestAgentState:
     def setup_method(self):
         _setup()
         from neuralcore.agents.state import AgentState
+
         self.state = AgentState(agent_id="test-001")
 
     def test_initial_state(self):
@@ -81,7 +84,11 @@ class TestAgentState:
     def test_build_tasks_from_plan(self):
         steps = [
             {"description": "Step 1", "dependencies": [], "expected_outcome": "Done 1"},
-            {"description": "Step 2", "dependencies": [0], "expected_outcome": "Done 2"},
+            {
+                "description": "Step 2",
+                "dependencies": [0],
+                "expected_outcome": "Done 2",
+            },
         ]
         self.state.task = "Test goal"
         self.state.build_tasks_from_plan(steps)
@@ -90,7 +97,9 @@ class TestAgentState:
         assert self.state.root_task is not None
 
     def test_get_current_task(self):
-        steps = [{"description": "Only step", "dependencies": [], "expected_outcome": "OK"}]
+        steps = [
+            {"description": "Only step", "dependencies": [], "expected_outcome": "OK"}
+        ]
         self.state.build_tasks_from_plan(steps)
         ct = self.state.get_current_task()
         assert ct is not None
@@ -140,7 +149,9 @@ class TestAgentState:
         assert self.state.wait_completed is True
 
     def test_prepare_messages(self):
-        msgs = self.state.prepare_messages("Hello", system_prompt="System here", reset=True)
+        msgs = self.state.prepare_messages(
+            "Hello", system_prompt="System here", reset=True
+        )
         assert len(msgs) >= 1
         assert any(m["role"] == "user" for m in msgs)
 

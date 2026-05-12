@@ -1,12 +1,11 @@
 """Unit tests for neuralcore.tasks.task -- Task and TaskStatus."""
+
 import sys
-import pytest
 from pathlib import Path
+from neuralcore.tasks.task import Task, TaskStatus
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
-
-from neuralcore.tasks.task import Task, TaskStatus
 
 
 class TestTaskStatus:

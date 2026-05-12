@@ -1,12 +1,12 @@
 """Unit tests for neuralcore.actions -- Action, ActionSet, ActionRegistry."""
+
 import sys
 import pytest
 from pathlib import Path
+from neuralcore.actions.actions import Action, ActionSet
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
-
-from neuralcore.actions.actions import Action, ActionSet
 
 
 class TestAction:
@@ -94,6 +94,7 @@ class TestAction:
 class TestActionSet:
     def test_creation_and_add(self):
         aset = ActionSet(name="TestSet")
+
         async def tool1(x: str) -> str:
             return x
 
@@ -109,6 +110,7 @@ class TestActionSet:
 
     def test_get_llm_tools(self):
         aset = ActionSet(name="TestSet")
+
         async def tool1(x: str) -> str:
             return x
 
@@ -128,8 +130,10 @@ class TestActionSet:
 class TestActionRegistry:
     def _make_registry(self):
         from neuralcore.actions.registry import ActionRegistry
+
         reg = ActionRegistry()
         aset = ActionSet(name="MySet")
+
         async def tool1(msg: str) -> str:
             return msg
 

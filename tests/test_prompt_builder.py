@@ -1,6 +1,6 @@
 """Unit tests for neuralcore.utils.prompt_builder -- PromptBuilder."""
+
 import sys
-import pytest
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -9,11 +9,14 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 def _setup():
     import neuralcore.utils.config as cfg_mod
+
     cfg_mod.loader = None
     from neuralcore.utils.text_tokenizer import TextTokenizer
+
     TextTokenizer._instance = None
     TextTokenizer._initialized = False
     from neuralcore.utils.config import ConfigLoader
+
     ConfigLoader(
         cli_path=str(PROJECT_ROOT / "data" / "test_config.yaml"),
         app_root=PROJECT_ROOT,
@@ -24,6 +27,7 @@ class TestPromptBuilder:
     def setup_method(self):
         _setup()
         from neuralcore.utils.prompt_builder import PromptBuilder
+
         self.pb = PromptBuilder
 
     def test_final_answer_marker(self):
@@ -70,6 +74,7 @@ class TestPromptBuilder:
 
     def test_step_validation_prompt(self):
         from neuralcore.tasks.task import Task
+
         task = Task(description="Read file", expected_outcome="File contents returned")
         result = self.pb.step_validation_prompt(task, "file data here", 3, 0)
         assert "Read file" in result

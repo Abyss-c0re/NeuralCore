@@ -1,6 +1,6 @@
 """Unit tests for neuralcore.workflows.registry -- Workflow."""
+
 import sys
-import pytest
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -9,11 +9,14 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 def _setup():
     import neuralcore.utils.config as cfg_mod
+
     cfg_mod.loader = None
     from neuralcore.utils.text_tokenizer import TextTokenizer
+
     TextTokenizer._instance = None
     TextTokenizer._initialized = False
     from neuralcore.utils.config import ConfigLoader
+
     ConfigLoader(
         cli_path=str(PROJECT_ROOT / "data" / "test_config.yaml"),
         app_root=PROJECT_ROOT,
@@ -24,6 +27,7 @@ class TestWorkflowRegistry:
     def setup_method(self):
         _setup()
         from neuralcore.workflows.registry import Workflow
+
         self.wf = Workflow()
 
     def test_step_registration(self):
@@ -127,7 +131,9 @@ class TestWorkflowRegistry:
         assert "totals" in result
 
     def test_search(self):
-        @self.wf.step("search_wf", name="file_reader", description="reads files from disk")
+        @self.wf.step(
+            "search_wf", name="file_reader", description="reads files from disk"
+        )
         def file_reader():
             pass
 

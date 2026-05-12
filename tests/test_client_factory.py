@@ -1,4 +1,5 @@
 """Unit tests for neuralcore.clients.factory -- ClientFactory."""
+
 import sys
 import pytest
 from pathlib import Path
@@ -9,13 +10,17 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 def _reset():
     import neuralcore.utils.config as cfg_mod
+
     cfg_mod.loader = None
     import neuralcore.clients.factory as cf_mod
+
     cf_mod._factory = None
     from neuralcore.utils.text_tokenizer import TextTokenizer
+
     TextTokenizer._instance = None
     TextTokenizer._initialized = False
     from neuralcore.actions.registry import registry
+
     registry.sets.clear()
     registry.all_actions.clear()
     registry._index.clear()
@@ -26,6 +31,7 @@ class TestClientFactory:
         _reset()
         from neuralcore.utils.config import ConfigLoader
         import neuralcore.utils.config as cfg_mod
+
         loader = ConfigLoader(
             cli_path=str(PROJECT_ROOT / "data" / "test_config.yaml"),
             app_root=PROJECT_ROOT,
@@ -33,6 +39,7 @@ class TestClientFactory:
         cfg_mod.loader = loader
 
         from neuralcore.clients.factory import ClientFactory
+
         factory = ClientFactory(loader)
         clients = factory.build()
         assert "main" in clients
@@ -41,6 +48,7 @@ class TestClientFactory:
         _reset()
         from neuralcore.utils.config import ConfigLoader
         import neuralcore.utils.config as cfg_mod
+
         loader = ConfigLoader(
             cli_path=str(PROJECT_ROOT / "data" / "test_config.yaml"),
             app_root=PROJECT_ROOT,
@@ -49,6 +57,7 @@ class TestClientFactory:
 
         from neuralcore.clients.factory import ClientFactory
         from neuralcore.clients.client import LLMClient
+
         factory = ClientFactory(loader)
         clients = factory.build()
         assert isinstance(clients["main"], LLMClient)
@@ -57,6 +66,7 @@ class TestClientFactory:
         _reset()
         from neuralcore.utils.config import ConfigLoader
         import neuralcore.utils.config as cfg_mod
+
         loader = ConfigLoader(
             cli_path=str(PROJECT_ROOT / "data" / "test_config.yaml"),
             app_root=PROJECT_ROOT,
@@ -64,6 +74,7 @@ class TestClientFactory:
         cfg_mod.loader = loader
 
         from neuralcore.clients.factory import ClientFactory
+
         factory = ClientFactory(loader)
         clients = factory.build()
         assert clients["main"].model == "mock-model"
@@ -72,6 +83,7 @@ class TestClientFactory:
         _reset()
         from neuralcore.utils.config import ConfigLoader
         import neuralcore.utils.config as cfg_mod
+
         loader = ConfigLoader(
             cli_path=str(PROJECT_ROOT / "data" / "test_config.yaml"),
             app_root=PROJECT_ROOT,
@@ -79,6 +91,7 @@ class TestClientFactory:
         cfg_mod.loader = loader
 
         from neuralcore.clients.factory import ClientFactory
+
         factory = ClientFactory(loader)
         clients = factory.build()
         assert "9111" in clients["main"].base_url
@@ -87,6 +100,7 @@ class TestClientFactory:
         _reset()
         from neuralcore.utils.config import ConfigLoader
         import neuralcore.utils.config as cfg_mod
+
         loader = ConfigLoader(
             cli_path=str(PROJECT_ROOT / "data" / "test_config.yaml"),
             app_root=PROJECT_ROOT,
@@ -94,6 +108,7 @@ class TestClientFactory:
         cfg_mod.loader = loader
 
         from neuralcore.clients.factory import get_clients
+
         c1 = get_clients()
         c2 = get_clients()
         assert c1 is c2
@@ -102,14 +117,17 @@ class TestClientFactory:
         _reset()
         from neuralcore.utils.config import ConfigLoader
         import neuralcore.utils.config as cfg_mod
+
         # Config with nonexistent client ref
         cfg = {
-            "clients": {"main": {
-                "type": "chat",
-                "model": "test",
-                "base_url": "http://127.0.0.1:9111/v1",
-                "tokenizer": "data/tokenizer/tokenizer.json",
-            }},
+            "clients": {
+                "main": {
+                    "type": "chat",
+                    "model": "test",
+                    "base_url": "http://127.0.0.1:9111/v1",
+                    "tokenizer": "data/tokenizer/tokenizer.json",
+                }
+            },
             "agents": {"a1": {"id": "a1", "name": "Test", "client": "nonexistent"}},
         }
         loader = ConfigLoader(app_root=PROJECT_ROOT)
@@ -117,6 +135,7 @@ class TestClientFactory:
         cfg_mod.loader = loader
 
         from neuralcore.clients.factory import ClientFactory
+
         factory = ClientFactory(loader)
         factory.build()
 

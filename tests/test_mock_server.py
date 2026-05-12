@@ -1,8 +1,11 @@
 """Test the mock LLM server works correctly with the openai library."""
+
+import json
 import pytest
-import pytest_asyncio
-import asyncio
 from openai import AsyncOpenAI
+from openai.types.chat import (
+    ChatCompletionToolParam,
+)  # Explicit typing for OpenAI client compatibility
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -52,20 +55,23 @@ async def test_streaming_tool_calls(mock_server):
         api_key="test-key",
         timeout=30.0,
     )
-    tools = [{
-        "type": "function",
-        "function": {
-            "name": "echo_tool",
-            "description": "Echo the input",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "message": {"type": "string", "description": "Message to echo"}
+    # Explicit type annotation satisfies OpenAI client's ChatCompletionToolUnionParam
+    tools: list[ChatCompletionToolParam] = [
+        {
+            "type": "function",
+            "function": {
+                "name": "echo_tool",
+                "description": "Echo the input",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "message": {"type": "string", "description": "Message to echo"}
+                    },
+                    "required": ["message"],
                 },
-                "required": ["message"]
-            }
+            },
         }
-    }]
+    ]
 
     stream = await client.chat.completions.create(
         model="mock-model",
@@ -86,10 +92,12 @@ async def test_streaming_tool_calls(mock_server):
             finish_reason = choice.finish_reason
         if choice.delta.tool_calls:
             for tc in choice.delta.tool_calls:
-                if tc.function.name:
-                    tool_call_name = tc.function.name
-                if tc.function.arguments:
-                    tool_call_args += tc.function.arguments
+                # Guard against Optional[ChatCompletionMessageToolCallFunction] in delta chunks
+                if tc.function is not None:
+                    if tc.function.name:
+                        tool_call_name = tc.function.name
+                    if tc.function.arguments:
+                        tool_call_args += tc.function.arguments
 
     assert tool_call_name == "echo_tool"
     assert len(tool_call_args) > 0
@@ -104,21 +112,24 @@ async def test_non_streaming_tool_calls(mock_server):
         api_key="test-key",
         timeout=30.0,
     )
-    tools = [{
-        "type": "function",
-        "function": {
-            "name": "write_file",
-            "description": "Write content to a file",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "file_path": {"type": "string"},
-                    "content": {"type": "string"}
+    # Explicit type annotation satisfies OpenAI client's ChatCompletionToolUnionParam
+    tools: list[ChatCompletionToolParam] = [
+        {
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": "Write content to a file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                    "required": ["file_path", "content"],
                 },
-                "required": ["file_path", "content"]
-            }
+            },
         }
-    }]
+    ]
 
     resp = await client.chat.completions.create(
         model="mock-model",
@@ -129,6 +140,8 @@ async def test_non_streaming_tool_calls(mock_server):
 
     assert resp.choices[0].message.tool_calls is not None
     tc = resp.choices[0].message.tool_calls[0]
+    # Type narrowing for ChatCompletionMessageToolCall | ChatCompletionMessageCustomToolCall union
+    assert tc.type == "function"
     assert tc.function.name == "write_file"
     assert resp.choices[0].finish_reason == "tool_calls"
 
@@ -146,28 +159,31 @@ async def test_intent_classification(mock_server):
         model="mock-model",
         messages=[
             {"role": "system", "content": "Classify as CASUAL or TASK"},
-            {"role": "user", "content": "Hello, how are you?"}
+            {"role": "user", "content": "Hello, how are you?"},
         ],
         stream=False,
     )
-    assert "CASUAL" in resp.choices[0].message.content
+    content = resp.choices[0].message.content
+    assert content is not None
+    assert "CASUAL" in content
 
     # TASK intent
     resp = await client.chat.completions.create(
         model="mock-model",
         messages=[
             {"role": "system", "content": "Classify as CASUAL or TASK"},
-            {"role": "user", "content": "Read the config file and analyze it"}
+            {"role": "user", "content": "Read the config file and analyze it"},
         ],
         stream=False,
     )
-    assert "TASK" in resp.choices[0].message.content
+    content = resp.choices[0].message.content
+    assert content is not None
+    assert "TASK" in content
 
 
 @pytest.mark.asyncio(loop_scope="session")
 async def test_task_decomposition(mock_server):
     """Test the engine returns valid JSON for task decomposition."""
-    import json
     client = AsyncOpenAI(
         base_url=mock_server.base_url,
         api_key="test-key",
@@ -177,11 +193,15 @@ async def test_task_decomposition(mock_server):
         model="mock-model",
         messages=[
             {"role": "system", "content": "You are a task decomposition expert."},
-            {"role": "user", "content": "Break this request into actionable steps: build a test suite"}
+            {
+                "role": "user",
+                "content": "Break this request into actionable steps: build a test suite",
+            },
         ],
         stream=False,
     )
     content = resp.choices[0].message.content
+    assert content is not None
     plan = json.loads(content)
     assert "steps" in plan
     assert len(plan["steps"]) > 0

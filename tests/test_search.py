@@ -1,13 +1,12 @@
 """Unit tests for neuralcore.utils.search -- scoring and similarity functions."""
+
 import sys
 import numpy as np
-import pytest
 from pathlib import Path
+from neuralcore.utils.search import keyword_score, fuzzy_score, cosine_sim
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
-
-from neuralcore.utils.search import keyword_score, fuzzy_score, cosine_sim
 
 
 class TestKeywordScore:

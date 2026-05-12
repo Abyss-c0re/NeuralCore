@@ -46,24 +46,43 @@ def map_type_to_json(param_annotation):
     return "string"
 
 
-def safe_parse_json(raw_text: str):
-    """Safely extract and parse JSON from raw LLM output."""
-    match = re.search(r"\{.*\}", raw_text, re.DOTALL)
-    if not match:
+def safe_parse_json(raw_text: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Safely extract and parse JSON from raw LLM output.
+
+    - Handles embedded JSON objects
+    - Gracefully returns None on failure
+    - Type-safe for NeuralCore usage
+    """
+    if not raw_text or not isinstance(raw_text, str):
         return None
 
-    json_text = match.group()
-
-    # Escape unescaped backslashes
-    json_text = json_text.replace("\\", "\\\\")
-    # Remove invalid control characters
-    json_text = re.sub(r"[\x00-\x1f]", "", json_text)
-
-    try:
-        return json.loads(json_text)
-    except json.JSONDecodeError as e:
-        logger.debug(f"JSON parsing still failed: {e}")
+    # Improved regex: non-greedy + largest match first (handles nested better)
+    matches = re.findall(r"(\{.*?\})", raw_text, re.DOTALL)
+    if not matches:
         return None
+
+    # Try largest matches first (most likely to be complete JSON)
+    for json_text in sorted(matches, key=len, reverse=True):
+        # Clean common LLM output issues
+        cleaned = json_text.strip()
+
+        # Fix common escaping problems (but avoid double-escaping)
+        cleaned = re.sub(
+            r'(?<!\\)\\(?!["\\/bfnrt])', r"\\\\", cleaned
+        )  # fix unescaped backslashes
+        cleaned = re.sub(r"[\x00-\x1f]", "", cleaned)  # remove control chars
+
+        try:
+            parsed = json.loads(cleaned)
+            if isinstance(parsed, dict):
+                return parsed
+            if isinstance(parsed, list):
+                return {"__root__": parsed}  # keep list support consistent
+        except json.JSONDecodeError:
+            continue
+
+    logger.debug("safe_parse_json failed to extract valid JSON")
+    return None
 
 
 def safe_json_dumps(obj: Any, **kwargs) -> str:
