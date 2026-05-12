@@ -55,6 +55,11 @@ def _create_agent(mock_server):
     factory.build()
     cf_mod._factory = factory
 
+    # Ensure test_tools dir is on path for tool loading
+    test_tools_dir = str(PROJECT_ROOT / "tests" / "test_tools")
+    if test_tools_dir not in sys.path:
+        sys.path.insert(0, test_tools_dir)
+
     # Force reload of test_toolset to re-register decorators
     import importlib
 

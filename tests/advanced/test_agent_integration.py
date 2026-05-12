@@ -22,7 +22,7 @@ from typing import Any, Dict, List
 
 import pytest
 
-from mock_llm_server import MockLLMServer
+from tests.advanced.mock_llm_server import MockLLMServer
 
 # ---------------------------------------------------------------------------
 # Path setup
