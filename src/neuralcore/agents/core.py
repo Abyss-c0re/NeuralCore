@@ -10,6 +10,7 @@ from neuralcore.cognition.memory import ContextManager
 from neuralcore.utils.logger import Logger
 
 from neuralcore.tasks.manager import TaskManager
+from neuralcore.tasks.task import Task
 from neuralcore.agents.state import AgentState
 from neuralcore.actions.registry import registry
 from neuralcore.actions.manager import (
@@ -553,6 +554,212 @@ class Agent:
                 "error": str(e),
                 "timestamp": time.time(),
             }
+
+    # ====================== AGENT COOPERATION ======================
+
+    async def request_agent(
+        self,
+        target_agent: "Agent",
+        task: Task,
+        timeout: Optional[float] = None,
+        drain_context: bool = True,
+    ) -> Task:
+        """Request another agent to execute a task.
+
+        Creates a completion event on the task so the caller can await it.
+        Posts a ``delegated_task`` control message to *target_agent*.
+        When *drain_context* is True (default), the requesting agent will
+        automatically drain the target agent's context/tool output after
+        the task completes.
+
+        Returns the same Task object; call ``await_task_completion(task)``
+        to block until the target agent finishes.
+        """
+        # Ensure the task has a completion event for synchronization
+        task.get_completion_event()
+        task.requesting_agent_id = self.agent_id
+        task.assigned_agent = target_agent.agent_id
+        task.metadata["drain_context"] = drain_context
+        task.metadata["requesting_agent"] = self.agent_id
+
+        # Track in our state
+        self.state.active_sub_agents.append(target_agent.agent_id)
+        self.state.sub_task_ids.append(task.task_id)
+
+        # Post the task to the target agent's control queue
+        await target_agent.post_control(
+            {
+                "event": "delegated_task",
+                "task_id": task.task_id,
+                "description": task.description,
+                "expected_outcome": task.expected_outcome,
+                "requesting_agent_id": self.agent_id,
+            }
+        )
+
+        logger.info(
+            f"[COOPERATION] Agent '{self.name}' requested '{target_agent.name}' "
+            f"to execute task {task.task_id[:8]}: {task.description[:80]}"
+        )
+
+        return task
+
+    async def await_task_completion(
+        self,
+        task: Task,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Wait for a delegated task to complete and return its result.
+
+        Uses the task's completion event for efficient async waiting.
+        Returns a dict with task_id, status, result, error, and result_payload.
+        Returns None-result on timeout.
+        """
+        event = task.get_completion_event()
+
+        try:
+            if timeout and timeout > 0:
+                await asyncio.wait_for(event.wait(), timeout=timeout)
+            else:
+                await event.wait()
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"[COOPERATION] Timeout waiting for task {task.task_id[:8]} "
+                f"after {timeout}s"
+            )
+            return {
+                "task_id": task.task_id,
+                "status": "timeout",
+                "result": None,
+                "error": f"Timed out after {timeout}s",
+                "result_payload": None,
+            }
+
+        logger.info(
+            f"[COOPERATION] Task {task.task_id[:8]} completed with status "
+            f"{task.status.value}"
+        )
+
+        return {
+            "task_id": task.task_id,
+            "status": task.status.value,
+            "result": task.result,
+            "error": task.error,
+            "result_payload": task.result_payload,
+        }
+
+    def drain_agent_context(self, source_agent: "Agent") -> Dict[str, Any]:
+        """Drain context and tool output from another agent's context manager.
+
+        This is critical for sub-agents which have their own context manager.
+        Extracts tool results, short-term memory items, and tool call history
+        so the requesting agent can incorporate the data into its own context.
+
+        Returns a dict containing:
+        - tool_results: list of tool result dicts
+        - context_items: list of serialized knowledge items
+        - tool_call_history: list of tool call records
+        - context_summary: text summary of the agent's context
+        """
+        cm = source_agent.context_manager
+        state = source_agent.state
+
+        # Extract tool results from state
+        tool_results = list(state.tool_results)
+
+        # Extract knowledge items from short-term memory
+        context_items = []
+        if hasattr(cm, "short_term_mem") and cm.short_term_mem:
+            for key, item in cm.short_term_mem.items():
+                context_items.append(
+                    {
+                        "key": key,
+                        "content": getattr(item, "content", str(item)),
+                        "source_type": getattr(item, "source_type", "unknown"),
+                        "category_path": getattr(item, "category_path", ""),
+                        "timestamp": getattr(item, "timestamp", None),
+                    }
+                )
+
+        # Extract tool call history
+        tool_call_history = []
+        if hasattr(cm, "tool_call_history"):
+            tool_call_history = list(cm.tool_call_history)
+
+        # Text summary for quick context injection
+        context_summary = cm.get_context_summary(max_messages=20, max_chars=4000)
+
+        drained = {
+            "agent_id": source_agent.agent_id,
+            "agent_name": source_agent.name,
+            "tool_results": tool_results,
+            "context_items": context_items,
+            "tool_call_history": tool_call_history,
+            "context_summary": context_summary,
+        }
+
+        logger.info(
+            f"[COOPERATION] Drained context from '{source_agent.name}': "
+            f"{len(tool_results)} tool results, {len(context_items)} context items, "
+            f"{len(tool_call_history)} tool history entries"
+        )
+
+        return drained
+
+    async def inject_drained_context(self, drained_data: Dict[str, Any]) -> None:
+        """Inject drained context from another agent into this agent's state.
+
+        Takes the output of ``drain_agent_context`` and merges it into the
+        current agent's tool results and context.
+        """
+        source_name = drained_data.get("agent_name", "unknown")
+        tool_results = drained_data.get("tool_results", [])
+        context_summary = drained_data.get("context_summary", "")
+
+        # Merge tool results into our state
+        for tr in tool_results:
+            tagged = dict(tr)
+            tagged["source_agent"] = source_name
+            self.state.tool_results.append(tagged)
+
+        # Add summary as a system message so it enters our context
+        if context_summary:
+            await self.add_message(
+                "system",
+                f"[Delegated result from agent '{source_name}']\n{context_summary}",
+            )
+
+        logger.info(
+            f"[COOPERATION] Injected {len(tool_results)} tool results "
+            f"from '{source_name}' into '{self.name}'"
+        )
+
+    async def handle_delegated_task(
+        self, control_msg: Dict[str, Any], task: Optional[Task] = None
+    ) -> None:
+        """Handle a delegated_task control message from another agent.
+
+        Runs the task through this agent's task_manager.execute_delegated().
+        """
+        task_id = control_msg.get("task_id", "")
+        description = control_msg.get("description", "")
+        expected_outcome = control_msg.get("expected_outcome", "")
+        requesting_agent_id = control_msg.get("requesting_agent_id", "")
+
+        if task is None:
+            task = Task(
+                task_id=task_id,
+                description=description,
+                expected_outcome=expected_outcome,
+            )
+            task.requesting_agent_id = requesting_agent_id
+
+        logger.info(
+            f"[COOPERATION] Agent '{self.name}' received delegated task "
+            f"{task.task_id[:8]}: {description[:80]}"
+        )
+
+        await self.task_manager.execute_delegated(task)
 
     # ====================== CONFIRMATION HANDLERS ======================
 

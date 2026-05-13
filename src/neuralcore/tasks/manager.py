@@ -1,5 +1,6 @@
 # src/neuralcore/task_management/task_manager.py
 import json
+import asyncio
 from typing import AsyncIterator, Any, Tuple, List, Dict, Optional
 
 from neuralcore.agents.state import AgentState
@@ -162,7 +163,9 @@ class TaskManager:
         if not task:
             return False
 
-        logger.info(f"[TASK VALIDATION] Validating outcome for task: {task.description[:80]}...")
+        logger.info(
+            f"[TASK VALIDATION] Validating outcome for task: {task.description[:80]}..."
+        )
 
         last_result_str = (
             str(state.tool_results[-1].get("result", ""))
@@ -194,7 +197,9 @@ class TaskManager:
             logger.info(f"[TASK VALIDATION] Outcome met: {outcome_met}")
             return outcome_met
         except Exception as e:
-            logger.warning(f"Validation LLM failed: {e}. Falling back to marker/tool success.")
+            logger.warning(
+                f"Validation LLM failed: {e}. Falling back to marker/tool success."
+            )
             # Safe fallback – last_tool_success may be None
             last_success = getattr(state, "last_tool_success", None)
             return bool(last_success and last_success.get("success"))
@@ -436,7 +441,9 @@ class TaskManager:
             is_last_task = state.current_task_index >= len(state.tasks) - 1
 
             if is_last_task:
-                state.full_reply = f"Task completed successfully. {PromptBuilder.FINAL_ANSWER_MARKER}"
+                state.full_reply = (
+                    f"Task completed successfully. {PromptBuilder.FINAL_ANSWER_MARKER}"
+                )
                 state.is_complete = True
                 state.last_tool_success = {"success": True}
                 state.mark_goal_achieved("All sub-tasks completed")
@@ -472,3 +479,236 @@ class TaskManager:
                 reason="Loop ended without goal", target_loop=target_loop
             )
             yield ("phase_changed", {"phase": "restarting_loop"})
+
+    # ====================== COOPERATIVE TASK EXECUTION ======================
+
+    async def execute_delegated(self, task: Task) -> None:
+        """Execute a task delegated by another agent.
+
+        Runs the task through this agent's execution pipeline, then
+        populates ``task.result_payload`` with the full context/tool output
+        and signals the task's completion event so the requester can proceed.
+        """
+        agent = self.agent
+        state = agent.state
+
+        logger.info(
+            f"[DELEGATED] Agent '{agent.name}' executing delegated task "
+            f"{task.task_id[:8]}: {task.description[:80]}"
+        )
+
+        task.start(agent=agent.agent_id)
+        state.current_task = task.description
+
+        # Build context and execute via the agent's LLM pipeline
+        delegated_prompt = PromptBuilder.delegated_task_prompt(
+            task_description=task.description,
+            expected_outcome=task.expected_outcome,
+            requesting_agent_id=task.requesting_agent_id or "unknown",
+        )
+
+        try:
+            messages = await agent.context_manager.provide_context(
+                query=delegated_prompt,
+                max_input_tokens=agent.max_tokens,
+                reserved_for_output=agent.max_tokens * 0.45,
+                include_logs=True,
+                chat=False,
+                lightweight_agentic=True,
+            )
+
+            queue = await agent.client.stream_with_tools(
+                manager=agent.action_manager,
+                messages=messages,
+                temperature=agent.temperature,
+                max_tokens=agent.max_tokens,
+                tool_choice="auto",
+                auto_stop_on_complete_tool=True,
+            )
+
+            text_buffer = ""
+            # Drain the stream queue directly — more resilient than
+            # _drain_queue when the client is shared between agents.
+            while True:
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    break
+                if item is None:
+                    break
+                kind = item[0] if isinstance(item, tuple) else item
+                payload_val = (
+                    item[1] if isinstance(item, tuple) and len(item) > 1 else ""
+                )
+                if kind == "content":
+                    text_buffer += str(payload_val or "")
+                elif kind == "finish":
+                    break
+                elif kind == "error":
+                    task.result_payload = {"error": str(payload_val)}
+                    task.complete(error=str(payload_val))
+                    return
+
+            # Build result payload from this agent's context (the "drain")
+            result_payload = {
+                "text_output": text_buffer.strip(),
+                "tool_results": list(state.tool_results),
+                "context_summary": agent.context_manager.get_context_summary(
+                    max_messages=20, max_chars=4000
+                ),
+            }
+
+            task.result_payload = result_payload
+            task.complete(result=text_buffer.strip())
+
+            logger.info(
+                f"[DELEGATED] Task {task.task_id[:8]} completed successfully "
+                f"with {len(state.tool_results)} tool results"
+            )
+
+        except Exception as e:
+            logger.error(
+                f"[DELEGATED] Task {task.task_id[:8]} failed: {e}", exc_info=True
+            )
+            task.result_payload = {"error": str(e)}
+            task.complete(error=str(e))
+
+    async def dispatch_parallel(
+        self,
+        tasks: List[Task],
+        agents: List[Any],
+        timeout: Optional[float] = None,
+    ) -> AsyncIterator[Tuple[str, Any]]:
+        """Dispatch tasks to agents respecting dependencies.
+
+        Tasks without dependencies are dispatched immediately in parallel.
+        Tasks with dependencies wait for their prerequisites to complete
+        before being dispatched.
+
+        Yields events as tasks start, complete, and as all work finishes.
+        """
+        if not tasks or not agents:
+            yield ("dispatch_error", {"reason": "No tasks or agents provided"})
+            return
+
+        # Map task_id -> Task for dependency lookup
+        task_map: Dict[str, Task] = {t.task_id: t for t in tasks}
+        completed_ids: set = set()
+        pending: List[Task] = list(tasks)
+        running: Dict[str, asyncio.Task] = {}  # task_id -> asyncio.Task
+        agent_idx = 0
+
+        yield (
+            "dispatch_started",
+            {"total_tasks": len(tasks), "total_agents": len(agents)},
+        )
+
+        while pending or running:
+            # Find ready tasks (all dependencies met)
+            newly_ready = []
+            still_pending = []
+            for task in pending:
+                if task.is_ready(completed_ids):
+                    newly_ready.append(task)
+                else:
+                    still_pending.append(task)
+            pending = still_pending
+
+            # Dispatch ready tasks to available agents
+            for task in newly_ready:
+                target_agent = agents[agent_idx % len(agents)]
+                agent_idx += 1
+
+                requesting_agent = self.agent
+
+                async def _run_delegated(t=task, a=target_agent):
+                    await requesting_agent.request_agent(a, t)
+                    await a.task_manager.execute_delegated(t)
+
+                atask = asyncio.create_task(
+                    _run_delegated(),
+                    name=f"dispatch_{task.task_id[:8]}",
+                )
+                running[task.task_id] = atask
+
+                yield (
+                    "task_dispatched",
+                    {
+                        "task_id": task.task_id,
+                        "description": task.description[:80],
+                        "agent": target_agent.name,
+                    },
+                )
+
+            if not running:
+                # No running tasks and no newly ready — possible deadlock
+                if pending:
+                    yield (
+                        "dispatch_error",
+                        {
+                            "reason": "Dependency deadlock: pending tasks have unmet dependencies",
+                            "pending_ids": [t.task_id for t in pending],
+                        },
+                    )
+                break
+
+            # Wait for any running task to complete
+            done, _ = await asyncio.wait(
+                running.values(),
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            if not done and timeout:
+                # Timeout — cancel remaining
+                for atask in running.values():
+                    atask.cancel()
+                yield (
+                    "dispatch_timeout",
+                    {"timeout": timeout, "still_running": list(running.keys())},
+                )
+                break
+
+            # Process completed tasks
+            finished_ids = []
+            for atask in done:
+                for tid, rt in running.items():
+                    if rt is atask:
+                        finished_ids.append(tid)
+                        break
+
+            for tid in finished_ids:
+                atask = running.pop(tid)
+                task = task_map[tid]
+                completed_ids.add(tid)
+
+                # Check for exceptions
+                exc = atask.exception() if atask.done() else None
+                if exc:
+                    task.complete(error=str(exc))
+                    yield (
+                        "task_failed",
+                        {
+                            "task_id": tid,
+                            "error": str(exc),
+                        },
+                    )
+                else:
+                    yield (
+                        "task_completed",
+                        {
+                            "task_id": tid,
+                            "status": task.status.value,
+                            "result_preview": str(task.result)[:200]
+                            if task.result
+                            else None,
+                        },
+                    )
+
+        yield (
+            "dispatch_finished",
+            {
+                "total_completed": len(completed_ids),
+                "total_tasks": len(tasks),
+            },
+        )

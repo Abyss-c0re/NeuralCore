@@ -1,7 +1,8 @@
 from enum import Enum
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Set, Any
+from typing import Optional, List, Dict, Set, Any, Callable
 from datetime import datetime
+import asyncio
 import uuid
 import logging
 
@@ -46,6 +47,14 @@ class Task:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     _dependency_set: Set[str] = field(init=False, default_factory=set)
+    _completion_event: Optional[asyncio.Event] = field(
+        init=False, default=None, repr=False
+    )
+    _on_complete_callbacks: List[Callable] = field(
+        init=False, default_factory=list, repr=False
+    )
+    result_payload: Optional[Dict[str, Any]] = field(init=False, default=None)
+    requesting_agent_id: Optional[str] = field(init=False, default=None)
 
     def __post_init__(self):
         self._dependency_set = set(self.dependencies)
@@ -64,8 +73,18 @@ class Task:
             self.assigned_agent = agent
         logger.info(f"[TASK START] {self.task_id[:8]} | {self.description}")
 
+    def get_completion_event(self) -> asyncio.Event:
+        """Lazily create and return the completion event for this task."""
+        if self._completion_event is None:
+            self._completion_event = asyncio.Event()
+        return self._completion_event
+
+    def on_complete(self, callback: Callable) -> None:
+        """Register a callback to invoke when the task completes."""
+        self._on_complete_callbacks.append(callback)
+
     def complete(self, result: Any = None, error: Optional[str] = None) -> None:
-        """Mark task completed or failed."""
+        """Mark task completed or failed, signal completion event, fire callbacks."""
         self.end_time = datetime.now()
         if error:
             self.status = TaskStatus.FAILED
@@ -77,6 +96,17 @@ class Task:
             logger.info(
                 f"[TASK COMPLETE] {self.task_id[:8]} | outcome met: {bool(self.expected_outcome)}"
             )
+
+        # Signal any waiters that this task is done
+        if self._completion_event is not None:
+            self._completion_event.set()
+
+        # Fire registered callbacks
+        for cb in self._on_complete_callbacks:
+            try:
+                cb(self)
+            except Exception as e:
+                logger.warning(f"[TASK CALLBACK] Error in on_complete callback: {e}")
 
     def is_ready(self, completed_ids: Set[str]) -> bool:
         """Check if all dependencies are completed."""
@@ -111,6 +141,8 @@ class Task:
             "error": self.error,
             "subtasks": [st.to_dict() for st in self.subtasks],
             "metadata": self.metadata,
+            "requesting_agent_id": self.requesting_agent_id,
+            "result_payload": self.result_payload,
         }
 
     def summary(self) -> str:

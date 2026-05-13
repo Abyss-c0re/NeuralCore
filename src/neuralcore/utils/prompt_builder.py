@@ -874,6 +874,88 @@ Be precise, conservative, and objective.
 Use ONLY the information provided in the query.
 Answer with exactly one word: YES or NO."""
 
+    # ====================== COOPERATIVE / DELEGATION PROMPTS ======================
+
+    @staticmethod
+    def delegated_task_prompt(
+        task_description: str,
+        expected_outcome: str = "",
+        requesting_agent_id: str = "",
+    ) -> str:
+        """Prompt for an agent executing a task delegated by another agent."""
+        outcome_block = ""
+        if expected_outcome and expected_outcome.strip():
+            outcome_block = f"""
+EXPECTED OUTCOME:
+{expected_outcome.strip()}
+
+You MUST verify this outcome is fully achieved before considering the task complete."""
+
+        return f"""You are executing a DELEGATED TASK assigned by another agent (agent_id: {requesting_agent_id}).
+
+TASK DESCRIPTION:
+{task_description}
+{outcome_block}
+
+STRICT RULES:
+1. Focus exclusively on completing this delegated task.
+2. Use the appropriate tools to achieve the expected outcome.
+3. Produce clear, complete output that the requesting agent can consume.
+4. When the task is fully complete, output exactly: {PromptBuilder.FINAL_ANSWER_MARKER}
+"""
+
+    @staticmethod
+    def cooperation_context_section(
+        pending_delegations: List[Dict[str, Any]],
+        completed_delegations: List[Dict[str, Any]],
+    ) -> str:
+        """Formats the current inter-agent cooperation state for context injection."""
+        if not pending_delegations and not completed_delegations:
+            return ""
+
+        parts = ["=== AGENT COOPERATION STATUS ==="]
+
+        if pending_delegations:
+            parts.append("PENDING DELEGATED TASKS:")
+            for d in pending_delegations:
+                parts.append(
+                    f"  - Task {d.get('task_id', '?')[:8]}: "
+                    f"{d.get('description', 'N/A')[:80]} "
+                    f"→ Agent: {d.get('agent_name', 'unknown')}"
+                )
+
+        if completed_delegations:
+            parts.append("COMPLETED DELEGATED TASKS:")
+            for d in completed_delegations:
+                status = d.get("status", "unknown")
+                result_preview = str(d.get("result", ""))[:120]
+                parts.append(
+                    f"  - Task {d.get('task_id', '?')[:8]}: "
+                    f"[{status.upper()}] {d.get('description', 'N/A')[:60]} "
+                    f"→ {result_preview}"
+                )
+
+        parts.append("=== END COOPERATION STATUS ===")
+        return "\n".join(parts)
+
+    @staticmethod
+    def delegated_result_summary(
+        task_description: str,
+        agent_name: str,
+        result_text: str,
+        tool_results_count: int = 0,
+    ) -> str:
+        """Summary block injected into the requesting agent's context
+        after a delegated task completes."""
+        return (
+            f"=== DELEGATED TASK RESULT ===\n"
+            f"Task: {task_description[:120]}\n"
+            f"Executed by: {agent_name}\n"
+            f"Tool executions: {tool_results_count}\n"
+            f"Result:\n{result_text}\n"
+            f"=== END DELEGATED RESULT ==="
+        )
+
     @staticmethod
     def analysis_multi_query_generation(analysis_query: str) -> str:
         """Generates 4-6 diverse and effective search queries for any given topic."""
