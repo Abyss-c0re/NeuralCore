@@ -105,7 +105,7 @@ app:
     semantic_weight: 0.45
     recency_decay_lambda: 0.06
   knowledge_base:
-    enabled: false
+    enabled: true
     base_folder: ../NeuralCore/data/kb"     # Root folder for all indexed data
     auto_reindex: true                  # Automatically watch for file changes
     reindex_interval_seconds: 300

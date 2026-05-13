@@ -1,0 +1,26 @@
+{
+  "schema_version": 2,
+  "last_updated": "2026-05-13T14:10:43.987204",
+  "stats": {
+    "total_items": 1,
+    "total_chunks": 1173,
+    "by_category": {
+      "neuroscience": 1
+    }
+  },
+  "items": {
+    "kb_ee61a831d5b226f8": {
+      "original_path": "/testbed/NeuralCore/data/kb/neuroscience/Neuroscience.pdf",
+      "category_path": "neuroscience",
+      "top_category": "neuroscience",
+      "hash": "270015c07518d5c2293cd613d3b75f9d",
+      "mtime": 1530391339.0,
+      "size_bytes": 34807649,
+      "chunk_count": 1173,
+      "embedding_dim": 384,
+      "archived": false,
+      "source": "auto",
+      "added_at": "2026-05-13T14:10:43.985534"
+    }
+  }
+}

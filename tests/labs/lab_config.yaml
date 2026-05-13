@@ -1,0 +1,75 @@
+clients:
+  main:
+    type: chat
+    base_url: "http://127.0.0.1:9111/v1"
+    model: mock-model
+    api_key: lab-key
+    tokenizer: /testbed/NeuralCore/data/tokenizer/tokenizer.json
+    presence_penalty: 0.0
+    top_k: 20
+    temperature: 0.7
+    max_tokens: 16000
+    enable_thinking: false
+    system_prompt: "You are a helpful neuroscience-aware assistant."
+
+embeddings:
+  use_fastembed: true
+  fastembed_model: "BAAI/bge-small-en-v1.5"
+
+tools:
+  ResearchTools:
+    modules:
+      - research_set
+
+workflows:
+  deploy_agent:
+    name: "deploy_agent"
+    description: "Lab deployment workflow"
+    steps:
+      - name: deploy_agent_loop
+
+agents:
+  agent_002:
+    id: "agent_002"
+    name: "Neuroscience Lab Agent"
+    description: "Agent for neuroscience cross-domain RAG experiment"
+    client: main
+    max_iterations: 100
+    temperature: 0.7
+    max_tokens: 16000
+    system_prompt: "You are a neuroscience-aware research assistant with access to indexed neuroscience literature."
+    tool_sets:
+      - ResearchTools
+    workflow: deploy_agent
+
+settings:
+  default_max_sub_agents: 2
+  sub_agent_temperature: 0.3
+  sub_agent_max_iterations: 5
+
+app:
+  max_iterations: 100
+  max_tokens: 16000
+  logging_enabled: true
+  log_level: debug
+  log_to_file: true
+  log_to_ui: false
+  log_file: /testbed/NeuralCore/data/lab_neuralvoid.log
+  tool_info_level: compact
+  models_dir: /testbed/NeuralCore/data/models
+  cognition:
+    reranker_enabled: true
+    novelty_threshold: 0.82
+    novelty_k: 100
+    max_rerank_candidates: 100
+    semantic_weight: 0.45
+    recency_decay_lambda: 0.06
+  knowledge_base:
+    enabled: true
+    base_folder: "/testbed/NeuralCore/data/kb"
+    auto_reindex: true
+    reindex_interval_seconds: 300
+    default_retrieve_k: 100
+    min_similarity_threshold: 0.13
+    direct_match_boost: 0.18
+    direct_match_threshold: 0.23
