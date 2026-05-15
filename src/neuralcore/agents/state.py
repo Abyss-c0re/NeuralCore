@@ -587,7 +587,8 @@ class AgentState:
         return PromptBuilder.objective_reminder(reminder_body)
 
     def to_dict(self) -> Dict[str, Any]:
-        """Public snapshot — uses derived properties (SSOT)."""
+        """Public snapshot — uses derived properties (SSOT).
+        Guarantees JSON-serializable output (sets→lists, Task→dict, etc.)."""
         exclude = {
             "message_queue",
             "_input_event",
@@ -595,11 +596,20 @@ class AgentState:
             "_background_task",
             "_task_contexts",
         }
-        data: Dict[str, Any] = {
-            k: v
-            for k, v in self.__dict__.items()
-            if not k.startswith("_") and k not in exclude
-        }
+        data: Dict[str, Any] = {}
+        for k, v in self.__dict__.items():
+            if k.startswith("_") or k in exclude:
+                continue
+            # Convert sets to sorted lists for JSON safety
+            if isinstance(v, set):
+                data[k] = sorted(v)
+            # Convert Task objects to dicts
+            elif isinstance(v, Task) and hasattr(v, "to_dict"):
+                data[k] = v.to_dict()
+            elif isinstance(v, list) and v and hasattr(v[0], "to_dict"):
+                data[k] = [item.to_dict() if hasattr(item, "to_dict") else item for item in v]
+            else:
+                data[k] = v
 
         # Limit large lists for serialization
         data["tool_results"] = self.tool_results[-20:]
