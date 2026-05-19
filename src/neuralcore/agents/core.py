@@ -149,10 +149,10 @@ class Agent:
                 await self.context_manager.consolidator.load_reranker()
                 logger.info("   ✓ KnowledgeConsolidator reranker loaded")
 
-            # 3. (removed) Queue listener — notifications now emitted directly from post_* methods
-            #    to eliminate Event clear/set races with wait_for_incoming_message (caused UI freeze on post).
-            await self.start_background_queue_listener()
-            logger.info("   ✓ Background queue listener started")
+            # 3. Background queue listener intentionally NOT started here.
+            #    We use direct _notify_background() calls from post_* methods instead.
+            #    This eliminates the _input_event clear/set race with wait_for_incoming_message
+            #    that was causing the UI to freeze after the user posts a message in chat mode.
             # 4. Optional: Pre-load tools if not already loaded (can be heavy)
             if not self.action_manager.loaded_tools:
                 self.attach_tools()
