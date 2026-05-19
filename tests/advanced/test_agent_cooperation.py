@@ -21,7 +21,7 @@ from typing import Any, Dict, List
 
 import pytest
 
-from tests.advanced.mock_llm_server import MockLLMServer
+from neuralcore.utils.mock_llm_server import MockLLMServer
 
 # ---------------------------------------------------------------------------
 # Path setup

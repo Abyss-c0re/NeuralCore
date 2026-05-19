@@ -22,7 +22,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "tests"))
 
 os.chdir(PROJECT_ROOT)
 
-from mock_llm_server import MockLLMServer
+from mock_llm_server import MockLLMServer  # noqa: E402
 
 
 # Use a single event loop for the entire test session
@@ -45,6 +45,13 @@ async def mock_server():
 def _reset_singletons():
     """Reset all NeuralCore singletons so each test config load is clean."""
     import neuralcore.utils.config as cfg_mod
+    if cfg_mod.loader is not None:
+        mock_srv = getattr(cfg_mod.loader, "_mock_server", None)
+        if mock_srv is not None:
+            try:
+                mock_srv.stop_sync()
+            except Exception:
+                pass
     cfg_mod.loader = None
 
     import neuralcore.clients.factory as cf_mod
@@ -92,7 +99,7 @@ async def agent(config_loader, logger_setup):
     import neuralcore.clients.factory as cf_mod
     cf_mod._factory = None
     factory = ClientFactory(config_loader)
-    clients = factory.build()
+    factory.build()
     cf_mod._factory = factory
 
     # Load test tools

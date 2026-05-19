@@ -1,6 +1,9 @@
 clients:
   main:
     type: chat
+    # To auto-deploy the advanced mock server from utils.mock_llm_server,
+    # set base_url: TEST  (or "test", ":test", "MOCK"). The loader rewrites it
+    # to a real http://... address and you can get the server via loader.get_test_server().
     base_url: "http://127.0.0.1:9111/v1"
     model: mock-model
     tokenizer: data/tokenizer/tokenizer.json

@@ -1,9 +1,11 @@
 clients:
   main:
     type: chat
-    base_url: "MOCK_URL_PLACEHOLDER"
+    # Use base_url: TEST to auto-deploy the advanced MockLLMServer (utils version)
+    # and have it automatically rewritten to the real running endpoint.
+    base_url: TEST
     model: mock-model
-    tokenizer: tokenizer_placeholder
+    # (tokenizer key can be omitted — real tokenizer from data/ is auto-loaded for TEST clients)
     api_key: mock-key
     presence_penalty: 0.0
     top_k: 20

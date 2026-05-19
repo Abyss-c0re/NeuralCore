@@ -1,4 +1,5 @@
 import inspect
+from pathlib import Path
 from typing import Dict, Any
 
 from neuralcore.clients.client import LLMClient
@@ -38,9 +39,32 @@ class ClientFactory:
                 if tokenizer_source:
                     try:
                         TextTokenizer(tokenizer_source=tokenizer_source)
+                        break  # success
+                    except Exception:
+                        # First init failed (bad path, placeholder, etc.).
+                        # Reset singleton so the real-tokenizer fallback below can take over.
+                        TextTokenizer._instance = None
+                        TextTokenizer._initialized = False
+                        pass
+                    # declared tokenizer failed — do not break, let fallback try real one later
+
+        # Strong fallback for real tokenizer usage even when using the TEST mock server.
+        # Many test configs (or minimal dicts with base_url: TEST) omit the tokenizer key.
+        # We still want realistic chunking / embedding / token counting behavior.
+        if not TextTokenizer._initialized:
+            candidates = [
+                self.loader.app_root / "data" / "tokenizer" / "tokenizer.json",
+                Path.cwd() / "data" / "tokenizer" / "tokenizer.json",
+                Path("data/tokenizer/tokenizer.json"),
+            ]
+            for cand in candidates:
+                if cand.exists():
+                    try:
+                        TextTokenizer(tokenizer_source=str(cand.resolve()))
+                        print(f"[INFO] Auto-loaded real tokenizer (TEST/mock fallback) from {cand}")
+                        break
                     except Exception:
                         pass
-                    break
 
         for name in clients_cfg:
             self.clients[name] = self._create(name)

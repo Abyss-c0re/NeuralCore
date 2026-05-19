@@ -3,8 +3,11 @@ import sys
 import yaml
 import importlib
 import copy
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
 from pathlib import Path
+
+if TYPE_CHECKING:
+    from .mock_llm_server import MockLLMServer
 
 
 class ConfigLoader:
@@ -20,9 +23,12 @@ class ConfigLoader:
         self.app_root = app_root or Path.cwd()
         # Universal parse on init — keeps old behavior but now supports in-memory too
         self.config: dict[str, Any] = self.parse_config(cli_path)
+        # Extra safety pass (parse_config already normalized, but harmless)
+        self._normalize_test_addresses()
 
         self.agent_factory = None  # created on first use
         self.workflow_factory = None
+        self._mock_server: Optional["MockLLMServer"] = None
 
         print(
             f"[DEBUG] ConfigLoader initialized with {len(self.config)} top-level keys"
@@ -67,6 +73,9 @@ class ConfigLoader:
                     val = os.getenv(env_key)
                     client_cfg["api_key"] = val if val else self.DEFAULT_API_KEY
                     print(f"[DEBUG] Resolved secret for client '{client_name}'")
+
+        # Auto-deploy advanced mock server + rewrite TEST base_url(s) — happens for every parse path
+        self._normalize_test_addresses(raw)
 
         return raw
 
@@ -119,6 +128,61 @@ class ConfigLoader:
     def get_loop_config(self, loop_name: str) -> dict:
         """Get loop configuration from YAML, supporting live overrides."""
         return self.config.get("loops", {}).get(loop_name, {})
+
+    # ===================================================================
+    # TEST MOCK SERVER (auto-deploy when a client uses TEST as base_url)
+    # ===================================================================
+    _TEST_ADDRESS_TOKENS = {"TEST", "test", ":test", "MOCK", "mock"}
+
+    def _normalize_test_addresses(self, target: dict | None = None) -> None:
+        """If any client has base_url set to the TEST sentinel (e.g. "TEST", ":test", "MOCK"),
+        auto-start the advanced MockLLMServer (from utils) and rewrite that client's
+        base_url to the real running endpoint.
+
+        Call with the freshly parsed dict (from inside parse_config) or with no arg
+        after self.config has been assigned.
+        """
+        cfg = target if target is not None else getattr(self, "config", None)
+        if not isinstance(cfg, dict):
+            return
+
+        clients = cfg.get("clients") or {}
+        if not isinstance(clients, dict):
+            return
+
+        # Check if any client wants the test mock
+        test_clients = []
+        for name, ccfg in clients.items():
+            if isinstance(ccfg, dict):
+                url = ccfg.get("base_url")
+                if isinstance(url, str) and url.strip() in self._TEST_ADDRESS_TOKENS:
+                    test_clients.append(name)
+
+        if not test_clients:
+            return
+
+        # Start the server once (idempotent)
+        if self._mock_server is None:
+            from .mock_llm_server import MockLLMServer
+            # Stable port that doesn't collide with the main test fixture (9111)
+            self._mock_server = MockLLMServer(host="127.0.0.1", port=9112)
+            self._mock_server.start_sync()
+            print(f"[INFO] Auto-deployed MockLLMServer for TEST clients at {self._mock_server.base_url}")
+
+        real_url = self._mock_server.base_url
+
+        # Rewrite the sentinel(s) to the real URL so the rest of the stack sees a normal address
+        for name in test_clients:
+            ccfg = clients[name]
+            if isinstance(ccfg, dict) and ccfg.get("base_url") in self._TEST_ADDRESS_TOKENS:
+                ccfg["base_url"] = real_url
+                print(f"[DEBUG] Client '{name}' base_url=TEST rewritten to {real_url}")
+
+    def get_test_server(self) -> Optional["MockLLMServer"]:
+        """Return the auto-deployed advanced mock server (if any client used TEST).
+        Use this in tests to call enqueue_response(...).
+        """
+        return self._mock_server
 
     # ===================================================================
     # LOADERS — now support live override dicts
@@ -201,6 +265,7 @@ class ConfigLoader:
         """
         if config_source is not None:
             self.config = self.parse_config(config_source)
+            self._normalize_test_addresses()
 
         if not agent_id:
             agents = self.config.get("agents", {})

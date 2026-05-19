@@ -74,8 +74,14 @@ class LLMClient:
             # Explicit tokenizer source passed
             self.tokenizer = TextTokenizer(tokenizer_source=tokenizer)
         else:
-            # Fall back to singleton initialized via config (client name)
-            self.tokenizer = TextTokenizer(client_name=name).get_instance()
+            # Fall back to singleton. If it was never primed (common with base_url: TEST
+            # + minimal configs), try to load the real project tokenizer automatically
+            # so embeddings, chunking and token counts still use realistic behavior.
+            try:
+                self.tokenizer = TextTokenizer(client_name=name).get_instance()
+            except Exception:
+                self._ensure_real_tokenizer_fallback()
+                self.tokenizer = TextTokenizer(client_name=name).get_instance()
 
         self.client = AsyncOpenAI(
             base_url=self.base_url,
@@ -98,6 +104,42 @@ class LLMClient:
             f"LLMClient init | model={model} | base_url={self.base_url} | "
             f"extra_body_keys={list(self.extra_body_default)}"
         )
+
+    def _ensure_real_tokenizer_fallback(self) -> None:
+        """Last-resort attempt to load the project's real tokenizer.json.
+        Used when someone creates an LLMClient directly (or via TEST mock server)
+        without having gone through ClientFactory's priming logic.
+        """
+        from pathlib import Path
+        from neuralcore.utils.text_tokenizer import TextTokenizer
+
+        if TextTokenizer._initialized:
+            return
+
+        # Clear any partial failed state from a previous bad attempt
+        TextTokenizer._instance = None
+        TextTokenizer._initialized = False
+
+        candidates = [
+            Path.cwd() / "data" / "tokenizer" / "tokenizer.json",
+            Path("data/tokenizer/tokenizer.json"),
+            Path.home() / ".neuralcore" / "data" / "tokenizer" / "tokenizer.json",
+        ]
+        # Also try relative to common project roots if possible
+        try:
+            root = Path(__file__).resolve().parents[4]  # rough guess to repo root
+            candidates.append(root / "data" / "tokenizer" / "tokenizer.json")
+        except Exception:
+            pass
+
+        for cand in candidates:
+            if cand.exists():
+                try:
+                    TextTokenizer(tokenizer_source=str(cand.resolve()))
+                    logger.info(f"Auto-loaded real tokenizer fallback from {cand}")
+                    return
+                except Exception:
+                    pass
 
     def stop_stream(self) -> bool:
         """Request to interrupt only the active streaming call."""
