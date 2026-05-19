@@ -149,10 +149,10 @@ class Agent:
                 await self.context_manager.consolidator.load_reranker()
                 logger.info("   ✓ KnowledgeConsolidator reranker loaded")
 
-            # 3. Start persistent message queue listener
+            # 3. (removed) Queue listener — notifications now emitted directly from post_* methods
+            #    to eliminate Event clear/set races with wait_for_incoming_message (caused UI freeze on post).
             await self.start_background_queue_listener()
             logger.info("   ✓ Background queue listener started")
-
             # 4. Optional: Pre-load tools if not already loaded (can be heavy)
             if not self.action_manager.loaded_tools:
                 self.attach_tools()
@@ -324,6 +324,7 @@ class Agent:
             content_str = str(content_str)
 
         await self.add_message(role_str, content_str)
+        self._notify_background("message_posted", {"role": role_str, "content": content_str[:300]})
         logger.debug(f"Agent '{self.name}' ← user message posted")
 
     async def post_system_message(self, message: str | Dict[str, Any]) -> None:
@@ -342,6 +343,7 @@ class Agent:
             content_str = str(content_str)
 
         await self.add_message(role_str, content_str)  # This triggers auto-sync
+        self._notify_background("system_message_posted", {"role": role_str, "content": content_str[:300]})
         logger.debug(f"Agent '{self.name}' ← system message posted")
 
     async def post_control(self, control: str | Dict[str, Any]) -> None:
@@ -373,6 +375,7 @@ class Agent:
 
         await self.add_message("system", clean_content)
 
+        self._notify_background("control_posted", {"event": event_name, "raw": str(item)[:200]})
         logger.debug(
             f"Agent '{self.name}' ← control posted as system | event={event_name}"
         )
@@ -434,6 +437,9 @@ class Agent:
                         if contains not in content_str:
                             continue
 
+                    # consume the dequeued item
+                    self.message_queue.task_done()
+
                     if return_content_only:
                         # Return clean content string only
                         if isinstance(msg, dict):
@@ -479,6 +485,18 @@ class Agent:
             f"[BACKGROUND EVENT] {self.name} | event='{event}' | "
             f"payload={str(payload)[:400]}{'...' if len(str(payload)) > 400 else ''}"
         )
+
+    def _notify_background(self, event: str, payload: Any) -> None:
+        """Fire-and-forget notification to on_background_event (and any override like WS bridge).
+        Replaces the fragile shared-event queue listener to avoid clear()/set() races that
+        caused wait_for_incoming_message to block forever after posts in UI chat mode.
+        """
+        try:
+            # Use create_task so we don't block the poster; safe because on_background is async
+            asyncio.create_task(self.on_background_event(event, payload))
+        except Exception:
+            # Never let notification failure break core messaging
+            pass
 
     async def get_agent_status(self) -> Dict[str, Any]:
         try:
