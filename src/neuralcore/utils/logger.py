@@ -5,7 +5,7 @@ from pathlib import Path
 from collections import deque
 
 import aiofiles
-from neuralcore.utils.config import ConfigLoader
+from neuralcore.utils.config import get_loader
 
 
 class Logger:
@@ -30,7 +30,7 @@ class Logger:
     @classmethod
     def _load_config(cls) -> dict:
         if cls._config is None:
-            cls._config = ConfigLoader().get_logging_config()
+            cls._config = get_loader().get_logging_config()
         return cls._config
 
     @classmethod
