@@ -880,6 +880,13 @@ class Agent:
                             "agent_id": self.agent_id,
                         },
                     )
+                    # [FIX] Re-signal if the queue still has items after our
+                    # notification pass.  Without this, other awaiters of the
+                    # same _input_event (like wait_for_incoming_message inside
+                    # chat_tool_loop) would miss the notification and block
+                    # forever, because this consumer clears the event first.
+                    if not self.message_queue.empty():
+                        self._input_event.set()
                 # No task_done() needed because we never called get()
         except asyncio.CancelledError:
             pass

@@ -21,14 +21,16 @@ class ConfigLoader:
 
     def __init__(self, cli_path: str | None = None, app_root: Path | None = None):
         self.app_root = app_root or Path.cwd()
+        # [FIX] _mock_server must be initialized BEFORE parse_config because
+        # parse_config → _normalize_test_addresses checks self._mock_server.
+        self._mock_server: Optional["MockLLMServer"] = None
+        self.agent_factory = None  # created on first use
+        self.workflow_factory = None
+
         # Universal parse on init — keeps old behavior but now supports in-memory too
         self.config: dict[str, Any] = self.parse_config(cli_path)
         # Extra safety pass (parse_config already normalized, but harmless)
         self._normalize_test_addresses()
-
-        self.agent_factory = None  # created on first use
-        self.workflow_factory = None
-        self._mock_server: Optional["MockLLMServer"] = None
 
         print(
             f"[DEBUG] ConfigLoader initialized with {len(self.config)} top-level keys"

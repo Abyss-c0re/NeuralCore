@@ -1400,6 +1400,15 @@ class WorkflowEngine:
 
         await self.agent.add_message("user", user_prompt)
 
+        # [FIX] Re-queue the user prompt into the (freshly reset) message queue.
+        # _reset_state() above creates a new empty queue, but workflow steps like
+        # chat_tool_loop read from that queue via wait_for_incoming_message().
+        # Without this, the first message is lost and the loop blocks forever.
+        if user_prompt and user_prompt.strip():
+            await self.agent.message_queue.put({"role": "user", "content": user_prompt})
+            self.agent._input_counter += 1
+            self.agent._input_event.set()
+
         iteration = 0
         state = self.agent.state
 

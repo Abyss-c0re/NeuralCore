@@ -1,0 +1,78 @@
+# Multi-agent test configuration.
+# Uses base_url: TEST to auto-deploy the built-in MockLLMServer from neuralcore.
+# Two agents (agent_alpha, agent_beta) are defined so the Hub can deploy and
+# test WebSocket-based inter-agent communication.
+
+clients:
+  main:
+    type: chat
+    base_url: TEST                     # ← auto-deploys MockLLMServer
+    model: mock-model
+    api_key: test-key
+    temperature: 0.7
+    max_tokens: 4096
+    enable_thinking: false
+    system_prompt: "You are a helpful test assistant."
+    tokenizer: data/tokenizer/tokenizer.json
+
+embeddings:
+  use_fastembed: true
+  fastembed_model: "BAAI/bge-small-en-v1.5"
+
+tools: {}
+
+workflows:
+  deploy_agent:
+    name: "deploy_agent"
+    description: "Persistent conversation mode for deployed agents"
+    steps:
+      - name: deploy_agent_loop
+
+agents:
+  agent_alpha:
+    id: "agent_alpha"
+    name: "Alpha Agent"
+    description: "First test agent — sends a prompt to Beta"
+    client: main
+    max_iterations: 10
+    temperature: 0.7
+    max_tokens: 4096
+    system_prompt: "You are Alpha, a helpful agent."
+    tool_sets: []
+    workflow: deploy_agent
+
+  agent_beta:
+    id: "agent_beta"
+    name: "Beta Agent"
+    description: "Second test agent — receives and responds"
+    client: main
+    max_iterations: 10
+    temperature: 0.7
+    max_tokens: 4096
+    system_prompt: "You are Beta, a responsive agent."
+    tool_sets: []
+    workflow: deploy_agent
+
+settings:
+  default_max_sub_agents: 2
+  sub_agent_temperature: 0.3
+  sub_agent_max_iterations: 5
+
+app:
+  max_iterations: 10
+  max_tokens: 4096
+  logging_enabled: true
+  log_level: debug
+  log_to_file: true
+  log_to_ui: false
+  log_file: /tmp/neuralcore_multi_test.log
+  tool_info_level: compact
+  cognition:
+    reranker_enabled: false
+    novelty_threshold: 0.82
+    novelty_k: 100
+    max_rerank_candidates: 100
+    semantic_weight: 0.45
+    recency_decay_lambda: 0.06
+  knowledge_base:
+    enabled: false
