@@ -1,21 +1,75 @@
-# src/neuralcore/__init__.py
-import pkgutil
-import importlib
-import inspect
+"""
+NeuralCore - Modular AI Agent Framework
 
-__all__ = []
+Core components for building autonomous agents with tool use,
+multi-agent coordination, knowledge management, and workflows.
+"""
 
-# Iterate over all submodules in the package
-for loader, module_name, is_pkg in pkgutil.iter_modules(__path__):
-    full_name = f"{__name__}.{module_name}"
-    module = importlib.import_module(full_name)
-    
-    # Add submodule itself
-    globals()[module_name] = module
-    __all__.append(module_name)
-    
-    # Add all classes and functions from the module
-    for name, obj in inspect.getmembers(module):
-        if inspect.isclass(obj) or inspect.isfunction(obj):
-            globals()[name] = obj
-            __all__.append(name)
+from importlib.metadata import version, PackageNotFoundError
+
+try:
+    __version__ = version("neuralcore")
+except PackageNotFoundError:
+    __version__ = "0.1.0"
+
+# =============================================================================
+# Public API - Core Components
+# =============================================================================
+
+# Agents
+from .agents.core import Agent
+from .agents.factory import AgentFactory
+from .agents.state import AgentState
+
+# Clients
+from .clients.factory import get_clients, get_client_factory
+from .clients.client import LLMClient
+
+# Configuration & Logging
+from .utils.config import get_loader, ConfigLoader
+from .utils.logger import Logger
+from .utils.prompt_builder import PromptBuilder
+
+# Workflows
+from .workflows.engine import WorkflowEngine
+from .workflows.registry import workflow
+
+# Actions / Tools
+from .actions.registry import registry, tool, sequenced
+from .actions.manager import (
+    ActionRegistry,
+    DynamicActionManager,
+    ToolBrowser,
+)
+
+# Bridge (for external control / WebSocket)
+from .bridge.websocket import WebSocketBridge
+
+__all__ = [
+    "__version__",
+    # Agents
+    "Agent",
+    "AgentFactory",
+    "AgentState",
+    # Clients
+    "get_clients",
+    "get_client_factory",
+    "LLMClient",
+    # Config & Logging
+    "get_loader",
+    "ConfigLoader",
+    "Logger",
+    "PromptBuilder",
+    # Workflows
+    "WorkflowEngine",
+    "workflow",
+    # Actions
+    "registry",
+    "tool",
+    "sequenced",
+    "ActionRegistry",
+    "DynamicActionManager",
+    "ToolBrowser",
+    # Bridge
+    "WebSocketBridge",
+]
